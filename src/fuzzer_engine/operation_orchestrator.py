@@ -231,8 +231,7 @@ class OperationOrchestrator(IOperationOrchestrator):
         start_time = time.time()
         deadline = start_time + timeout
         
-        # Wait for cluster to stabilize
-        stabilization_wait = min(5.0, timeout)
+        stabilization_wait = min(3.0, max(1.0, timeout * 0.5))
         time.sleep(stabilization_wait)
 
         # Validate replication links with remaining timeout

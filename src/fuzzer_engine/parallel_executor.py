@@ -73,6 +73,9 @@ class ParallelExecutor:
                             buffer
                         )
                         immediate_chaos.append(result)
+                        # Record deferred chaos in history
+                        if isinstance(result, ChaosResult):
+                            self.chaos_coordinator.chaos_history.append(result)
                     
                     chaos_events = immediate_chaos
                     
