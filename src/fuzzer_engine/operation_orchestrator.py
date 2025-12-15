@@ -3,6 +3,7 @@ Operation Orchestrator - Executes cluster operations with timing and state manag
 """
 import time
 import logging
+import threading
 from typing import Dict, Optional
 from ..models import Operation, OperationType, ClusterStatus, ClusterConnection
 from ..interfaces import IOperationOrchestrator
@@ -20,6 +21,7 @@ class OperationOrchestrator(IOperationOrchestrator):
         self.cluster_connection = cluster_connection
         self.active_operations: Dict[str, Operation] = {}
         self.operation_counter = 0
+        self._state_lock = threading.Lock()  # Protect shared state in parallel execution
     
     def set_cluster_connection(self, cluster_connection: ClusterConnection):
         """Set or update cluster connection"""
@@ -33,10 +35,11 @@ class OperationOrchestrator(IOperationOrchestrator):
             log.error("No cluster connection available")
             return False
         
-        # Generate operation ID
-        self.operation_counter += 1
-        operation_id = f"op-{self.operation_counter}"
-        self.active_operations[operation_id] = operation
+        # Generate operation ID (thread-safe)
+        with self._state_lock:
+            self.operation_counter += 1
+            operation_id = f"op-{self.operation_counter}"
+            self.active_operations[operation_id] = operation
         
         try:
             # Wait before operation if specified
@@ -57,15 +60,18 @@ class OperationOrchestrator(IOperationOrchestrator):
                 log.info(f"Waiting {operation.timing.delay_after:.2f}s after operation")
                 time.sleep(operation.timing.delay_after)
             
-            # Remove from active operations
-            del self.active_operations[operation_id]
+            # Remove from active operations (thread-safe)
+            with self._state_lock:
+                if operation_id in self.active_operations:
+                    del self.active_operations[operation_id]
             
             return success
             
         except Exception as e:
             log.error(f"Operation execution failed: {e}")
-            if operation_id in self.active_operations:
-                del self.active_operations[operation_id]
+            with self._state_lock:
+                if operation_id in self.active_operations:
+                    del self.active_operations[operation_id]
             return False
     
     def _execute_failover(self, operation: Operation, log=None) -> bool:
@@ -223,21 +229,35 @@ class OperationOrchestrator(IOperationOrchestrator):
         
         log.info(f"Waiting for operation completion (timeout: {timeout:.2f}s)")
         start_time = time.time()
+        deadline = start_time + timeout
         
         # Wait for cluster to stabilize
-        time.sleep(min(5.0, timeout))
+        stabilization_wait = min(5.0, timeout)
+        time.sleep(stabilization_wait)
 
-        # Validate replication links after cluster is healthy
+        # Validate replication links with remaining timeout
         max_retries = 3
         for attempt in range(max_retries):
+            if time.time() >= deadline:
+                log.warning(f"Operation timeout ({timeout:.2f}s) exceeded")
+                return False
+            
             live_nodes = [n for n in self.cluster_connection.initial_nodes if n.process is None or n.process.poll() is None]
             if self.cluster_manager.check_replication_links(live_nodes):
                 elapsed = time.time() - start_time
                 log.info(f"Operation completed successfully in {elapsed:.2f}s")
                 return True
+            
             if attempt < max_retries - 1:
-                log.debug(f"Replication link check attempt {attempt + 1} failed, retrying in 3s")
-                time.sleep(3)
+                remaining_time = deadline - time.time()
+                retry_delay = min(3.0, remaining_time)
+                
+                if retry_delay <= 0:
+                    log.warning(f"Operation timeout ({timeout:.2f}s) exceeded during retries")
+                    return False
+                
+                log.debug(f"Replication link check attempt {attempt + 1} failed, retrying in {retry_delay:.1f}s")
+                time.sleep(retry_delay)
 
         log.warning("Replication link check failed after all retries")
         return False

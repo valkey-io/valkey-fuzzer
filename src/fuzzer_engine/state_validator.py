@@ -1193,8 +1193,8 @@ class TopologyValidator:
             if success:
                 logger.info(
                     f"Topology validation passed: {actual_primaries} primaries, "
-                    f"{actual_replicas} replicas (expected {expected_topology.num_primaries} "
-                    f"primaries, {expected_topology.num_replicas} replicas)"
+                    f"{actual_replicas} replicas (expected {adjusted_expected_primaries} "
+                    f"primaries, {adjusted_expected_replicas} replicas)"
                 )
             else:
                 logger.error(

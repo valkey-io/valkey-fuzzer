@@ -47,7 +47,7 @@ class BaseChaosEngine(IChaosEngine, ABC):
             # Get process ID for the target node
             process_id = self._get_node_process_id(target_node)
             if not process_id:
-                chaos_result.error_message = f"Could not find process for node {target_node.node_id}"
+                chaos_result.error_message = f"Could not find process for {target_node.node_id}"
                 self.chaos_history.append(chaos_result)
                 return chaos_result
             
@@ -58,7 +58,7 @@ class BaseChaosEngine(IChaosEngine, ABC):
             chaos_result.end_time = time.time()
             
             if success:
-                log.info(f"Successfully injected {chaos_type.value} chaos on node {target_node.node_id} (PID: {process_id})")
+                log.info(f"Successfully injected {chaos_type.value} chaos on {target_node.node_id} (PID: {process_id})")
                 self.active_chaos[chaos_id] = chaos_result
             else:
                 chaos_result.error_message = f"Failed to kill process {process_id} with {chaos_type.value}"
