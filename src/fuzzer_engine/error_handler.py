@@ -125,7 +125,7 @@ class ErrorHandler:
         
         for attempt in range(config.max_attempts):
             try:
-                logger.info(f"Executing {operation_name} (attempt {attempt + 1}/{config.max_attempts})")
+                logger.debug(f"Executing {operation_name} (attempt {attempt + 1}/{config.max_attempts})")
                 
                 result = operation(**kwargs)
                 

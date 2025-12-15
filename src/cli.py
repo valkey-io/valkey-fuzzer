@@ -10,8 +10,6 @@ import yaml
 import traceback
 import time
 import logging
-import logging.handlers
-import queue
 from pathlib import Path
 from typing import Dict, Any
 from datetime import datetime
@@ -58,7 +56,6 @@ class FuzzerCLI:
                 print(f"Example: valkey-fuzzer cluster --seed 42 --config config.yaml")
                 return 1
         
-        # Display test parameters
         seed = args.seed
         if seed:
             print(f"Seed: {seed} (reproducible)")
@@ -181,7 +178,6 @@ class FuzzerCLI:
             generator.validate_scenario(scenario)
             print("Scenario validated successfully")
             
-            # Print scenario summary
             print("\n" + "=" * 60)
             print("Scenario Summary")
             print("=" * 60)
@@ -486,6 +482,9 @@ Examples:
   
   # Run with configuration file and output results to another file
   valkey-fuzzer cluster --seed 42 --config config.yaml --output results.json
+
+  # Verbose output
+  valkey-fuzzer cluster --seed 42 --verbose
   
   # Run DSL-based test
   valkey-fuzzer cluster --dsl examples/simple_failover.yaml
@@ -495,9 +494,6 @@ Examples:
   
   # Validate DSL file
   valkey-fuzzer validate examples/simple_failover.yaml
-  
-  # Verbose output
-  valkey-fuzzer cluster --seed 42 --verbose
         """
     )
     
@@ -585,18 +581,11 @@ Examples:
 def main():
     """Main entry point for CLI"""
 
-    log_queue = queue.Queue(-1)
-    queue_handler = logging.handlers.QueueHandler(log_queue)
-
-    root = logging.getLogger()
-    root.handlers.clear()
-    root.setLevel(logging.INFO)
-    root.addHandler(queue_handler)
-
-    stream_handler = logging.StreamHandler()
-    stream_handler.setFormatter(logging.Formatter('%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s'))
-    listener = logging.handlers.QueueListener(log_queue, stream_handler, respect_handler_level=True)
-    listener.start()
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s',
+        handlers=[logging.StreamHandler()]
+    )
     
     parser = create_parser()
     args = parser.parse_args()
@@ -623,9 +612,7 @@ def main():
                 print("  valkey-fuzzer cluster --dsl test.yaml")
                 return 1
             
-            # Determine which cluster test mode to run
             if args.dsl:
-                # Run DSL-based test
                 dsl_args = type('obj', (object,), {
                     'file': args.dsl,
                     'output': args.output,
@@ -634,7 +621,6 @@ def main():
                 })
                 return cli.run_dsl_test(dsl_args)
             else:
-                # Run random test (default)
                 return cli.run_random_test(args)
         elif args.command == 'validate':
             return cli.validate_dsl(args)

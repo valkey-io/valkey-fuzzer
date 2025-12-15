@@ -670,9 +670,6 @@ class ClusterManager:
     
     def form_cluster(self, nodes_in_cluster: List[NodeInfo], cluster_id: str) -> ClusterConnection:
         """Form a complete cluster from spawned nodes"""
-        logger.info("")
-        logger.info("FORMING CLUSTER")
-        
         try:
             self.reset_cluster_state(nodes_in_cluster)
             self.cluster_meet(nodes_in_cluster)

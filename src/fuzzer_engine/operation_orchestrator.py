@@ -15,9 +15,7 @@ class OperationOrchestrator(IOperationOrchestrator):
     """Orchestrates execution of cluster operations"""
     
     def __init__(self, cluster_connection: Optional[ClusterConnection] = None):
-        """
-        Initialize operation orchestrator
-        """
+        """Initialize operation orchestrator"""
         self.cluster_manager = ClusterManager()
         self.cluster_connection = cluster_connection
         self.active_operations: Dict[str, Operation] = {}
@@ -28,9 +26,7 @@ class OperationOrchestrator(IOperationOrchestrator):
         self.cluster_connection = cluster_connection
     
     def execute_operation(self, operation: Operation, cluster_id: str, log_buffer=None) -> bool:
-        """
-        Execute a single cluster operation
-        """
+        """Execute a single cluster operation"""
         log = log_buffer if log_buffer else logging
         
         if not self.cluster_connection:
@@ -73,9 +69,7 @@ class OperationOrchestrator(IOperationOrchestrator):
             return False
     
     def _execute_failover(self, operation: Operation, log=None) -> bool:
-        """
-        Execute failover operation
-        """
+        """Execute failover operation"""
         if log is None:
             log = logging
         
@@ -192,9 +186,7 @@ class OperationOrchestrator(IOperationOrchestrator):
     
 
     def validate_operation_preconditions(self, operation: Operation, cluster_status: ClusterStatus) -> bool:
-        """
-        Validate that operation can be executed
-        """
+        """Validate that operation can be executed"""
         if not cluster_status.is_healthy:
             logging.warning("Cluster is not healthy")
             return False
@@ -222,9 +214,7 @@ class OperationOrchestrator(IOperationOrchestrator):
         return True
     
     def wait_for_operation_completion(self, operation: Operation, cluster_id: str, timeout: float, log=None) -> bool:
-        """
-        Wait for operation to complete and validate cluster state
-        """
+        """Wait for operation to complete and validate cluster state"""
         if log is None:
             log = logging
         

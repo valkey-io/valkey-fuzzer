@@ -231,13 +231,8 @@ class ClusterCoordinator:
             cluster_instance = cluster_data['instance']
             config_manager = cluster_data['config_manager']
                         
-            # Close cluster manager connections
             self.cluster_manager.close_connections()
-            
-            # Cleanup cluster resources
             config_manager.cleanup_cluster(cluster_instance.nodes)
-            
-            # Remove from active clusters
             del self.active_clusters[cluster_id]
             
             return True

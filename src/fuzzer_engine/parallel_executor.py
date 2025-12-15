@@ -19,7 +19,7 @@ class ParallelExecutor:
         self.chaos_coordinator = chaos_coordinator
         self.fuzzer_logger = fuzzer_logger
     
-    def execute_operations_parallel(self, operations: List[Operation], chaos_config: ChaosConfig, cluster_connection, cluster_id: str) -> Tuple[int, List[ChaosResult]]:
+    def execute_operations_parallel(self, operations: List[Operation], chaos_config: ChaosConfig, cluster_connection, cluster_id: str) -> Tuple[int, List[ChaosResult], List]:
         """Execute operations in parallel by shard with buffered logging"""
         
         logger.info(f"Starting parallel execution of {len(operations)} operations")
@@ -60,11 +60,7 @@ class ParallelExecutor:
                     deferred_chaos = [c for c in chaos_results if isinstance(c, dict) and c.get('deferred')]
                     
                     # Execute operation with buffered logging
-                    success = self.operation_orchestrator.execute_operation(
-                        operation,
-                        cluster_id,
-                        log_buffer=buffer
-                    )
+                    success = self.operation_orchestrator.execute_operation(operation, cluster_id, log_buffer=buffer)
                     
                     # Inject deferred chaos after operation completes
                     for deferred in deferred_chaos:
