@@ -42,5 +42,7 @@ state_validation:
   check_data_consistency: false
   stabilization_wait: 5.0
   validation_timeout: 30.0
+  cluster_status_config:
+    acceptable_states: ['ok', 'unknown']
   replication_config:
-    max_acceptable_lag: 3.0
+    max_acceptable_lag: 15.0

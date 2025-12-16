@@ -2,13 +2,13 @@
 # This file demonstrates the DSL format for defining reproducible test scenarios
 
 scenario_id: "example-failover-with-chaos"
-seed: 42  # Optional: for reproducibility
+seed: 2207541902  # Successful random scenario
 
 # Cluster configuration
 cluster:
-  num_shards: 3
-  replicas_per_shard: 1
-  base_port: 7000
+  num_shards: 16
+  replicas_per_shard: 2
+  base_port: 7669
   base_data_dir: "/tmp/valkey-fuzzer"
   valkey_binary: "/usr/local/bin/valkey-server"
   enable_cleanup: true
@@ -16,22 +16,31 @@ cluster:
 # Operations to execute
 operations:
   - type: "failover"
-    target_node: "shard-0-primary"
-    parameters:
-      force: false
-    timing:
-      delay_before: 1.0
-      timeout: 30.0
-      delay_after: 2.0
-  
-  - type: "failover"
-    target_node: "shard-1-primary"
+    target_node: "shard-7-primary"
     parameters:
       force: true
     timing:
-      delay_before: 0.5
-      timeout: 30.0
-      delay_after: 1.0
+      delay_before: 0.46
+      timeout: 55.56
+      delay_after: 2.37
+  
+  - type: "failover"
+    target_node: "shard-10-primary"
+    parameters:
+      force: true
+    timing:
+      delay_before: 3.52
+      timeout: 20.57
+      delay_after: 2.75
+      
+  - type: "failover"
+    target_node: "shard-2-primary"
+    parameters:
+      force: false
+    timing:
+      delay_before: 2.44
+      timeout: 44.67
+      delay_after: 1.71
 
 # Chaos configuration
 chaos:
@@ -39,20 +48,18 @@ chaos:
   process_chaos_type: "sigkill"
   
   target_selection:
-    strategy: "primary_only"  # Options: random, primary_only, replica_only, specific
+    strategy: "replica_only"  # Options: random, primary_only, replica_only, specific
     # specific_nodes:  # Only used when strategy is "specific"
-    #   - "node-1"
-    #   - "node-2"
   
   timing:
     delay_before_operation: 0.5
     delay_after_operation: 0.5
-    chaos_duration: 10.0
+    chaos_duration: 9.87
   
   coordination:
     chaos_before_operation: false
-    chaos_during_operation: true
-    chaos_after_operation: false
+    chaos_during_operation: false
+    chaos_after_operation: true
 
 # State validation configuration
 state_validation:
