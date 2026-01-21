@@ -55,25 +55,27 @@ class ShardLogValidator:
             r"I'm a sub-replica! Reconfiguring myself"
         ]
     
-    def validate_affected_shards(self, cluster_nodes: List[NodeInfo], operations: List[Operation], killed_nodes: Set[str]) -> LogValidationResult:
-        """Validate logs for shards affected by operations or chaos"""
+    def validate_affected_shards(self, cluster_nodes: List[NodeInfo], operations: List[Operation], nodes_killed_by_chaos: Set[str], shards_with_primary_killed: Set[int]) -> LogValidationResult:
+        """Validate logs for shards affected by operations and chaos"""
         
         logger.info("Starting log validation for affected shards")
         
         findings = []
-        affected_shards = self._get_affected_shards(operations, killed_nodes, cluster_nodes)
+        affected_shards = self._get_affected_shards(operations, nodes_killed_by_chaos, cluster_nodes)
         
         logger.info(f"Validating logs for {len(affected_shards)} affected shards: {affected_shards}")
         
+        findings.extend(self._validate_failure_detection(cluster_nodes, nodes_killed_by_chaos))
+        
         for shard_id in affected_shards:
-            shard_nodes = [n for n in cluster_nodes if n.shard_id == shard_id]
+            nodes_in_shard = [n for n in cluster_nodes if n.shard_id == shard_id]
             
             # Check if shard had explicit failover or chaos-triggered failover
             had_explicit_failover = self._shard_had_failover(shard_id, operations, cluster_nodes)
-            had_primary_killed = self._shard_had_primary_killed(shard_id, killed_nodes, cluster_nodes)
+            had_primary_killed = shard_id in shards_with_primary_killed
             
             if had_explicit_failover or had_primary_killed:
-                findings.extend(self._validate_failover(shard_nodes))
+                findings.extend(self._validate_failover(nodes_in_shard))
         
         for finding in findings:
             if finding.severity == 'error':
@@ -85,16 +87,14 @@ class ShardLogValidator:
         
         return LogValidationResult(success=success, findings=findings, shards_checked=len(affected_shards))
     
-    def _get_affected_shards(self, operations: List[Operation], killed_nodes: Set[str], cluster_nodes: List[NodeInfo]) -> Set[int]:
+    def _get_affected_shards(self, operations: List[Operation], nodes_killed_by_chaos: Set[str], cluster_nodes: List[NodeInfo]) -> Set[int]:
         """Get all the shard IDs affected by operations or chaos"""
-        affected = set()
+        affected_shards = set()
         
-        # Build lookup maps for all identifier types
         node_id_to_shard = {node.node_id: node.shard_id for node in cluster_nodes}
         port_to_shard = {str(node.port): node.shard_id for node in cluster_nodes}
         cluster_id_to_shard = {node.cluster_node_id: node.shard_id for node in cluster_nodes if node.cluster_node_id}
         
-        # Find shards with failover operations
         for op in operations:
             # Parse shard-pattern targets like "shard-4-primary"
             if 'shard-' in op.target_node:
@@ -102,29 +102,26 @@ class ShardLogValidator:
                     parts = op.target_node.split('-')
                     if len(parts) >= 3 and parts[0] == 'shard':
                         shard_id = int(parts[1])
-                        affected.add(shard_id)
+                        affected_shards.add(shard_id)
                         continue
                 except (ValueError, IndexError):
-                    pass
-            
-            # Try all identifier types
-            shard_id = (node_id_to_shard.get(op.target_node) or 
-                       port_to_shard.get(op.target_node) or 
-                       cluster_id_to_shard.get(op.target_node))
-            if shard_id is not None:
-                affected.add(shard_id)
+                    pass          
+            else:
+                # In the Operation Orchestrator we also store the targets with their port and cluster_ID
+                shard_id = (node_id_to_shard.get(op.target_node) or port_to_shard.get(op.target_node) or cluster_id_to_shard.get(op.target_node))
+                if shard_id is not None:
+                    affected_shards.add(shard_id)
         
-        # Find shards with killed nodes
+        # Find shards with nodes killed by chaos
         for node in cluster_nodes:
             node_addr = f"{node.host}:{node.port}"
-            if node_addr in killed_nodes:
-                affected.add(node.shard_id)
+            if node_addr in nodes_killed_by_chaos:
+                affected_shards.add(node.shard_id)
         
-        return affected
+        return affected_shards
     
     def _shard_had_failover(self, shard_id: int, operations: List[Operation], cluster_nodes: List[NodeInfo]) -> bool:
         """Check if shard had a failover operation"""
-        # Build lookup maps for all identifier types
         node_id_to_shard = {node.node_id: node.shard_id for node in cluster_nodes}
         port_to_shard = {str(node.port): node.shard_id for node in cluster_nodes}
         cluster_id_to_shard = {node.cluster_node_id: node.shard_id for node in cluster_nodes if node.cluster_node_id}
@@ -133,7 +130,6 @@ class ShardLogValidator:
             if op.type.value != 'failover':
                 continue
             
-            # Parse shard-pattern targets like "shard-4-primary"
             if 'shard-' in op.target_node:
                 try:
                     parts = op.target_node.split('-')
@@ -144,39 +140,63 @@ class ShardLogValidator:
                         continue
                 except (ValueError, IndexError):
                     pass
-            
-            # Try all identifier types
-            op_shard_id = (node_id_to_shard.get(op.target_node) or 
-                          port_to_shard.get(op.target_node) or 
-                          cluster_id_to_shard.get(op.target_node))
-            if op_shard_id == shard_id:
-                return True
-        
+            else:
+                op_shard_id = (node_id_to_shard.get(op.target_node) or port_to_shard.get(op.target_node) or cluster_id_to_shard.get(op.target_node))
+                if op_shard_id == shard_id:
+                    return True
+                
         return False
     
-    def _shard_had_primary_killed(self, shard_id: int, killed_nodes: Set[str], cluster_nodes: List[NodeInfo]) -> bool:
-        """Check if shard had a primary killed by chaos (detected by finding killed nodes that aren't current primaries)"""
-        shard_nodes = [n for n in cluster_nodes if n.shard_id == shard_id]
+    def _validate_failure_detection(self, cluster_nodes: List[NodeInfo], nodes_killed_by_chaos: Set[str]) -> List[LogFinding]:
+        """Check for possible failure logs in nodes"""
+        # Node X () possibly failing is the initial suspicion (pfail)
+        # FAIL message received from Node Y about Node X and gossip will spread
+        # Node X will then we marked as failing once quorum is reached
+        findings = []
         
-        # Check if any killed node in this shard is not the current primary
-        # (indicates the original primary was killed and a replica promoted)
-        for node in shard_nodes:
+        if not nodes_killed_by_chaos:
+            return findings
+        
+        killed_node_ids = {}
+        for node in cluster_nodes:
             node_addr = f"{node.host}:{node.port}"
-            if node_addr in killed_nodes and node.role != 'primary':
-                # A non-primary node was killed, but if there's a primary now,
-                # it means automatic failover occurred
-                has_primary = any(n.role == 'primary' for n in shard_nodes)
-                if has_primary:
-                    return True
+            if node_addr in nodes_killed_by_chaos and node.cluster_node_id:
+                killed_node_ids[node_addr] = node.cluster_node_id
         
-        return False
-
+        # Check other shards' logs for failure detection messages
+        for killed_addr, killed_cluster_id in killed_node_ids.items():
+            detected = False
+            
+            # Check logs of nodes NOT in the killed node's shard
+            for node in cluster_nodes:
+                node_addr = f"{node.host}:{node.port}"
+                if node_addr in nodes_killed_by_chaos:
+                    continue  # Skip killed nodes
+                
+                if not os.path.exists(node.log_file):
+                    continue
+                
+                log_lines = self._read_log_tail(node.log_file, lines=200)
+                pattern = f"Marking node {killed_cluster_id}.*as failing.*quorum reached"
+                if self._has_pattern(log_lines, pattern):
+                    detected = True
+                    break
+            
+            if not detected:
+                findings.append(LogFinding(
+                    node_id=killed_addr,
+                    shard_id=-1,
+                    severity='error',
+                    message=f'Cluster did not detect failure of killed node {killed_addr} (no "quorum reached" message found)',
+                    log_line=''
+                ))
+        
+        return findings
     
     def _validate_failover(self, affected_nodes: List[NodeInfo]) -> List[LogFinding]:
         """Check that the failover completed successfully by parsing the logs"""
         findings = []
         
-        # Build mapping of Valkey's internal shard IDs to our shard_id
         valkey_shard_to_our_shard = {}
         for node in affected_nodes:
             log_lines = self._read_log_tail(node.log_file, lines=500) if os.path.exists(node.log_file) else []
