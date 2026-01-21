@@ -113,12 +113,28 @@ class ShardLogValidator:
     
     def _shard_had_failover(self, shard_id: int, operations: List[Operation], cluster_nodes: List[NodeInfo]) -> bool:
         """Check if shard had a failover operation"""
-        node_to_shard = {node.node_id: node.shard_id for node in cluster_nodes}
-        
         for op in operations:
+            if op.type.value != 'failover':
+                continue
+            
+            # Parse shard-pattern targets like "shard-4-primary"
+            if 'shard-' in op.target_node:
+                try:
+                    parts = op.target_node.split('-')
+                    if len(parts) >= 3 and parts[0] == 'shard':
+                        op_shard_id = int(parts[1])
+                        if op_shard_id == shard_id:
+                            return True
+                        continue
+                except (ValueError, IndexError):
+                    pass
+            
+            # Fallback to node_id lookup
+            node_to_shard = {node.node_id: node.shard_id for node in cluster_nodes}
             op_shard_id = node_to_shard.get(op.target_node)
-            if op_shard_id == shard_id and op.type.value == 'failover':
+            if op_shard_id == shard_id:
                 return True
+        
         return False
 
     
@@ -175,17 +191,19 @@ class ShardLogValidator:
                                     ))
                                 break
                 
-                # Check for failover errors
-                for pattern in self.failover_error_patterns:
-                    matches = self._find_all_patterns(log_lines, pattern)
-                    if matches:
-                        findings.append(LogFinding(
-                            node_id=node.node_id,
-                            shard_id=node.shard_id,
-                            severity='error',
-                            message=f'Failover error detected',
-                            log_line=matches[0]
-                        ))
+                # Check for failover errors only if failover didn't succeed
+                has_promotion_any = any(self._has_pattern(log_lines, pattern) for pattern in self.failover_promotion_patterns)
+                if not has_promotion_any:
+                    for pattern in self.failover_error_patterns:
+                        matches = self._find_all_patterns(log_lines, pattern)
+                        if matches:
+                            findings.append(LogFinding(
+                                node_id=node.node_id,
+                                shard_id=node.shard_id,
+                                severity='error',
+                                message=f'Failover error detected',
+                                log_line=matches[0]
+                            ))
                 
                 # Check for replication issues
                 for pattern in self.replication_issue_patterns:
