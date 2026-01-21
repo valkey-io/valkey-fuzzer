@@ -2491,6 +2491,7 @@ class StateValidator:
                             None
                         )
                         if matching_node:
+                            matching_node.role = node_dict.get('role', matching_node.role)
                             node_info_list.append(matching_node)
                     
                     log_result = log_validator.validate_affected_shards(

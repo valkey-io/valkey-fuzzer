@@ -4,7 +4,7 @@ Validates Valkey node logs for affected shards
 import os
 import re
 import logging
-from typing import List, Set, Optional
+from typing import List, Set
 from dataclasses import dataclass
 from ..models import NodeInfo, Operation
 
@@ -17,7 +17,6 @@ class LogFinding:
     severity: str
     message: str
     log_line: str
-    timestamp: Optional[str] = None
 
 @dataclass
 class LogValidationResult:
@@ -42,17 +41,24 @@ class ShardLogValidator:
             r"Failover election won",
             r"configEpoch set to \d+ after successful failover",
             r"Failover auth granted",
-            r"manually failed over"
         ]
         
         self.split_brain_patterns = [r"multiple.*primary.*same.*shard"]
         
-        self.stuck_election_patterns = [r"Currently unable to failover.*Waiting for votes"]
+        self.failover_error_patterns = [
+            r"Failover attempt expired",
+            r"Manual failover timed out",
+            r"Failover election in progress for epoch 0"
+        ]
+        
+        self.replication_issue_patterns = [
+            r"I'm a sub-replica! Reconfiguring myself"
+        ]
     
     def validate_affected_shards(self, cluster_nodes: List[NodeInfo], operations: List[Operation], killed_nodes: Set[str]) -> LogValidationResult:
-        """Validate logs only for shards affected by operations or chaos"""
+        """Validate logs for shards affected by operations or chaos"""
         
-        logger.info("Starting node log validation for affected shards")
+        logger.info("Starting log validation for affected shards")
         
         findings = []
         affected_shards = self._get_affected_shards(operations, killed_nodes, cluster_nodes)
@@ -64,7 +70,6 @@ class ShardLogValidator:
             
             # Check failover completion
             if self._shard_had_failover(shard_id, operations, cluster_nodes):
-                logger.debug(f"Validating failover for shard {shard_id}")
                 findings.extend(self._validate_failover(shard_nodes))
         
         for finding in findings:
@@ -78,16 +83,27 @@ class ShardLogValidator:
         return LogValidationResult(success=success, findings=findings, shards_checked=len(affected_shards))
     
     def _get_affected_shards(self, operations: List[Operation], killed_nodes: Set[str], cluster_nodes: List[NodeInfo]) -> Set[int]:
-        """Get set of shard IDs affected by operations or chaos"""
+        """Get all the shard IDs affected by operations or chaos"""
         affected = set()
         
-        node_to_shard = {node.node_id: node.shard_id for node in cluster_nodes}
-        
+        # Find shards with failover operations
         for op in operations:
+            if 'shard-' in op.target_node:
+                try:
+                    parts = op.target_node.split('-')
+                    if len(parts) >= 3 and parts[0] == 'shard':
+                        shard_id = int(parts[1])
+                        affected.add(shard_id)
+                        continue
+                except (ValueError, IndexError):
+                    pass
+            
+            node_to_shard = {node.node_id: node.shard_id for node in cluster_nodes}
             shard_id = node_to_shard.get(op.target_node)
             if shard_id is not None:
                 affected.add(shard_id)
         
+        # Find shards with killed nodes
         for node in cluster_nodes:
             node_addr = f"{node.host}:{node.port}"
             if node_addr in killed_nodes:
@@ -104,23 +120,15 @@ class ShardLogValidator:
             if op_shard_id == shard_id and op.type.value == 'failover':
                 return True
         return False
+
     
-    def _shard_had_kill(self, shard_id: int, killed_nodes: Set[str], cluster_nodes: List[NodeInfo]) -> bool:
-        """Check if shard had a node killed"""
-        for node in cluster_nodes:
-            if node.shard_id == shard_id:
-                node_addr = f"{node.host}:{node.port}"
-                if node_addr in killed_nodes:
-                    return True
-        return False
-    
-    def _validate_failover(self, shard_nodes: List[NodeInfo]) -> List[LogFinding]:
-        """Check failover completed successfully"""
+    def _validate_failover(self, affected_nodes: List[NodeInfo]) -> List[LogFinding]:
+        """Check that the failover completed successfully by parsing the logs"""
         findings = []
         
         # Build mapping of Valkey's internal shard IDs to our shard_id
         valkey_shard_to_our_shard = {}
-        for node in shard_nodes:
+        for node in affected_nodes:
             log_lines = self._read_log_tail(node.log_file, lines=500) if os.path.exists(node.log_file) else []
             for line in log_lines:
                 # Extract Valkey shard ID from formation messages
@@ -130,20 +138,16 @@ class ShardLogValidator:
                     valkey_shard_to_our_shard[valkey_shard_id] = node.shard_id
                     break
         
-        for node in shard_nodes:
+        for node in affected_nodes:
             if not os.path.exists(node.log_file):
                 logger.warning(f"Log file not found for node {node.node_id}: {node.log_file}")
                 continue
-            
+            # Validate that failover was successful
             try:
                 log_lines = self._read_log_tail(node.log_file, lines=200)
                 
-                # Check for failover success indicators on new primary
                 if node.role == 'primary':
-                    has_promotion = any(
-                        self._has_pattern(log_lines, pattern)
-                        for pattern in self.failover_promotion_patterns
-                    )
+                    has_promotion = any(self._has_pattern(log_lines, pattern) for pattern in self.failover_promotion_patterns)
                     
                     if not has_promotion:
                         findings.append(LogFinding(
@@ -171,6 +175,30 @@ class ShardLogValidator:
                                     ))
                                 break
                 
+                # Check for failover errors
+                for pattern in self.failover_error_patterns:
+                    matches = self._find_all_patterns(log_lines, pattern)
+                    if matches:
+                        findings.append(LogFinding(
+                            node_id=node.node_id,
+                            shard_id=node.shard_id,
+                            severity='error',
+                            message=f'Failover error detected',
+                            log_line=matches[0]
+                        ))
+                
+                # Check for replication issues
+                for pattern in self.replication_issue_patterns:
+                    matches = self._find_all_patterns(log_lines, pattern)
+                    if matches:
+                        findings.append(LogFinding(
+                            node_id=node.node_id,
+                            shard_id=node.shard_id,
+                            severity='warning',
+                            message=f'Replication topology issue detected',
+                            log_line=matches[0]
+                        ))
+                
                 # Check for split-brain indicators
                 for pattern in self.split_brain_patterns:
                     matches = self._find_all_patterns(log_lines, pattern)
@@ -182,41 +210,6 @@ class ShardLogValidator:
                             message=f'Possible split-brain detected',
                             log_line=matches[0]
                         ))
-            
-            except Exception as e:
-                logger.error(f"Error reading log for node {node.node_id}: {e}")
-        
-        return findings
-    
-    def _validate_kill_recovery(self, shard_nodes: List[NodeInfo], killed_nodes: Set[str]) -> List[LogFinding]:
-        """Check cluster recovered from node kill"""
-        findings = []
-        
-        for node in shard_nodes:
-            node_addr = f"{node.host}:{node.port}"
-            if node_addr in killed_nodes:
-                continue  # Skip killed nodes
-            
-            if not os.path.exists(node.log_file):
-                logger.warning(f"Log file not found for node {node.node_id}: {node.log_file}")
-                continue
-            
-            try:
-                log_lines = self._read_log_tail(node.log_file, lines=200)
-                
-                # Check for stuck election
-                for pattern in self.stuck_election_patterns:
-                    matches = self._find_all_patterns(log_lines, pattern)
-                    if matches:
-                        recent_lines = log_lines[-50:]
-                        if any(match in line for line in recent_lines for match in matches):
-                            findings.append(LogFinding(
-                                node_id=node.node_id,
-                                shard_id=node.shard_id,
-                                severity='error',
-                                message='Node may be stuck waiting for election',
-                                log_line=matches[-1]
-                            ))
             
             except Exception as e:
                 logger.error(f"Error reading log for node {node.node_id}: {e}")
