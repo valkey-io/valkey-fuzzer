@@ -155,12 +155,20 @@ class ShardLogValidator:
         return False
     
     def _shard_had_primary_killed(self, shard_id: int, killed_nodes: Set[str], cluster_nodes: List[NodeInfo]) -> bool:
-        """Check if shard had its primary killed by chaos"""
-        for node in cluster_nodes:
-            if node.shard_id == shard_id and node.initial_role == 'primary':
-                node_addr = f"{node.host}:{node.port}"
-                if node_addr in killed_nodes:
+        """Check if shard had a primary killed by chaos (detected by finding killed nodes that aren't current primaries)"""
+        shard_nodes = [n for n in cluster_nodes if n.shard_id == shard_id]
+        
+        # Check if any killed node in this shard is not the current primary
+        # (indicates the original primary was killed and a replica promoted)
+        for node in shard_nodes:
+            node_addr = f"{node.host}:{node.port}"
+            if node_addr in killed_nodes and node.role != 'primary':
+                # A non-primary node was killed, but if there's a primary now,
+                # it means automatic failover occurred
+                has_primary = any(n.role == 'primary' for n in shard_nodes)
+                if has_primary:
                     return True
+        
         return False
 
     
