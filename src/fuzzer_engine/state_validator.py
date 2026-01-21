@@ -507,9 +507,7 @@ class ClusterStatusValidator:
                         cluster_states[format_node_address(node)] = cluster_state
                         reachable_nodes.append(node)
 
-                        logger.debug(
-                            f"Node {node['host']}:{node['port']} reports cluster_state={cluster_state}"
-                        )
+                        logger.debug(f"Node {node['host']}:{node['port']} reports cluster_state={cluster_state}")
 
                 except Exception as e:
                     logger.debug(
@@ -769,9 +767,7 @@ class SlotCoverageValidator:
                     node_perspectives[node_address] = node_slot_view
                     nodes_queried += 1
 
-                    logger.debug(
-                        f"Node {node_address} reports {len(node_slot_view)} slots assigned"
-                    )
+                    logger.debug(f"Node {node_address} reports {len(node_slot_view)} slots assigned")
 
             if nodes_queried == 0:
                 return SlotCoverageValidation(
@@ -841,9 +837,7 @@ class SlotCoverageValidator:
             if unassigned_slots:
                 # Group consecutive unassigned slots into ranges for cleaner logging
                 ranges = group_slots_into_ranges(unassigned_slots)
-                logger.warning(
-                    f"Found {len(unassigned_slots)} unassigned slots: {ranges}"
-                )
+                logger.warning(f"Found {len(unassigned_slots)} unassigned slots: {ranges}")
 
             # Determine success based on configuration
             success = True
@@ -992,11 +986,14 @@ class TopologyValidator:
         cluster_connection: ClusterConnection,
         expected_topology: Optional['ExpectedTopology'],
         config: 'TopologyValidationConfig',
-        killed_nodes: Optional[set] = None
+        killed_nodes: Optional[set] = None,
+        killed_node_roles: Optional[dict] = None
     ) -> 'TopologyValidation':
         try:
             if killed_nodes is None:
                 killed_nodes = set()
+            if killed_node_roles is None:
+                killed_node_roles = {}
             
             # Get all nodes including failed ones to detect unexpected failures
             all_nodes = cluster_connection.get_current_nodes(include_failed=True)
@@ -1051,10 +1048,12 @@ class TopologyValidator:
             killed_replicas = 0
             
             for node in failed_nodes:
+                node_addr = format_node_address(node)
                 if is_node_killed_by_chaos(node, killed_nodes):
-                    if node['role'] == 'primary':
+                    role_at_death = killed_node_roles.get(node_addr, node['role'])
+                    if role_at_death == 'primary':
                         killed_primaries += 1
-                    elif node['role'] == 'replica':
+                    elif role_at_death == 'replica':
                         killed_replicas += 1
             
             total_killed_nodes = killed_primaries + killed_replicas
@@ -2423,16 +2422,15 @@ class StateValidator:
                 # 4. Topology validation
                 if self.config.check_topology and expected_topology:
                     if time.time() >= timeout_deadline:
-                        raise ValidationTimeoutError(
-                            f"Validation timeout ({self.config.validation_timeout}s) exceeded"
-                        )
+                        raise ValidationTimeoutError(f"Validation timeout ({self.config.validation_timeout}s) exceeded")
                     topology_result = self._run_validation_check(
                         check_name="topology",
                         validator_func=lambda: self.topology_validator.validate(
                             cluster_connection,
                             expected_topology,
                             self.config.topology_config,
-                            self.killed_nodes
+                            self.killed_nodes,
+                            self.killed_node_roles
                         ),
                         failed_checks=failed_checks,
                         error_messages=error_messages
@@ -2443,9 +2441,7 @@ class StateValidator:
                 # 5. View consistency validation
                 if self.config.check_view_consistency:
                     if time.time() >= timeout_deadline:
-                        raise ValidationTimeoutError(
-                            f"Validation timeout ({self.config.validation_timeout}s) exceeded"
-                        )
+                        raise ValidationTimeoutError(f"Validation timeout ({self.config.validation_timeout}s) exceeded")
                     view_consistency_result = self._run_validation_check(
                         check_name="view_consistency",
                         validator_func=lambda: self.view_consistency_validator.validate(
@@ -2461,9 +2457,7 @@ class StateValidator:
                 # 6. Data consistency validation
                 if self.config.check_data_consistency:
                     if time.time() >= timeout_deadline:
-                        raise ValidationTimeoutError(
-                            f"Validation timeout ({self.config.validation_timeout}s) exceeded"
-                        )
+                        raise ValidationTimeoutError(f"Validation timeout ({self.config.validation_timeout}s) exceeded")
                     data_consistency_result = self._run_validation_check(
                         check_name="data_consistency",
                         validator_func=lambda: self.data_consistency_validator.validate(

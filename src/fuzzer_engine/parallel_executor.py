@@ -66,11 +66,22 @@ class ParallelExecutor:
                     for deferred in deferred_chaos:
                         buffer.info(f"Injecting deferred chaos after operation (delay: {deferred['delay']:.2f}s)")
                         time.sleep(deferred['delay'])
+                        
+                        target_node = deferred['target_node']
+                        live_nodes_dict = cluster_connection.get_live_nodes()
+                        if live_nodes_dict:
+                            for node_dict in live_nodes_dict:
+                                if node_dict['node_id'] == target_node.cluster_node_id:
+                                    target_node.role = node_dict.get('role', target_node.role)
+                                    buffer.debug(f"Refreshed target node role to: {target_node.role}")
+                                    break
+                        
                         result = self.chaos_coordinator._inject_chaos(
-                            deferred['target_node'],
+                            target_node,
                             deferred['chaos_config'],
                             deferred['should_randomize'],
-                            buffer
+                            buffer,
+                            cluster_connection
                         )
                         immediate_chaos.append(result)
                         # Record deferred chaos in history

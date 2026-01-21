@@ -102,7 +102,7 @@ class ChaosCoordinator:
                 log.info(f"Injecting chaos before operation (delay: {delay_before:.2f}s)")
                 time.sleep(delay_before)
                 
-                result = self._inject_chaos(target_node, chaos_config, should_randomize, log)
+                result = self._inject_chaos(target_node, chaos_config, should_randomize, log, cluster_connection)
                 chaos_results.append(result)
                 
                 if result.success:
@@ -112,7 +112,7 @@ class ChaosCoordinator:
             if coordination.chaos_during_operation:
                 log.info("Injecting chaos during operation execution")
                 
-                result = self._inject_chaos(target_node, chaos_config, should_randomize, log)
+                result = self._inject_chaos(target_node, chaos_config, should_randomize, log, cluster_connection)
                 chaos_results.append(result)
                 
                 if result.success:
@@ -127,7 +127,8 @@ class ChaosCoordinator:
                     'target_node': target_node,
                     'delay': delay_after,
                     'chaos_config': chaos_config,
-                    'should_randomize': should_randomize
+                    'should_randomize': should_randomize,
+                    'cluster_connection': cluster_connection
                 })
             
             # Store only actual chaos results (not deferred placeholders) for this scenario
@@ -140,7 +141,7 @@ class ChaosCoordinator:
         return chaos_results
     
     def _convert_dict_nodes_to_nodeinfo(self, live_nodes_dict: List[dict], initial_nodes: List[NodeInfo]) -> List[NodeInfo]:
-        """Convert dictionary node representations to NodeInfo objects."""
+        """Convert dictionary node representations to NodeInfo objects with live roles."""
         node_info_list = []
         for node_dict in live_nodes_dict:
             # Find matching initial node to get full info
@@ -151,6 +152,7 @@ class ChaosCoordinator:
                 None
             )
             if matching_node:
+                matching_node.role = node_dict.get('role', matching_node.role)
                 node_info_list.append(matching_node)
             else:
                 # Create a basic NodeInfo from the dict if no match found
@@ -218,13 +220,23 @@ class ChaosCoordinator:
 
         return randomized_config
 
-    def _inject_chaos(self, target_node: NodeInfo, chaos_config: ChaosConfig, randomize: bool = False, log=None) -> ChaosResult:
+    def _inject_chaos(self, target_node: NodeInfo, chaos_config: ChaosConfig, randomize: bool = False, log=None, cluster_connection=None) -> ChaosResult:
         """Inject chaos on the target node based on configuration."""
 
         if log is None:
             log = logger
         
         if chaos_config.chaos_type == ChaosType.PROCESS_KILL:
+            # Refresh target node role from live cluster immediately before kill
+            if cluster_connection:
+                live_nodes_dict = cluster_connection.get_live_nodes()
+                if live_nodes_dict:
+                    for node_dict in live_nodes_dict:
+                        if node_dict['node_id'] == target_node.cluster_node_id:
+                            target_node.role = node_dict.get('role', target_node.role)
+                            log.debug(f"Refreshed target role to {target_node.role} immediately before kill")
+                            break
+            
             # Use process chaos type from config (may have been randomized)
             if chaos_config.process_chaos_type:
                 process_chaos_type = chaos_config.process_chaos_type
@@ -242,6 +254,9 @@ class ChaosCoordinator:
             log.info(f"Injecting {process_chaos_type.value} on {target_node.node_id}")
             
             result = self.chaos_engine.inject_process_chaos(target_node, process_chaos_type, log_buffer=log)
+            
+            # Capture role at time of kill for topology validation
+            result.target_role = target_node.role
 
             return result
         else:

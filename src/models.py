@@ -197,6 +197,7 @@ class ChaosResult:
     start_time: float
     end_time: Optional[float] = None
     error_message: Optional[str] = None
+    target_role: Optional[str] = None
 
 
 @dataclass

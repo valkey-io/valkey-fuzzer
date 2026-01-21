@@ -185,6 +185,7 @@ class FuzzerEngine(IFuzzerEngine):
             for chaos_event in chaos_events:
                 if chaos_event.success and chaos_event.chaos_type == ChaosType.PROCESS_KILL:
                     target_node_id = chaos_event.target_node
+                    target_role = chaos_event.target_role
                     for node in cluster_instance.nodes:
                         if node.node_id == target_node_id:
                             node_address = f"{node.host}:{node.port}"
