@@ -68,8 +68,11 @@ class ShardLogValidator:
         for shard_id in affected_shards:
             shard_nodes = [n for n in cluster_nodes if n.shard_id == shard_id]
             
-            # Check failover completion
-            if self._shard_had_failover(shard_id, operations, cluster_nodes):
+            # Check if shard had explicit failover or chaos-triggered failover
+            had_explicit_failover = self._shard_had_failover(shard_id, operations, cluster_nodes)
+            had_primary_killed = self._shard_had_primary_killed(shard_id, killed_nodes, cluster_nodes)
+            
+            if had_explicit_failover or had_primary_killed:
                 findings.extend(self._validate_failover(shard_nodes))
         
         for finding in findings:
@@ -149,6 +152,15 @@ class ShardLogValidator:
             if op_shard_id == shard_id:
                 return True
         
+        return False
+    
+    def _shard_had_primary_killed(self, shard_id: int, killed_nodes: Set[str], cluster_nodes: List[NodeInfo]) -> bool:
+        """Check if shard had its primary killed by chaos"""
+        for node in cluster_nodes:
+            if node.shard_id == shard_id and node.initial_role == 'primary':
+                node_addr = f"{node.host}:{node.port}"
+                if node_addr in killed_nodes:
+                    return True
         return False
 
     
