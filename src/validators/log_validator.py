@@ -86,8 +86,14 @@ class ShardLogValidator:
         """Get all the shard IDs affected by operations or chaos"""
         affected = set()
         
+        # Build lookup maps for all identifier types
+        node_id_to_shard = {node.node_id: node.shard_id for node in cluster_nodes}
+        port_to_shard = {str(node.port): node.shard_id for node in cluster_nodes}
+        cluster_id_to_shard = {node.cluster_node_id: node.shard_id for node in cluster_nodes if node.cluster_node_id}
+        
         # Find shards with failover operations
         for op in operations:
+            # Parse shard-pattern targets like "shard-4-primary"
             if 'shard-' in op.target_node:
                 try:
                     parts = op.target_node.split('-')
@@ -98,8 +104,10 @@ class ShardLogValidator:
                 except (ValueError, IndexError):
                     pass
             
-            node_to_shard = {node.node_id: node.shard_id for node in cluster_nodes}
-            shard_id = node_to_shard.get(op.target_node)
+            # Try all identifier types
+            shard_id = (node_id_to_shard.get(op.target_node) or 
+                       port_to_shard.get(op.target_node) or 
+                       cluster_id_to_shard.get(op.target_node))
             if shard_id is not None:
                 affected.add(shard_id)
         
@@ -113,6 +121,11 @@ class ShardLogValidator:
     
     def _shard_had_failover(self, shard_id: int, operations: List[Operation], cluster_nodes: List[NodeInfo]) -> bool:
         """Check if shard had a failover operation"""
+        # Build lookup maps for all identifier types
+        node_id_to_shard = {node.node_id: node.shard_id for node in cluster_nodes}
+        port_to_shard = {str(node.port): node.shard_id for node in cluster_nodes}
+        cluster_id_to_shard = {node.cluster_node_id: node.shard_id for node in cluster_nodes if node.cluster_node_id}
+        
         for op in operations:
             if op.type.value != 'failover':
                 continue
@@ -129,9 +142,10 @@ class ShardLogValidator:
                 except (ValueError, IndexError):
                     pass
             
-            # Fallback to node_id lookup
-            node_to_shard = {node.node_id: node.shard_id for node in cluster_nodes}
-            op_shard_id = node_to_shard.get(op.target_node)
+            # Try all identifier types
+            op_shard_id = (node_id_to_shard.get(op.target_node) or 
+                          port_to_shard.get(op.target_node) or 
+                          cluster_id_to_shard.get(op.target_node))
             if op_shard_id == shard_id:
                 return True
         
