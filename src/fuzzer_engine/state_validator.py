@@ -2213,12 +2213,14 @@ class StateValidator:
         # Track killed nodes from chaos injections
         self.killed_nodes: set[str] = set()
         self.shards_with_primary_killed: set[int] = set()
+        self.killed_node_roles: dict[str, str] = {}
 
         logger.debug("StateValidator initialized")
 
     def register_killed_node(self, node_address: str, node_role: str, shard_id: int) -> None:
         """Register a node that was killed by chaos injection."""
         self.killed_nodes.add(node_address)
+        self.killed_node_roles[node_address] = node_role
         if node_role == 'primary':
             self.shards_with_primary_killed.add(shard_id)
         logger.debug(f"Registered killed node: {node_address} (role: {node_role}, shard: {shard_id})")
@@ -2227,6 +2229,7 @@ class StateValidator:
         """Clear the list of killed nodes (e.g., after recovery)."""
         self.killed_nodes.clear()
         self.shards_with_primary_killed.clear()
+        self.killed_node_roles.clear()
         logger.debug("Cleared killed nodes list")
 
     def write_test_data(self, cluster_connection: ClusterConnection) -> bool:
