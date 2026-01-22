@@ -18,33 +18,12 @@ valkey-fuzzer helps identify bugs that are difficult to catch through traditiona
 
 The system follows a modular architecture with five core components:
 
-```mermaid
-graph TB
-    FE[Fuzzer Engine] --> CO[Cluster Orchestrator]
-    FE --> VC[Valkey Client]
-    FE --> CE[Chaos Engine]
-    FE --> VCL[Valkey Cluster]
-    CO --> VCL
-    VC --> VCL
-    CE --> VCL
-    
-    subgraph "Single Metal Instance"
-        VCL
-        N1[Valkey Node 1]
-        N2[Valkey Node 2]
-        N3[Valkey Node N]
-        VCL --> N1
-        VCL --> N2
-        VCL --> N3
-    end
-```
-
 ### Components
 
-- **Fuzzer Engine**: Central orchestrator that coordinates test execution, manages test scenarios, and validates cluster state
+- **Fuzzer Engine**: Central orchestrator that creates scenarios, coordinates test execution, and manages test scenarios
 - **Cluster Orchestrator**: Manages Valkey cluster lifecycle including node spawning, cluster formation, and configuration
 - **Chaos Engine**: Injects process failures and coordinates chaos timing with cluster operations
-- **Valkey Cluster**: Target system under test running on single metal instance with multiple nodes
+- **State Validator**: Verifies cluster health, slot coverage, replication status, data consistency and log messages across nodes
 - **Valkey Client**: Generates realistic workload using valkey-benchmark during testing
 
 ## Installation
@@ -143,7 +122,7 @@ valkey-fuzzer cluster --dsl captured_scenario.yaml
 #### Basic Failover Test
 
 ```yaml
-# test_scenario.yaml
+# simple_failover.yaml
 scenario:
   name: "basic_failover_test"
   seed: 42
@@ -231,59 +210,60 @@ state_validation:
 
 ```
 === valkey-fuzzer Test Results ===
-Scenario ID: test_20241024_143022_seed_42
-Seed: 42
-Duration: 45.2s
+Scenario: simple-failover-test
 Status: PASSED
+Duration: 30.88s
+Operations: 1
+Chaos Events: 0
+Seed: 12345 (use to reproduce)
 
-Cluster Configuration:
-- Shards: 3
-- Replicas: 1 per shard
-- Total Nodes: 6
+Final Validation: PASSED
 
-Operations Executed:
-Failover (shard 1, primary) - 2.3s
-Process Kill (shard 2, SIGKILL) - coordinated
-
-Validation Results:
-Slot Coverage: All 16384 slots assigned
-Replica Sync: All replicas synchronized
-Data Consistency: 100% match across replicas
-Convergence Time: 12.4s (within 30.0s limit)
-Replication Lag: 0.8s average
-
-Workload Metrics:
-- Operations: 15,432 total
-- Success Rate: 99.7%
-- Average Latency: 1.2ms
-- Throughput: 342 ops/sec
+Final Validation Details:
+  Replication: PASS
+  Cluster Status: PASS
+  Slot Coverage: PASS
+  Topology: PASS
+  View Consistency: PASS
 ```
 
 #### Failure Report
 
 ```
 === Test Failure Report ===
-Scenario ID: test_20241024_144155_seed_67890
-Seed: 67890
-Duration: 28.1s
+Scenario: 4226257627
 Status: FAILED
+Duration: 211.85s
+Operations: 2
+Chaos Events: 2
+Seed: 4226257627 (use to reproduce)
 
-Failure Details:
-✗ Slot Coverage: Slots 8192-12287 unassigned after failover
-✗ Data Consistency: 3 keys missing from replica in shard 2
+Final Validation: FAILED
+Failed Checks: slot_coverage, topology, data_consistency
+Validation Errors: 3
 
-Cluster State at Failure:
-- Node valkey-node-3 (primary, shard 2): DISCONNECTED
-- Node valkey-node-4 (replica, shard 2): PROMOTING
-- Slot migration in progress: 8192-12287
+Chaos Events:
+  [PASS] process_kill on node-0 (8.40s)
+  [PASS] process_kill on node-1 (5.43s)
 
-Error Log:
-[14:42:33] ERROR: Failover timeout for shard 2
-[14:42:35] ERROR: Replica promotion failed - insufficient votes
-[14:42:38] ERROR: Cluster state validation failed
+Final Validation Details:
+  Replication: PASS
+  Cluster Status: PASS
+  Slot Coverage: FAIL
+    → CRITICAL: 5461 slots still assigned to killed nodes. Killed nodes: {'127.0.0.1:7623', '127.0.0.1:7622'}. This indicates failover did not complete or slots were not reassigned. Affected slots: 0-5460
+  Topology: FAIL
+    → Topology validation failed in strict mode: 2 mismatch(es) found
+  View Consistency: PASS
+  Data Consistency: FAIL
+    → 35 test key(s) unreachable (threshold: 10)
+
+  Validation Error Messages:
+    • Slot Coverage: CRITICAL: 5461 slots still assigned to killed nodes. Killed nodes: {'127.0.0.1:7623', '127.0.0.1:7622'}. This indicates failover did not complete or slots were not reassigned. Affected slots: 0-5460
+    • Topology: Topology validation failed in strict mode: 2 mismatch(es) found
+    • Data Consistency: 35 test key(s) unreachable (threshold: 10)
 
 Reproduction Command:
-valkey-fuzzer cluster --seed 67890
+valkey-fuzzer cluster --seed 4226257627
 ```
 
 ## Initial Prototype Scope
@@ -304,6 +284,7 @@ The current implementation focuses on:
 - Replica synchronization monitoring
 - Data consistency verification
 - Convergence time and replication lag tracking
+- Actual Valkey node log validation
 
 ## Future Extensibility
 
@@ -327,12 +308,20 @@ The architecture is designed to support expansion in multiple dimensions:
 - **Memory Leak Detection**: Long-running test memory profiling
 - **Security Validation**: Authentication and authorization testing
 
+### Mixed Clusters
+- Test the fuzzer on different versions of Valkey
+- Create chaos while the cluster is upgrading from an older branch to unstable
+
 ## Contributing
 
 1. Fork the repository
 2. Create a feature branch
 3. Implement changes with comprehensive tests
 4. Submit a pull request with detailed description
+
+## Daily Test Runs
+- We run a randomly generated scenario every 4 hours and the results are listed here: https://github.com/valkey-io/valkey-fuzzer/actions/workflows/fuzzer-run.yml
+- These results can be analyzed to find potential bugs in Valkey
 
 ## License
 
