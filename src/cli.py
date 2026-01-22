@@ -300,6 +300,14 @@ class FuzzerCLI:
                 if not val.data_consistency.success and val.data_consistency.error_message:
                     checks.append(f"    → {val.data_consistency.error_message}")
 
+            if val.log_validation:
+                status = "PASS" if val.log_validation.success else "FAIL"
+                checks.append(f"  Log Validation: {status}")
+                if not val.log_validation.success:
+                    error_count = len([f for f in val.log_validation.findings if hasattr(f, 'severity') and f.severity == 'error'])
+                    warning_count = len([f for f in val.log_validation.findings if hasattr(f, 'severity') and f.severity == 'warning'])
+                    checks.append(f"    → {error_count} errors, {warning_count} warnings in {val.log_validation.shards_checked} shards")
+
             for check in checks:
                 print(check)
 
@@ -458,6 +466,13 @@ class FuzzerCLI:
                 'inconsistent_keys_count': len(val.data_consistency.inconsistent_keys),
                 'unreachable_keys_count': len(val.data_consistency.unreachable_keys),
                 'error': val.data_consistency.error_message
+            }
+
+        if val.log_validation:
+            validation_data['checks']['log_validation'] = {
+                'success': val.log_validation.success,
+                'shards_checked': val.log_validation.shards_checked,
+                'findings_count': len(val.log_validation.findings),
             }
 
         return validation_data

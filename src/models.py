@@ -539,10 +539,17 @@ class StateValidationResult:
     topology: Optional[TopologyValidation]
     view_consistency: Optional[ViewConsistencyValidation]
     data_consistency: Optional[DataConsistencyValidation]
+    log_validation: Optional[Any] = None  # LogValidationResult from validators.log_validator
 
     # Failure information
-    failed_checks: List[str]
-    error_messages: List[str]
+    failed_checks: List[str] = None
+    error_messages: List[str] = None
+
+    def __post_init__(self):
+        if self.failed_checks is None:
+            self.failed_checks = []
+        if self.error_messages is None:
+            self.error_messages = []
 
     def is_critical_failure(self) -> bool:
         """Determine if failure is critical and should halt execution.
@@ -611,7 +618,7 @@ class ShardExpectation:
     """Expected state of a shard"""
     primary_node_id: Optional[str]
     replica_node_ids: List[str]
-    slot_ranges: List[tuple]  # List of (start, end) tuples
+    slot_ranges: List[tuple]
 
 
 @dataclass

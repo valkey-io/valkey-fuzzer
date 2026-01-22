@@ -2506,8 +2506,15 @@ class StateValidator:
                     if not log_result.success:
                         failed_checks.append("log_validation")
                         if log_result.findings:
-                            error_msg = f"Log validation: {len([f for f in log_result.findings if f.severity == 'error'])} error(s) found"
+                            error_count = len([f for f in log_result.findings if f.severity == 'error'])
+                            warning_count = len([f for f in log_result.findings if f.severity == 'warning'])
+                            error_msg = f"Log validation: {error_count} error(s), {warning_count} warning(s) found"
                             error_messages.append(error_msg)
+                            for finding in log_result.findings:
+                                if finding.severity == 'error':
+                                    logger.error(f"Log validation error - Shard {finding.shard_id}, Node {finding.node_id}: {finding.message}")
+                                elif finding.severity == 'warning':
+                                    logger.warning(f"Log validation warning - Shard {finding.shard_id}, Node {finding.node_id}: {finding.message}")
                     
                     logger.info(f"Log validation: {'PASSED' if log_result.success else 'FAILED'}")
 
@@ -2537,6 +2544,7 @@ class StateValidator:
             topology=topology_result,
             view_consistency=view_consistency_result,
             data_consistency=data_consistency_result,
+            log_validation=log_result if 'log_result' in locals() else None,
             failed_checks=failed_checks,
             error_messages=error_messages
         )
