@@ -382,7 +382,7 @@ class StateValidationConfig:
     check_topology: bool = True
     check_view_consistency: bool = True
     check_data_consistency: bool = True
-    check_logs: bool = True  # Validate Valkey node logs for affected shards
+    check_logs: bool = True
 
     # Timing configuration
     stabilization_wait: float = 5.0  # Wait before validation

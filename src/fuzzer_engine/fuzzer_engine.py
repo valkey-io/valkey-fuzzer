@@ -189,8 +189,8 @@ class FuzzerEngine(IFuzzerEngine):
                     for node in cluster_instance.nodes:
                         if node.node_id == target_node_id:
                             node_address = f"{node.host}:{node.port}"
-                            state_validator.register_killed_node(node_address, node.role, node.shard_id)
-                            logger.info(f"Registered killed node for validation: {node_address} (role: {node.role}, shard: {node.shard_id})")
+                            state_validator.register_killed_node(node_address, target_role, node.shard_id)
+                            logger.info(f"Registered killed node for validation: {node_address} (role: {target_role}, shard: {node.shard_id})")
                             break
             
             # Step 5: Final cluster validation

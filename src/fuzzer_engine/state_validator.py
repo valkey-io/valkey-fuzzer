@@ -2213,6 +2213,7 @@ class StateValidator:
         # Track killed nodes from chaos injections
         self.killed_nodes: set[str] = set()
         self.shards_with_primary_killed: set[int] = set()
+        # Track killed node roles at time of death: node_address -> role
         self.killed_node_roles: dict[str, str] = {}
 
         logger.debug("StateValidator initialized")
