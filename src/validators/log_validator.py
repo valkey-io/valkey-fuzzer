@@ -167,11 +167,10 @@ class ShardLogValidator:
         for killed_addr, killed_cluster_id in killed_node_ids.items():
             detected = False
             
-            # Check logs of nodes NOT in the killed node's shard
             for node in cluster_nodes:
                 node_addr = f"{node.host}:{node.port}"
                 if node_addr in nodes_killed_by_chaos:
-                    continue  # Skip killed nodes
+                    continue
                 
                 if not os.path.exists(node.log_file):
                     continue

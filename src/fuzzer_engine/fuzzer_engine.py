@@ -4,6 +4,7 @@ Fuzzer Engine - Main orchestrator for test scenario execution
 import time
 import logging
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import Optional
 from ..models import Scenario, ExecutionResult, DSLConfig, ClusterConnection
 from ..interfaces import IFuzzerEngine
@@ -205,13 +206,19 @@ class FuzzerEngine(IFuzzerEngine):
             )
             
             # Execute final validation with retry (consistent with per-operation validation)
-            # Create operation context for log validation
-            from dataclasses import dataclass
+            # Create operation context for log validation - only include successful operations
             @dataclass
             class OperationContext:
                 operations: list
             
-            operation_context = OperationContext(operations=scenario.operations)
+            # Filter to only successful operations for log validation
+            successful_operations = [
+                op for op in scenario.operations
+                if any(log.get('success') for log in self.logger.test_logs.get(scenario.scenario_id, {}).get('operation_logs', [])
+                       if log.get('operation_type') == op.type.value and log.get('target_node') == op.target_node)
+            ]
+            
+            operation_context = OperationContext(operations=successful_operations)
             
             final_validation_result = state_validator.validate_with_retry(
                 cluster_connection,
