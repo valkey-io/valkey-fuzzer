@@ -307,7 +307,7 @@ class FuzzerCLI:
             if val.error_messages:
                 print("\n  Validation Error Messages:")
                 for msg in val.error_messages:
-                    print(f"    • {msg}")
+                    print(f"    → {msg}")
     
     def _print_aggregate_results(self, results: list):
         """Print aggregate statistics for multiple test runs"""
@@ -382,9 +382,7 @@ class FuzzerCLI:
 
         # Add per-operation validation results if available
         if result.validation_results:
-            data['per_operation_validations'] = [
-                self._validation_to_dict(val) for val in result.validation_results
-            ]
+            data['per_operation_validations'] = [self._validation_to_dict(val) for val in result.validation_results]
 
         return data
 
@@ -581,11 +579,7 @@ Examples:
 def main():
     """Main entry point for CLI"""
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s',
-        handlers=[logging.StreamHandler()]
-    )
+    logging.basicConfig(level=logging.INFO, format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s', handlers=[logging.StreamHandler()])
     
     parser = create_parser()
     args = parser.parse_args()

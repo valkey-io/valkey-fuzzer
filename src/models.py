@@ -153,7 +153,6 @@ class ClusterInstance:
     cluster_id: str
     config: ClusterConfig
     nodes: List[NodeInfo]
-    creation_time: float
     is_ready: bool = False
 
 

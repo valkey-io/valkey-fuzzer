@@ -67,7 +67,7 @@ class ScenarioGenerator(ITestCaseGenerator):
         operations = []
         num_primaries = cluster_config.num_shards
         
-        for i in range(num_operations):
+        for _ in range(num_operations):
             target_shard = random.randint(0, num_primaries - 1)
             target_node = f"shard-{target_shard}-primary"
             

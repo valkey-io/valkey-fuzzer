@@ -250,7 +250,6 @@ def test_get_node_info_success():
         cluster_id="test-cluster",
         config=ClusterConfig(num_shards=1, replicas_per_shard=0),
         nodes=[mock_node],
-        creation_time=0.0,
         is_ready=True
     )
     
@@ -298,7 +297,6 @@ def test_get_all_nodes_success():
         cluster_id="test-cluster",
         config=ClusterConfig(num_shards=1, replicas_per_shard=1),
         nodes=mock_nodes,
-        creation_time=0.0,
         is_ready=True
     )
     
@@ -311,34 +309,6 @@ def test_get_all_nodes_success():
     assert len(nodes) == 2
     assert nodes[0].node_id == "node-0"
     assert nodes[1].node_id == "node-1"
-
-
-def test_cleanup_all_clusters():
-    """Test cleaning up all clusters"""
-    coordinator = ClusterCoordinator()
-    
-    # Create mock clusters
-    for i in range(3):
-        cluster_id = f"cluster-{i}"
-        cluster_instance = ClusterInstance(
-            cluster_id=cluster_id,
-            config=ClusterConfig(num_shards=1, replicas_per_shard=0),
-            nodes=[],
-            creation_time=0.0,
-            is_ready=True
-        )
-        
-        mock_config_manager = Mock()
-        coordinator.active_clusters[cluster_id] = {
-            'instance': cluster_instance,
-            'config_manager': mock_config_manager
-        }
-    
-    assert len(coordinator.active_clusters) == 3
-    
-    coordinator.cleanup_all_clusters()
-    
-    assert len(coordinator.active_clusters) == 0
 
 
 if __name__ == "__main__":

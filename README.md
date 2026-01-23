@@ -128,7 +128,7 @@ scenario:
   seed: 42
   
 cluster:
-  shards: 3
+  num_shards: 3
   replicas: 1
   
 operations:
@@ -160,7 +160,7 @@ scenario:
   seed: 98765
   
 cluster:
-  shards: 8
+  num_shards: 8
   replicas: 2
   
 operations:

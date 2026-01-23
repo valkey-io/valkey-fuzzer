@@ -2,7 +2,6 @@
 Cluster Coordinator - Manages cluster lifecycle and interfaces with Cluster Orchestrator
 """
 import logging
-import time
 from typing import List, Optional
 from ..models import ClusterConfig, ClusterInstance, ClusterStatus, NodeInfo
 from ..cluster_orchestrator.orchestrator import ConfigurationManager, ClusterManager, PortManager
@@ -21,9 +20,7 @@ class ClusterCoordinator:
         self.cluster_manager = ClusterManager()
     
     def create_cluster(self, config: ClusterConfig) -> ClusterInstance:
-        """
-        Create a new Valkey cluster with the specified configuration.
-        """
+        """Create a new Valkey cluster with the specified configuration."""
         logger.info(f"Creating cluster with {config.num_shards} shards, {config.replicas_per_shard} replicas per shard")
         
         config_manager = None
@@ -58,7 +55,6 @@ class ClusterCoordinator:
                 cluster_id=cluster_connection.cluster_id,
                 config=config,
                 nodes=nodes,
-                creation_time=time.time(),
                 is_ready=True
             )
             
@@ -84,9 +80,7 @@ class ClusterCoordinator:
             raise
     
     def get_cluster_status(self, cluster_id: str) -> Optional[ClusterStatus]:
-        """
-        Get current status of a cluster.
-        """
+        """Get current status of a cluster."""
         if cluster_id not in self.active_clusters:
             logger.warning(f"Cluster {cluster_id} not found")
             return None
@@ -131,9 +125,7 @@ class ClusterCoordinator:
             return None
     
     def validate_cluster_readiness(self, cluster_id: str) -> bool:
-        """
-        Validate that cluster is ready for testing.
-        """
+        """Validate that cluster is ready for testing."""
         status = self.get_cluster_status(cluster_id)
         
         if not status:
@@ -158,9 +150,7 @@ class ClusterCoordinator:
         return is_ready
     
     def get_node_info(self, cluster_id: str, node_id: str) -> Optional[NodeInfo]:
-        """
-        Get information about a specific node in the cluster.
-        """
+        """Get information about a specific node in the cluster."""
         if cluster_id not in self.active_clusters:
             return None
         
@@ -173,20 +163,15 @@ class ClusterCoordinator:
         return None
     
     def get_all_nodes(self, cluster_id: str) -> List[NodeInfo]:
-        """
-        Get all nodes in the cluster.
-        """
+        """Get all nodes in the cluster."""
         if cluster_id not in self.active_clusters:
             return []
         
         cluster_instance = self.active_clusters[cluster_id]['instance']
         return cluster_instance.nodes
     
-    def restart_node(self, cluster_id: str, node_id: str, wait_ready: bool = True, 
-                     chaos_coordinator=None) -> bool:
-        """
-        Restart a specific node in the cluster. Optional ChaosCoordinator to update node registration after restart
-        """
+    def restart_node(self, cluster_id: str, node_id: str, wait_ready: bool = True, chaos_coordinator=None) -> bool:
+        """Restart a specific node in the cluster. Optional ChaosCoordinator to update node registration after restart"""
         if cluster_id not in self.active_clusters:
             logger.error(f"Cluster {cluster_id} not found")
             return False
@@ -219,9 +204,7 @@ class ClusterCoordinator:
             return False
     
     def destroy_cluster(self, cluster_id: str) -> bool:
-        """
-        Destroy a cluster and clean up all resources.
-        """
+        """Destroy a cluster and clean up all resources."""
         if cluster_id not in self.active_clusters:
             logger.warning(f"Cluster {cluster_id} not found")
             return False
@@ -240,12 +223,3 @@ class ClusterCoordinator:
         except Exception as e:
             logger.error(f"Failed to destroy cluster {cluster_id}: {e}")
             return False
-    
-    def cleanup_all_clusters(self) -> None:
-        """Clean up all active clusters."""
-        cluster_ids = list(self.active_clusters.keys())
-        
-        for cluster_id in cluster_ids:
-            self.destroy_cluster(cluster_id)
-        
-        logger.info("All clusters cleaned up")
