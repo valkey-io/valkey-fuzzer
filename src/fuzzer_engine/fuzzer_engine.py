@@ -212,11 +212,18 @@ class FuzzerEngine(IFuzzerEngine):
                 operations: list
             
             # Filter to only successful operations for log validation
-            successful_operations = [
-                op for op in scenario.operations
-                if any(log.get('success') for log in self.logger.test_logs.get(scenario.scenario_id, {}).get('operation_logs', [])
-                       if log.get('operation_type') == op.type.value and log.get('target_node') == op.target_node)
-            ]
+            # Match operations by index to handle repeated operations on same target
+            operation_logs = self.logger.test_logs.get(scenario.scenario_id, {}).get('operation_logs', [])
+            successful_operations = []
+            
+            for idx, op in enumerate(scenario.operations):
+                # Find the log entry at the same index
+                if idx < len(operation_logs):
+                    log = operation_logs[idx]
+                    if (log.get('success') and 
+                        log.get('operation_type') == op.type.value and 
+                        log.get('target_node') == op.target_node):
+                        successful_operations.append(op)
             
             operation_context = OperationContext(operations=successful_operations)
             

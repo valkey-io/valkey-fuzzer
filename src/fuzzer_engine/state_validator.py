@@ -2483,7 +2483,6 @@ class StateValidator:
                     all_nodes = cluster_connection.get_current_nodes(include_failed=True)
                     
                     # Convert dict nodes to NodeInfo for log validator
-                    from ..models import NodeInfo
                     node_info_list = []
                     for node_dict in all_nodes:
                         # Find matching node from initial_nodes to get log_file path
