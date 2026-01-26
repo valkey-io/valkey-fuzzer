@@ -7,7 +7,6 @@ and cleanup procedures for all component failure scenarios.
 import time
 import logging
 import random
-import signal
 from typing import Optional, Callable, Any, Dict, List
 from enum import Enum
 from dataclasses import dataclass

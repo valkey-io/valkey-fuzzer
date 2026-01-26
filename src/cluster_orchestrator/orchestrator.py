@@ -15,7 +15,7 @@ logger = logging.getLogger()
 class PortManager:
     """Manages port allocation for Valkey cluster nodes"""
     
-    def __init__(self, base_port: int = 6379, max_ports: int = 1000):
+    def __init__(self, base_port: int = 7000, max_ports: int = 1000):
         self.base_port = base_port
         self.available_ports = set(range(base_port, base_port + max_ports))
         self.allocated_ports: Dict[str, Tuple[int, int]] = {}
@@ -49,7 +49,7 @@ class ConfigurationManager:
     def __init__(self, clusterConfig: ClusterConfig, port_manager: PortManager):
         self.clusterConfig = clusterConfig
         self.port_manager = port_manager
-        self.cluster_id = self.generate_cluster_id()
+        self.cluster_id = str(uuid.uuid4())[:8]
     
     def setup_valkey_from_source(self, base_dir: str = "/tmp/valkey-build") -> str:
         """Clone and build Valkey binary, return path to valkey-server binary"""
@@ -74,10 +74,6 @@ class ConfigurationManager:
             raise Exception(f"Build completed but binary not found at {valkey_binary}")
         
         return valkey_binary
-    
-    def generate_cluster_id(self) -> str:
-        """Generate unique cluster identifier"""
-        return str(uuid.uuid4())[:8]
     
     def create_node_plan(self, node_counter: int, role: str, shard_id: int, 
                          slot_start: Optional[int] = None, slot_end: Optional[int] = None,
@@ -142,9 +138,7 @@ class ConfigurationManager:
         return node_data_dir, log_file
     
     def build_node_command(self, port: int, data_dir: str, log_file: str) -> List[str]:
-        """
-        Build the Valkey server command with standard cluster configuration.        
-        """
+        """Build the Valkey server command with standard cluster configuration."""
         return [
             self.clusterConfig.valkey_binary,
             '--port', str(port),
@@ -251,9 +245,7 @@ class ConfigurationManager:
             logger.debug(f"{node.node_id} terminated")
     
     def restart_node(self, node: NodeInfo, wait_ready: bool = True, ready_timeout: float = 30.0) -> NodeInfo:
-        """
-        Restart a Valkey node process.
-        """
+        """Restart a Valkey node process."""
         logger.info(f"Restarting {node.node_id} on port {node.port}")
         
         # Build command using centralized configuration
@@ -305,8 +297,6 @@ class ConfigurationManager:
         
         for node in nodes_in_cluster:
             self.terminate_node(node)
-        
-        for node in nodes_in_cluster:
             self.port_manager.release_ports(node.node_id)
         
         if self.clusterConfig.enable_cleanup:
@@ -349,20 +339,6 @@ class ClusterManager:
                 key, value = line.split(':', 1)
                 info_dict[key] = value
         return info_dict
-    
-    def get_node_role(self, node: NodeInfo) -> str:
-        """Get the current role of a node (master/slave)"""
-        client = self.get_client(node)
-        nodes_info = client.execute_command('CLUSTER', 'NODES')
-        
-        # Parse CLUSTER NODES output to find this node's role
-        for line in nodes_info.split('\n'):
-            if 'myself' in line:
-                if 'master' in line:
-                    return 'master'
-                elif 'slave' in line:
-                    return 'slave'
-        return 'unknown'
     
     def cluster_meet(self, nodes_in_cluster: List[NodeInfo], timeout: int = 30) -> None:
         """Connect cluster nodes and wait for convergence"""
@@ -423,10 +399,6 @@ class ClusterManager:
         """Assign hash slots to primary nodes and verify assignment"""
         primary_nodes = [node for node in nodes_in_cluster if node.role == 'primary']
         
-        if not primary_nodes:
-            logger.info("No primary nodes to assign slots to")
-            return {}
-        
         logger.info("")
         logger.info(f"Assigning slots to {len(primary_nodes)} primaries")
         
@@ -440,7 +412,6 @@ class ClusterManager:
             
             client.execute_command('CLUSTER', 'ADDSLOTS', *slots)
             
-            # Get cluster node ID
             cluster_node_id = client.execute_command('CLUSTER', 'MYID')
             node_ids[primary.node_id] = cluster_node_id
             primary.cluster_node_id = cluster_node_id
@@ -528,21 +499,6 @@ class ClusterManager:
             time.sleep(1)
         
         raise Exception(f"Replicas failed to sync within {timeout:.2f}s")
-    
-    def validate_node_configs(self, nodes_in_cluster: List[NodeInfo], expected_configs: Dict[str, str]) -> bool:
-        """Validate node configurations"""
-        for node in nodes_in_cluster:
-            client = self.get_client(node)
-            config = client.config_get('*')
-            
-            for key, expected in expected_configs.items():
-                actual = config.get(key, 'NOT_SET')
-                if actual != expected:
-                    logger.info(f"Config validation failed: {node.node_id} {key}, expected '{expected}', but got '{actual}'")
-                    return False
-        
-        logger.info(f"All {len(nodes_in_cluster)} node configurations are correctly set")
-        return True
     
     def check_replication_links(self, nodes_in_cluster: List[NodeInfo]) -> bool:
         """Check if all replica master_link_status is 'up'"""
@@ -636,9 +592,7 @@ class ClusterManager:
 
         # If we reach here, validation failed after timeout
         if last_unreachable:
-            logger.warning(
-                f"Validation failed: {len(last_unreachable)} expected node(s) unreachable: {', '.join(last_unreachable)}"
-            )        
+            logger.warning(f"Validation failed: {len(last_unreachable)} expected node(s) unreachable: {', '.join(last_unreachable)}")        
             return False
         
         if last_states:
@@ -653,9 +607,7 @@ class ClusterManager:
             if not consensus:
                 logger.warning("Validation failed: Cluster nodes have inconsistent views:")
                 for state in last_states:
-                    logger.warning(
-                        f"  {state['node_id']}: {state['state']}, {state['slots_assigned']}/16384, fail={state['slots_fail']}"
-                    )
+                    logger.warning(f"  {state['node_id']}: {state['state']}, {state['slots_assigned']}/16384, fail={state['slots_fail']}")
                 return False
 
             logger.info(

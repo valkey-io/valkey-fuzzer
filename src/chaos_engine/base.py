@@ -8,11 +8,10 @@ import logging
 from abc import ABC
 from typing import Dict, List, Optional
 from ..interfaces import IChaosEngine
-from ..models import NodeInfo, ChaosResult, ChaosType, ProcessChaosType, Operation, ChaosConfig, TargetSelection
+from ..models import NodeInfo, ChaosResult, ChaosType, ProcessChaosType, Operation, TargetSelection
 
 
 logger = logging.getLogger()
-
 
 class BaseChaosEngine(IChaosEngine, ABC):
     """Base implementation for chaos injection with common functionality"""
@@ -20,7 +19,6 @@ class BaseChaosEngine(IChaosEngine, ABC):
     def __init__(self):
         self.active_chaos: Dict[str, ChaosResult] = {}
         self.chaos_history: List[ChaosResult] = []
-        self.coordination_enabled = True
         self.node_processes: Dict[str, int] = {}  # node_id -> process_id mapping
     
     def inject_process_chaos(self, target_node: NodeInfo, chaos_type: ProcessChaosType, log_buffer=None) -> ChaosResult:
@@ -121,8 +119,6 @@ class BaseChaosEngine(IChaosEngine, ABC):
     
     def _get_node_process_id(self, target_node: NodeInfo) -> Optional[int]:
         """Get the process ID for a target node"""
-        # In a real implementation, this would query the actual process
-        # For now, we'll simulate by checking our process tracking
         return self.node_processes.get(target_node.node_id)
     
     def _execute_process_kill(self, process_id: int, chaos_type: ProcessChaosType, log_buffer=None) -> bool:

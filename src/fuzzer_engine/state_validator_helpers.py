@@ -23,17 +23,10 @@ __all__ = [
 ]
 
 
-def validate_killed_vs_failed_nodes(
-    killed_nodes: Set[str],
-    failed_nodes: List[str],
-    context: str = "validation"
-) -> Tuple[bool, Optional[str]]:
+def validate_killed_vs_failed_nodes(killed_nodes: Set[str], failed_nodes: List[str], context: str = "validation") -> Tuple[bool, Optional[str]]:
     if not killed_nodes:
-        # No killed nodes tracked - be lenient
         if failed_nodes:
-            logger.warning(
-                f"{context}: {len(failed_nodes)} node(s) in fail state but no killed nodes tracked"
-            )
+            logger.warning(f"{context}: {len(failed_nodes)} node(s) in fail state but no killed nodes tracked")
         return True, None
     
     expected_failed_nodes = killed_nodes
@@ -63,9 +56,7 @@ def validate_killed_vs_failed_nodes(
         return False, error_msg
     
     # All checks passed
-    logger.debug(
-        f"{context}: Failed nodes match killed nodes as expected: {actual_failed_nodes}"
-    )
+    logger.debug(f"{context}: Failed nodes match killed nodes as expected: {actual_failed_nodes}")
     return True, None
 
 
@@ -166,11 +157,7 @@ def is_node_killed_by_chaos(node: Dict, killed_nodes: Set[str]) -> bool:
     return (node_id and node_id in killed_nodes) or (node_addr in killed_nodes)
 
 
-def detect_unexpected_failures(
-    all_nodes: List[Dict],
-    killed_nodes: Set[str],
-    context: str = "topology"
-) -> List[Dict]:
+def detect_unexpected_failures(all_nodes: List[Dict], killed_nodes: Set[str], context: str = "topology") -> List[Dict]:
     unexpected_failures = []
     
     for node in all_nodes:

@@ -141,17 +141,12 @@ class IOperationOrchestrator(ABC):
     """Interface for operation execution"""
     
     @abstractmethod
-    def execute_operation(self, operation: Operation, cluster_id: str) -> bool:
+    def execute_operation(self, operation: Operation) -> bool:
         """Execute a single cluster operation"""
         pass
-    
+
     @abstractmethod
-    def validate_operation_preconditions(self, operation: Operation, cluster_status: ClusterStatus) -> bool:
-        """Validate that operation can be executed"""
-        pass
-    
-    @abstractmethod
-    def wait_for_operation_completion(self, operation: Operation, cluster_id: str, timeout: float) -> bool:
+    def wait_for_operation_completion(self, timeout: float) -> bool:
         """Wait for operation to complete"""
         pass
 

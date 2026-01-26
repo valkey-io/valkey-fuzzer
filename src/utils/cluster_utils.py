@@ -69,11 +69,7 @@ def find_node_by_identifier(
     return None
 
 
-def find_primary_node_by_identifier(
-    nodes: List[Dict],
-    identifier: str,
-    match_strategies: Optional[List[str]] = None
-) -> Optional[Dict]:
+def find_primary_node_by_identifier(nodes: List[Dict], identifier: str, match_strategies: Optional[List[str]] = None) -> Optional[Dict]:
     node = find_node_by_identifier(nodes, identifier, match_strategies)
     
     if node and node.get('role') == 'primary':

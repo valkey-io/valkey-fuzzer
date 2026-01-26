@@ -1,6 +1,5 @@
 """
 Chaos Coordinator - Core chaos injection coordination for fuzzer engine
-For scenario-based testing with state management, see chaos_engine.coordinator.
 """
 import logging
 import time
@@ -118,7 +117,7 @@ class ChaosCoordinator:
                 if result.success:
                     log.debug(f"During-operation chaos injected on {target_node.node_id}")
             
-            # Chaos after operation - return info for later injection
+            # Chaos after operation
             if coordination.chaos_after_operation:
                 log.info(f"Chaos scheduled after operation (delay: {delay_after:.2f}s)")
                 # Don't inject now - return a placeholder that indicates chaos should happen after operation
@@ -146,18 +145,15 @@ class ChaosCoordinator:
         for node_dict in live_nodes_dict:
             # Find matching initial node to get full info
             # Note: node_dict['node_id'] contains the Valkey cluster ID (40-char hex),
-            # which matches NodeInfo.cluster_node_id, not NodeInfo.node_id (logical name)
-            matching_node = next(
-                (n for n in initial_nodes if n.cluster_node_id == node_dict['node_id']),
-                None
-            )
+            # which matches NodeInfo.cluster_node_id (40-char hex), not NodeInfo.node_id (logical name: node-1)
+            matching_node = next((n for n in initial_nodes if n.cluster_node_id == node_dict['node_id']), None)
+
             if matching_node:
                 matching_node.role = node_dict.get('role', matching_node.role)
                 node_info_list.append(matching_node)
             else:
                 # Create a basic NodeInfo from the dict if no match found
-                # This should rarely happen - it means a node exists in the cluster
-                # but wasn't in our initial node list
+                # This should rarely happen - it means a node exists in the cluster but wasn't in our initial node list
                 logger.warning(
                     f"No matching initial node found for cluster node {node_dict['node_id']} "
                     f"(port {node_dict.get('port')}). Creating fallback NodeInfo without process info."
@@ -178,20 +174,13 @@ class ChaosCoordinator:
 
     def _randomize_chaos_config(self, chaos_config: ChaosConfig, log=None) -> ChaosConfig:
         """Create a randomized copy of the chaos config for this operation."""
-
-        if log is None:
-            log = logger
-            
         # Create a copy to avoid modifying the original
         randomized_config = deepcopy(chaos_config)
 
         # Randomize process chaos type (if process kill chaos)
         if randomized_config.chaos_type == ChaosType.PROCESS_KILL:
             # 50/50 chance between SIGKILL and SIGTERM
-            randomized_config.process_chaos_type = self.rng.choice([
-                ProcessChaosType.SIGKILL,
-                ProcessChaosType.SIGTERM
-            ])
+            randomized_config.process_chaos_type = self.rng.choice([ProcessChaosType.SIGKILL, ProcessChaosType.SIGTERM])
             log.info(f"Randomized chaos type: {randomized_config.process_chaos_type.value}")
 
         # Randomize chaos timing coordination - select exactly ONE timing option
@@ -222,19 +211,16 @@ class ChaosCoordinator:
 
     def _inject_chaos(self, target_node: NodeInfo, chaos_config: ChaosConfig, randomize: bool = False, log=None, cluster_connection=None) -> ChaosResult:
         """Inject chaos on the target node based on configuration."""
-
-        if log is None:
-            log = logger
         
         if chaos_config.chaos_type == ChaosType.PROCESS_KILL:
-            # Refresh target node role from live cluster immediately before kill
+            # Refresh target node role from live cluster immediately before termination
             if cluster_connection:
                 live_nodes_dict = cluster_connection.get_live_nodes()
                 if live_nodes_dict:
                     for node_dict in live_nodes_dict:
                         if node_dict['node_id'] == target_node.cluster_node_id:
                             target_node.role = node_dict.get('role', target_node.role)
-                            log.debug(f"Refreshed target role to {target_node.role} immediately before kill")
+                            log.debug(f"Refreshed target role to {target_node.role} immediately before termination")
                             break
             
             # Use process chaos type from config (may have been randomized)
@@ -272,44 +258,6 @@ class ChaosCoordinator:
                 error_message=f"Unsupported chaos type: {chaos_config.chaos_type}"
             )
 
-    def _select_chaos_target(self, cluster_nodes: List[NodeInfo], target_selection: TargetSelection) -> Optional[NodeInfo]:
-        """Select a target node for chaos injection based on selection strategy."""
-        
-        if not cluster_nodes:
-            return None
-
-        strategy = target_selection.strategy
-        
-        if strategy == "specific":
-            # Select from specific nodes
-            if target_selection.specific_nodes:
-                for node in cluster_nodes:
-                    if node.node_id in target_selection.specific_nodes:
-                        return node
-            return None
-        
-        elif strategy == "primary_only":
-            # Select only from primary nodes
-            primary_nodes = [node for node in cluster_nodes if node.role == 'primary']
-            if primary_nodes:
-                return self.rng.choice(primary_nodes)
-            return None
-
-        elif strategy == "replica_only":
-            # Select only from replica nodes
-            replica_nodes = [node for node in cluster_nodes if node.role == 'replica']
-            if replica_nodes:
-                return self.rng.choice(replica_nodes)
-            return None
-
-        elif strategy == "random":
-            # Select randomly from all nodes
-            return self.rng.choice(cluster_nodes)
-        
-        else:
-            logger.warning(f"Unknown target selection strategy: {strategy}")
-            return None
-    
     def get_chaos_history(self) -> List[ChaosResult]:
         """Get the history of all chaos injections."""
         return self.chaos_history.copy()

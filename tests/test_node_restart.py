@@ -171,13 +171,6 @@ def test_restart_primary_in_multi_shard_cluster():
         cluster_healthy = cluster_mgr.validate_cluster(nodes)
         logging.info(f"Cluster health after primary restart: {cluster_healthy}")
         
-        # Verify the restarted primary is recognized
-        try:
-            primary_role = cluster_mgr.get_node_role(updated_node)
-            logging.info(f"Restarted node role: {primary_role}")
-        except Exception as e:
-            logging.info(f"Could not get role for restarted node: {e}")
-        
         logging.info("PASS: Multi-shard primary restart test completed")
         
     finally:

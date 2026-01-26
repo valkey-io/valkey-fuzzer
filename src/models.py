@@ -14,7 +14,7 @@ class ClusterConfig:
     """Configuration for a Valkey cluster"""
     num_shards: int
     replicas_per_shard: int
-    base_port: int = 6379
+    base_port: int = 7000
     base_data_dir: str = "/tmp/valkey-fuzzer"
     valkey_binary: str = "/usr/local/bin/valkey-server"
     enable_cleanup: bool = True

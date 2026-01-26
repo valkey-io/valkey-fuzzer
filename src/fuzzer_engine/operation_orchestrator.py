@@ -27,7 +27,7 @@ class OperationOrchestrator(IOperationOrchestrator):
         """Set or update cluster connection"""
         self.cluster_connection = cluster_connection
     
-    def execute_operation(self, operation: Operation, cluster_id: str, log_buffer=None) -> bool:
+    def execute_operation(self, operation: Operation, log_buffer=None) -> bool:
         """Execute a single cluster operation"""
         log = log_buffer if log_buffer else logging
         
@@ -35,7 +35,7 @@ class OperationOrchestrator(IOperationOrchestrator):
             log.error("No cluster connection available")
             return False
         
-        # Generate operation ID (thread-safe)
+        # Generate operation ID and store in active operations dict (thread-safe)
         with self._state_lock:
             self.operation_counter += 1
             operation_id = f"op-{self.operation_counter}"
@@ -74,17 +74,15 @@ class OperationOrchestrator(IOperationOrchestrator):
                     del self.active_operations[operation_id]
             return False
     
-    def _execute_failover(self, operation: Operation, log=None) -> bool:
-        """Execute failover operation"""
-        if log is None:
-            log = logging
-        
+    def _execute_failover(self, operation: Operation, log) -> bool:
+        """Execute failover operation"""    
         log.info(f"Executing failover on {operation.target_node}")
         
         # Get all cluster nodes (including dead ones) to find target primary
+        # Gets actual Node information from Valkey
         current_nodes = self.cluster_connection.get_current_nodes()
         
-        # Find target primary node using helper function
+        # Find target primary node
         target_node = find_primary_node_by_identifier(current_nodes, operation.target_node)
         
         if not target_node:
@@ -184,46 +182,15 @@ class OperationOrchestrator(IOperationOrchestrator):
                     log.info("Executed graceful failover")
             
             # Wait for failover to complete then validate cluster slots and replication links
-            return self.wait_for_operation_completion(operation, self.cluster_connection.cluster_id, operation.timing.timeout, log)
+            return self.wait_for_operation_completion(operation.timing.timeout, log)
             
         except Exception as e:
             log.error(f"Failover execution failed: {e}")
             return False
-    
 
-    def validate_operation_preconditions(self, operation: Operation, cluster_status: ClusterStatus) -> bool:
-        """Validate that operation can be executed"""
-        if not cluster_status.is_healthy:
-            logging.warning("Cluster is not healthy")
-            return False
-        
-        if not cluster_status.formation_complete:
-            logging.warning("Cluster formation not complete")
-            return False
-        
-        if operation.type == OperationType.FAILOVER:
-            # Check if target node exists
-            target_found = False
-            for node in cluster_status.nodes:
-                if operation.target_node == node.node_id:
-                    target_found = True
-                    # Check if it's a primary node
-                    if node.role != 'primary':
-                        logging.warning(f"Target node {operation.target_node} is not a primary")
-                        return False
-                    break
-            
-            if not target_found:
-                logging.warning(f"Target node {operation.target_node} not found")
-                return False
-        
-        return True
-    
-    def wait_for_operation_completion(self, operation: Operation, cluster_id: str, timeout: float, log=None) -> bool:
+    def wait_for_operation_completion(self, timeout: float, log) -> bool:
         """Wait for operation to complete and validate cluster state"""
-        if log is None:
-            log = logging
-        
+
         if not self.cluster_connection:
             return False
         

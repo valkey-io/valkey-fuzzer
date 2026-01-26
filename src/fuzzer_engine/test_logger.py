@@ -13,7 +13,6 @@ from ..models import Scenario, Operation, ChaosResult, ExecutionResult, ClusterS
 
 logger = logging.getLogger()
 
-
 class FuzzerLogger:
     """
     Thread-safe test execution logging system with comprehensive reporting.
@@ -47,6 +46,7 @@ class FuzzerLogger:
             'operation_logs': [],
             'chaos_events': [],
             'cluster_state_snapshots': [],
+            'state_validation_results': [],
             'errors': [],
             'status': 'running'
         }
@@ -114,10 +114,6 @@ class FuzzerLogger:
         if not self.current_test_id:
             logger.warning("No active test to log state validation result to")
             return
-        
-        # Initialize state_validation_results list if not exists
-        if 'state_validation_results' not in self.test_logs[self.current_test_id]:
-            self.test_logs[self.current_test_id]['state_validation_results'] = []
         
         # Build detailed validation log
         validation_log = {

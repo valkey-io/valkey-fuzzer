@@ -14,7 +14,7 @@ def test_cluster_config_creation():
     config = ClusterConfig(num_shards=3, replicas_per_shard=1)
     assert config.num_shards == 3
     assert config.replicas_per_shard == 1
-    assert config.base_port == 6379
+    assert config.base_port == 7000
     assert config.enable_cleanup == True
 
 

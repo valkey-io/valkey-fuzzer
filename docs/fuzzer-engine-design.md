@@ -212,23 +212,17 @@ class OperationType(Enum):
 #### Core Methods:
 ```python
 class OperationOrchestrator:
-    def execute_operation(self, operation: Operation, cluster_id: str) -> OperationResult:
+    def execute_operation(self, operation: Operation) -> OperationResult:
         """Execute a single cluster operation"""
         
-    def execute_coordinated_operation(self, operation: Operation, 
-                                    chaos_config: ChaosConfig, 
-                                    cluster_id: str) -> CoordinatedOperationResult:
-        """Execute operation with chaos coordination"""
+    def execute_operation(self, operation: Operation, log_buffer=None) -> bool:
+        """Execute all operations"""
         
-    def validate_operation_preconditions(self, operation: Operation, 
-                                       cluster_status: ClusterStatus) -> bool:
-        """Validate that operation can be safely executed"""
+    def _execute_failover(self, operation: Operation, log=None) -> bool:
+        """Called by execute_operation() to execute failovers"""
         
-    def monitor_operation_progress(self, operation_id: str) -> OperationProgress:
-        """Monitor ongoing operation execution"""
-        
-    def rollback_operation(self, operation_id: str) -> RollbackResult:
-        """Attempt to rollback failed operation"""
+    def wait_for_operation_completion(self, timeout: float, log=None) -> bool:
+        """Wait for operation to complete"""
 ```
 
 #### Failover Operation Implementation:
