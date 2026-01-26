@@ -176,6 +176,8 @@ class ChaosCoordinator:
         """Create a randomized copy of the chaos config for this operation."""
         # Create a copy to avoid modifying the original
         randomized_config = deepcopy(chaos_config)
+        if log is None:
+            log = logger
 
         # Randomize process chaos type (if process kill chaos)
         if randomized_config.chaos_type == ChaosType.PROCESS_KILL:

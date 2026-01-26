@@ -74,8 +74,11 @@ class OperationOrchestrator(IOperationOrchestrator):
                     del self.active_operations[operation_id]
             return False
     
-    def _execute_failover(self, operation: Operation, log) -> bool:
-        """Execute failover operation"""    
+    def _execute_failover(self, operation: Operation, log=None) -> bool:
+        """Execute failover operation"""
+        if log is None:
+            log = logging
+        
         log.info(f"Executing failover on {operation.target_node}")
         
         # Get all cluster nodes (including dead ones) to find target primary
