@@ -636,3 +636,9 @@ class OperationContext:
     target_node: str
     operation_success: bool
     operation_timestamp: float
+
+
+@dataclass
+class LogValidationContext:
+    """Context for log validation - contains only successful operations"""
+    operations: List[Operation]

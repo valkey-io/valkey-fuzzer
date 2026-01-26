@@ -42,9 +42,7 @@ class ShardLogValidator:
             r"configEpoch set to \d+ after successful failover",
             r"Failover auth granted",
         ]
-        
-        self.split_brain_patterns = [r"multiple.*primary.*same.*shard"]
-        
+                
         self.failover_error_patterns = [
             r"Failover attempt expired",
             r"Manual failover timed out",
@@ -269,19 +267,7 @@ class ShardLogValidator:
                             message=f'Replication topology issue detected',
                             log_line=matches[0]
                         ))
-                
-                # Check for split-brain indicators
-                for pattern in self.split_brain_patterns:
-                    matches = self._find_all_patterns(log_lines, pattern)
-                    if matches:
-                        findings.append(LogFinding(
-                            node_id=node.node_id,
-                            shard_id=node.shard_id,
-                            severity='error',
-                            message=f'Possible split-brain detected',
-                            log_line=matches[0]
-                        ))
-            
+                            
             except Exception as e:
                 logger.error(f"Error reading log for node {node.node_id}: {e}")
         

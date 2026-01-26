@@ -18,7 +18,7 @@ from ..models import (
     DataConsistencyValidation, DataConsistencyValidationConfig, DataInconsistency,
     ExpectedTopology, StateValidationConfig, StateValidationResult
 )
-from ..validators import ShardLogValidator, LogValidationResult
+from .log_validator import ShardLogValidator
 from .state_validator_helpers import (
     format_node_address,
     validate_killed_vs_failed_nodes,
@@ -2488,7 +2488,7 @@ class StateValidator:
                         # Find matching node from initial_nodes to get log_file path
                         matching_node = next(
                             (n for n in cluster_connection.initial_nodes 
-                             if n.cluster_node_id == node_dict.get('node_id')),
+                            if n.cluster_node_id == node_dict.get('node_id')),
                             None
                         )
                         if matching_node:
@@ -2504,16 +2504,11 @@ class StateValidator:
                     
                     if not log_result.success:
                         failed_checks.append("log_validation")
-                        if log_result.findings:
-                            error_count = len([f for f in log_result.findings if f.severity == 'error'])
-                            warning_count = len([f for f in log_result.findings if f.severity == 'warning'])
-                            error_msg = f"Log validation: {error_count} error(s), {warning_count} warning(s) found"
-                            error_messages.append(error_msg)
-                            for finding in log_result.findings:
-                                if finding.severity == 'error':
-                                    logger.error(f"Log validation error - Shard {finding.shard_id}, Node {finding.node_id}: {finding.message}")
-                                elif finding.severity == 'warning':
-                                    logger.warning(f"Log validation warning - Shard {finding.shard_id}, Node {finding.node_id}: {finding.message}")
+                        for finding in log_result.findings:
+                            if finding.severity == 'error':
+                                logger.error(f"Log validation error - Shard {finding.shard_id}, Node {finding.node_id}: {finding.message} | Log: {finding.log_line}")
+                            elif finding.severity == 'warning':
+                                logger.warning(f"Log validation warning - Shard {finding.shard_id}, Node {finding.node_id}: {finding.message} | Log: {finding.log_line}")
                     
                     logger.info(f"Log validation: {'PASSED' if log_result.success else 'FAILED'}")
 

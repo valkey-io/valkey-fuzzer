@@ -6,7 +6,7 @@ import logging
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Optional
-from ..models import Scenario, ExecutionResult, DSLConfig, ClusterConnection
+from ..models import Scenario, ExecutionResult, DSLConfig, ClusterConnection, LogValidationContext
 from ..interfaces import IFuzzerEngine
 from ..valkey_client.load_data import load_all_slots
 from .test_case_generator import ScenarioGenerator
@@ -207,11 +207,6 @@ class FuzzerEngine(IFuzzerEngine):
             
             # Execute final validation with retry (consistent with per-operation validation)
             # Create operation context for log validation - only include successful operations
-            @dataclass
-            class OperationContext:
-                operations: list
-            
-            # Filter to only successful operations for log validation
             # Match operations by index to handle repeated operations on same target
             operation_logs = self.logger.test_logs.get(scenario.scenario_id, {}).get('operation_logs', [])
             successful_operations = []
@@ -225,7 +220,7 @@ class FuzzerEngine(IFuzzerEngine):
                         log.get('target_node') == op.target_node):
                         successful_operations.append(op)
             
-            operation_context = OperationContext(operations=successful_operations)
+            operation_context = LogValidationContext(operations=successful_operations)
             
             final_validation_result = state_validator.validate_with_retry(
                 cluster_connection,
