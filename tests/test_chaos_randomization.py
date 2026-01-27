@@ -357,11 +357,13 @@ def test_timing_delay_randomization(mock_sleep, chaos_coordinator, mock_cluster_
         assert 8.0 <= sleep_value <= 12.0, f"Sleep value {sleep_value} not in expected range [8.0, 12.0]"
 
 @patch('src.fuzzer_engine.chaos_coordinator.time.sleep')
-def test_chaos_randomization_across_operations(mock_sleep, chaos_coordinator, mock_cluster_connection):
+def test_chaos_randomization_across_operations(mock_sleep, mock_cluster_connection):
     """
     Integration test: Verify that chaos is randomized across multiple operations.
-    This test simulates executing multiple operations and verifies that:
+    This test simulates executing multiple operations
     """
+    chaos_coordinator = ChaosCoordinator(seed=42)
+    
     # Track chaos injections
     chaos_injections = []
     
@@ -398,7 +400,7 @@ def test_chaos_randomization_across_operations(mock_sleep, chaos_coordinator, mo
         randomize_per_operation=True  # Enable randomization
     )
     
-    # Create multiple operations
+    # Create multiple operations - increase to 50 to ensure both types appear
     operations = [
         Operation(
             type=OperationType.FAILOVER,
@@ -406,7 +408,7 @@ def test_chaos_randomization_across_operations(mock_sleep, chaos_coordinator, mo
             parameters={"key": f"key_{i}", "value": f"value_{i}"},
             timing=OperationTiming()
         )
-        for i in range(20)
+        for i in range(50)
     ]
     
     # Execute operations with chaos
@@ -448,10 +450,12 @@ def test_chaos_randomization_across_operations(mock_sleep, chaos_coordinator, mo
 
 
 @patch('src.fuzzer_engine.chaos_coordinator.time.sleep')
-def test_chaos_without_randomization_is_consistent(mock_sleep, chaos_coordinator, mock_cluster_connection):
+def test_chaos_without_randomization_is_consistent(mock_sleep, mock_cluster_connection):
     """
     Integration test: Verify that when randomization is disabled, chaos remains consistent.
     """
+    chaos_coordinator = ChaosCoordinator(seed=42)
+    
     # Track chaos injections
     chaos_injections = []
     
