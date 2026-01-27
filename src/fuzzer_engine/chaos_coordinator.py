@@ -174,10 +174,12 @@ class ChaosCoordinator:
 
     def _randomize_chaos_config(self, chaos_config: ChaosConfig, log=None) -> ChaosConfig:
         """Create a randomized copy of the chaos config for this operation."""
-        # Create a copy to avoid modifying the original
-        randomized_config = deepcopy(chaos_config)
         if log is None:
             log = logger
+
+        # Create a copy to avoid modifying the original
+        randomized_config = deepcopy(chaos_config)
+        
 
         # Randomize process chaos type (if process kill chaos)
         if randomized_config.chaos_type == ChaosType.PROCESS_KILL:
@@ -213,6 +215,9 @@ class ChaosCoordinator:
 
     def _inject_chaos(self, target_node: NodeInfo, chaos_config: ChaosConfig, randomize: bool = False, log=None, cluster_connection=None) -> ChaosResult:
         """Inject chaos on the target node based on configuration."""
+
+        if log is None:
+            log = logger
         
         if chaos_config.chaos_type == ChaosType.PROCESS_KILL:
             # Refresh target node role from live cluster immediately before termination

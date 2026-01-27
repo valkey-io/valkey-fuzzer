@@ -191,8 +191,10 @@ class OperationOrchestrator(IOperationOrchestrator):
             log.error(f"Failover execution failed: {e}")
             return False
 
-    def wait_for_operation_completion(self, timeout: float, log) -> bool:
+    def wait_for_operation_completion(self, timeout: float, log=None) -> bool:
         """Wait for operation to complete and validate cluster state"""
+        if log is None:
+            log = logging
 
         if not self.cluster_connection:
             return False
