@@ -79,7 +79,7 @@ class IChaosEngine(ABC):
     """Interface for chaos injection"""
     
     @abstractmethod
-    def inject_process_chaos(self, target_node: NodeInfo, chaos_type: ProcessChaosType) -> ChaosResult:
+    def inject_process_chaos(self, target_node: NodeInfo, chaos_type: ProcessChaosType, log_buffer=None) -> ChaosResult:
         """Inject process-level chaos on target node"""
         pass
     
@@ -141,7 +141,7 @@ class IOperationOrchestrator(ABC):
     """Interface for operation execution"""
     
     @abstractmethod
-    def execute_operation(self, operation: Operation) -> bool:
+    def execute_operation(self, operation: Operation, log_buffer=None) -> bool:
         """Execute a single cluster operation"""
         pass
 
@@ -155,12 +155,12 @@ class IStateValidator(ABC):
     """Interface for cluster state validation"""
     
     @abstractmethod
-    def validate_state(self, cluster_connection, expected_topology, operation_context) -> StateValidationResult:
+    def validate_state(self, cluster_connection: ClusterConnection, expected_topology: Optional = None, operation_context: Optional = None) -> StateValidationResult:
         """Perform comprehensive cluster state validation"""
         pass
     
     @abstractmethod
-    def validate_with_retry(self, cluster_connection, expected_topology, operation_context) -> StateValidationResult:
+    def validate_with_retry(self, cluster_connection: ClusterConnection, expected_topology: Optional = None, operation_context: Optional = None) -> StateValidationResult:
         """Perform validation with retry logic for transient failures"""
         pass
 
@@ -174,7 +174,7 @@ class ILogger(ABC):
         pass
     
     @abstractmethod
-    def log_operation(self, operation: Operation, success: bool, details: str) -> None:
+    def log_operation(self, operation: Operation, success: bool, details: str, silent: bool = False) -> None:
         """Log operation execution"""
         pass
     

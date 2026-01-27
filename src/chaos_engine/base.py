@@ -235,7 +235,7 @@ class ChaosTargetSelector:
         
         elif target_selection.strategy == "random":
             selected = self.rng.choice(nodes)
-            log.info(f"Selected random node: node id: {selected.node_id}, shard: {selected.shard_id}, role: {selected.role}, port: {selected.port}")
+            log.info(f"Selected random node: shard {selected.shard_id} - {selected.node_id}, role: {selected.role}, port: {selected.port}")
             return selected
         
         elif target_selection.strategy == "primary_only":
@@ -247,7 +247,7 @@ class ChaosTargetSelector:
             
             # Randomly select from primaries
             selected = self.rng.choice(primaries)
-            log.info(f"Selected random primary: {selected.node_id} (shard {selected.shard_id})")
+            log.info(f"Selected random primary: shard {selected.shard_id} - {selected.node_id} ")
             return selected
         
         elif target_selection.strategy == "replica_only":

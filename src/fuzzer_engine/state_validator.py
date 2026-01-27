@@ -1341,7 +1341,6 @@ class TopologyValidator:
         return mismatches
 
 
-
 class ViewConsistencyValidator:
     """Validates consistency of cluster view across all nodes"""
 

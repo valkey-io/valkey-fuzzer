@@ -19,7 +19,7 @@ class ClusterCoordinator:
         self.active_clusters: dict[str, ClusterInstance] = {}
         self.cluster_manager = ClusterManager()
     
-    def create_cluster(self, config: ClusterConfig) -> ClusterInstance:
+    def create_cluster(self, config: ClusterConfig, seed: Optional[int] = None) -> ClusterInstance:
         """Create a new Valkey cluster with the specified configuration."""
         logger.info(f"Creating cluster with {config.num_shards} shards, {config.replicas_per_shard} replicas per shard")
         
@@ -30,8 +30,8 @@ class ClusterCoordinator:
             # Create a fresh PortManager for this cluster using config's base_port
             port_manager = PortManager(base_port=config.base_port)
             
-            # Initialize configuration manager
-            config_manager = ConfigurationManager(config, port_manager)
+            # Initialize configuration manager with seed for log file naming
+            config_manager = ConfigurationManager(config, port_manager, seed=seed)
             
             # Setup Valkey binary
             valkey_binary = config_manager.setup_valkey_from_source()

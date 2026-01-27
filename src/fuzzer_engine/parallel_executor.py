@@ -122,12 +122,19 @@ class ParallelExecutor:
             
             # Collect results from all shards
             for future in as_completed(futures):
+                shard_id = futures[future]
                 try:
                     shard_results = future.result()
                     for op_index, executed, chaos_events, buffer in shard_results:
                         results[op_index] = (executed, chaos_events, buffer)
                 except Exception as e:
-                    logger.error(f"Shard execution failed: {e}")
+                    logger.error(f"Shard {shard_id} execution failed: {e}")
+                    # Mark all operations in this shard as failed
+                    shard_ops = shard_groups[shard_id]
+                    for op_index, operation in shard_ops:
+                        error_buffer = OperationLogBuffer(f"{op_index + 1}: {operation.type.value} on {operation.target_node}")
+                        error_buffer.error(f"Shard execution failed: {e}")
+                        results[op_index] = (0, [], error_buffer)
         
         # Flush logs in operation order
         logger.info("")

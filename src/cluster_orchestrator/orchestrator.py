@@ -46,10 +46,11 @@ class PortManager:
 class ConfigurationManager:
     """Manages Valkey cluster planning, node spawning, and resource cleanup"""
 
-    def __init__(self, clusterConfig: ClusterConfig, port_manager: PortManager):
+    def __init__(self, clusterConfig: ClusterConfig, port_manager: PortManager, seed: Optional[int] = None):
         self.clusterConfig = clusterConfig
         self.port_manager = port_manager
         self.cluster_id = str(uuid.uuid4())[:8]
+        self.seed = seed
     
     def setup_valkey_from_source(self, base_dir: str = "/tmp/valkey-build") -> str:
         """Clone and build Valkey binary, return path to valkey-server binary"""
@@ -134,7 +135,7 @@ class ConfigurationManager:
         os.makedirs(node_data_dir, exist_ok=True)
         os.makedirs(log_dir, exist_ok=True)
         
-        log_file = os.path.join(log_dir, f"{node_id}.log")
+        log_file = os.path.join(log_dir, f"{self.seed}-{node_id}.log")
         return node_data_dir, log_file
     
     def build_node_command(self, port: int, data_dir: str, log_file: str) -> List[str]:

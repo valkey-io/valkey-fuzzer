@@ -1,4 +1,6 @@
 import logging
+import os
+import glob
 from typing import List, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -129,3 +131,38 @@ def group_nodes_by_shard(nodes: List[Dict]) -> Dict[int, Dict[str, List[Dict]]]:
             shards[shard_id]['replicas'].append(node)
     
     return shards
+
+def cleanup_logs(seed: int, base_data_dir: str = "/tmp/valkey-fuzzer", force: bool = False) -> int:
+    """Clean up log files for a specific seed with optional confirmation"""
+    log_dir = os.path.join(base_data_dir, "logs")
+    
+    if not os.path.exists(log_dir):
+        logger.info(f"No log files found for seed {seed}")
+        return 0
+    
+    pattern = os.path.join(log_dir, f"{seed}-*.log")
+    log_files = glob.glob(pattern)
+    
+    if not log_files:
+        logger.info(f"No log files found for seed {seed}")
+        return 0
+    
+    for log_file in log_files:
+        logger.info(f"  {os.path.basename(log_file)}")
+    
+    if not force:
+        response = input(f"\nDelete these {len(log_files)} log file(s)? [y/N]: ")
+        if response.lower() != 'y':
+            logger.info("Cancelled")
+            return 0
+    
+    deleted = 0
+    for log_file in log_files:
+        try:
+            os.remove(log_file)
+            deleted += 1
+        except Exception:
+            pass
+    
+    logger.info(f"Deleted {deleted} log file(s) for seed {seed}")
+    return 0

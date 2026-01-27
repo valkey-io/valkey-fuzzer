@@ -30,11 +30,12 @@ class FuzzerLogger:
             
     def log_test_start(self, scenario: Scenario) -> None:
         """Log the start of a test scenario with immutable configuration."""
-        self.current_test_id = scenario.scenario_id
-        self.test_start_times[scenario.scenario_id] = time.time()
+        with self._lock:
+            self.current_test_id = scenario.scenario_id
+            self.test_start_times[scenario.scenario_id] = time.time()
         
-        # Initialize test log structure
-        self.test_logs[scenario.scenario_id] = {
+            # Initialize test log structure
+            self.test_logs[scenario.scenario_id] = {
             'scenario_id': scenario.scenario_id,
             'seed': scenario.seed,
             'start_time': self.test_start_times[scenario.scenario_id],
@@ -49,12 +50,12 @@ class FuzzerLogger:
             'state_validation_results': [],
             'errors': [],
             'status': 'running'
-        }
-                
-        # Log human-readable scenario summary
-        self._log_scenario_summary(scenario)
-        
-        self._write_log_to_disk(scenario.scenario_id)
+            }
+                    
+            # Log human-readable scenario summary
+            self._log_scenario_summary(scenario)
+            
+            self._write_log_to_disk(scenario.scenario_id)
     
     def log_operation(self, operation: Operation, success: bool, details: str, silent: bool = False) -> None:
         """Log a cluster operation execution with success status and details."""
@@ -86,11 +87,12 @@ class FuzzerLogger:
     
     def log_chaos_event(self, chaos_result: ChaosResult) -> None:
         """Log a chaos injection event with result details."""
-        if not self.current_test_id:
-            logger.warning("No active test to log chaos event to")
-            return
-        
-        chaos_log = {
+        with self._lock:
+            if not self.current_test_id:
+                logger.warning("No active test to log chaos event to")
+                return
+            
+            chaos_log = {
             'chaos_id': chaos_result.chaos_id,
             'chaos_type': chaos_result.chaos_type.value,
             'target_node': chaos_result.target_node,
@@ -101,22 +103,23 @@ class FuzzerLogger:
             'end_timestamp': datetime.fromtimestamp(chaos_result.end_time).isoformat() if chaos_result.end_time else None,
             'duration': chaos_result.end_time - chaos_result.start_time if chaos_result.end_time else None,
             'error_message': chaos_result.error_message
-        }
-        
-        self.test_logs[self.current_test_id]['chaos_events'].append(chaos_log)
-        
-        logger.info(f"Logged chaos event: {chaos_result.chaos_type.value} on {chaos_result.target_node} - {'SUCCESS' if chaos_result.success else 'FAILED'}")
-        self._write_log_to_disk(self.current_test_id)
+            }
+            
+            self.test_logs[self.current_test_id]['chaos_events'].append(chaos_log)
+            
+            logger.info(f"Logged chaos event: {chaos_result.chaos_type.value} on {chaos_result.target_node} - {'SUCCESS' if chaos_result.success else 'FAILED'}")
+            self._write_log_to_disk(self.current_test_id)
     
     
     def log_state_validation_result(self, validation_result, operation_number: int) -> None:
         """Log a state validation result with detailed sub-check information."""
-        if not self.current_test_id:
-            logger.warning("No active test to log state validation result to")
-            return
-        
-        # Build detailed validation log
-        validation_log = {
+        with self._lock:
+            if not self.current_test_id:
+                logger.warning("No active test to log state validation result to")
+                return
+            
+            # Build detailed validation log
+            validation_log = {
             'operation_number': operation_number,
             'timestamp': validation_result.validation_timestamp,
             'datetime': datetime.fromtimestamp(validation_result.validation_timestamp).isoformat(),
@@ -227,65 +230,66 @@ class FuzzerLogger:
                 ],
                 'error_message': view.error_message
             }
-        
-        # Add to test logs
-        self.test_logs[self.current_test_id]['state_validation_results'].append(validation_log)
-        
-        # Log human-readable summary
-        status_str = "PASSED" if validation_result.overall_success else "FAILED"
-        critical_str = " (CRITICAL)" if validation_result.is_critical_failure() else ""
-        
-        logger.info(
-            f"Logged state validation result for operation {operation_number}: "
-            f"{status_str}{critical_str} - Duration: {validation_result.validation_duration:.2f}s"
-        )
-        
-        if not validation_result.overall_success:
-            logger.info(f"  Failed checks: {', '.join(validation_result.failed_checks)}")
             
-            # Log detailed failure information for each check
-            if validation_result.replication and not validation_result.replication.success:
-                logger.info(
-                    f"  - Replication: {len(validation_result.replication.lagging_replicas)} lagging, "
-                    f"{len(validation_result.replication.disconnected_replicas)} disconnected"
-                )
+            # Add to test logs
+            self.test_logs[self.current_test_id]['state_validation_results'].append(validation_log)
             
-            if validation_result.cluster_status and not validation_result.cluster_status.success:
-                logger.info(
-                    f"  - Cluster Status: state={validation_result.cluster_status.cluster_state}, "
-                    f"failed_nodes={len(validation_result.cluster_status.nodes_in_fail_state)}"
-                )
+            # Log human-readable summary
+            status_str = "PASSED" if validation_result.overall_success else "FAILED"
+            critical_str = " (CRITICAL)" if validation_result.is_critical_failure() else ""
             
-            if validation_result.slot_coverage and not validation_result.slot_coverage.success:
-                logger.info(
-                    f"  - Slot Coverage: {validation_result.slot_coverage.total_slots_assigned}/16384 assigned, "
-                    f"{len(validation_result.slot_coverage.unassigned_slots)} unassigned, "
-                    f"{len(validation_result.slot_coverage.conflicting_slots)} conflicts"
-                )
+            logger.info(
+                f"Logged state validation result for operation {operation_number}: "
+                f"{status_str}{critical_str} - Duration: {validation_result.validation_duration:.2f}s"
+            )
             
-            if validation_result.topology and not validation_result.topology.success:
-                logger.info(
-                    f"  - Topology: {validation_result.topology.actual_primaries}/{validation_result.topology.expected_primaries} primaries, "
-                    f"{validation_result.topology.actual_replicas}/{validation_result.topology.expected_replicas} replicas, "
-                    f"{len(validation_result.topology.topology_mismatches)} mismatches"
-                )
+            if not validation_result.overall_success:
+                logger.info(f"  Failed checks: {', '.join(validation_result.failed_checks)}")
+                
+                # Log detailed failure information for each check
+                if validation_result.replication and not validation_result.replication.success:
+                    logger.info(
+                        f"  - Replication: {len(validation_result.replication.lagging_replicas)} lagging, "
+                        f"{len(validation_result.replication.disconnected_replicas)} disconnected"
+                    )
+                
+                if validation_result.cluster_status and not validation_result.cluster_status.success:
+                    logger.info(
+                        f"  - Cluster Status: state={validation_result.cluster_status.cluster_state}, "
+                        f"failed_nodes={len(validation_result.cluster_status.nodes_in_fail_state)}"
+                    )
+                
+                if validation_result.slot_coverage and not validation_result.slot_coverage.success:
+                    logger.info(
+                        f"  - Slot Coverage: {validation_result.slot_coverage.total_slots_assigned}/16384 assigned, "
+                        f"{len(validation_result.slot_coverage.unassigned_slots)} unassigned, "
+                        f"{len(validation_result.slot_coverage.conflicting_slots)} conflicts"
+                    )
+                
+                if validation_result.topology and not validation_result.topology.success:
+                    logger.info(
+                        f"  - Topology: {validation_result.topology.actual_primaries}/{validation_result.topology.expected_primaries} primaries, "
+                        f"{validation_result.topology.actual_replicas}/{validation_result.topology.expected_replicas} replicas, "
+                        f"{len(validation_result.topology.topology_mismatches)} mismatches"
+                    )
+                
+                if validation_result.view_consistency and not validation_result.view_consistency.success:
+                    logger.info(
+                        f"  - View Consistency: {validation_result.view_consistency.nodes_checked} nodes checked, "
+                        f"consensus={validation_result.view_consistency.consensus_percentage:.1f}%, "
+                        f"split_brain={validation_result.view_consistency.split_brain_detected}"
+                    )
             
-            if validation_result.view_consistency and not validation_result.view_consistency.success:
-                logger.info(
-                    f"  - View Consistency: {validation_result.view_consistency.nodes_checked} nodes checked, "
-                    f"consensus={validation_result.view_consistency.consensus_percentage:.1f}%, "
-                    f"split_brain={validation_result.view_consistency.split_brain_detected}"
-                )
-        
-        self._write_log_to_disk(self.current_test_id)
+            self._write_log_to_disk(self.current_test_id)
     
     def log_cluster_state_snapshot(self, cluster_status: ClusterStatus, label: str = "") -> None:
         """Log a snapshot of cluster state at a specific point in time."""
-        if not self.current_test_id:
-            logger.warning("No active test to log cluster state to")
-            return
-        
-        snapshot = {
+        with self._lock:
+            if not self.current_test_id:
+                logger.warning("No active test to log cluster state to")
+                return
+            
+            snapshot = {
             'timestamp': time.time(),
             'datetime': datetime.now().isoformat(),
             'label': label,
@@ -304,54 +308,56 @@ class FuzzerLogger:
                 }
                 for node in cluster_status.nodes
             ]
-        }
-        
-        self.test_logs[self.current_test_id]['cluster_state_snapshots'].append(snapshot)
-        
-        logger.info(f"Logged cluster state snapshot: {label} - healthy={cluster_status.is_healthy}")
-        self._write_log_to_disk(self.current_test_id)
+            }
+            
+            self.test_logs[self.current_test_id]['cluster_state_snapshots'].append(snapshot)
+            
+            logger.info(f"Logged cluster state snapshot: {label} - healthy={cluster_status.is_healthy}")
+            self._write_log_to_disk(self.current_test_id)
     
     def log_error(self, error_message: str, error_details: Optional[Dict[str, Any]] = None) -> None:
         """Log an error that occurred during test execution."""
-        if not self.current_test_id:
-            logger.warning("No active test to log error to")
-            return
-        
-        error_log = {
-            'timestamp': time.time(),
-            'datetime': datetime.now().isoformat(),
-            'message': error_message,
-            'details': error_details or {}
-        }
-        
-        self.test_logs[self.current_test_id]['errors'].append(error_log)
-        
-        logger.error(f"Logged error: {error_message}")
-        self._write_log_to_disk(self.current_test_id)
+        with self._lock:
+            if not self.current_test_id:
+                logger.warning("No active test to log error to")
+                return
+            
+            error_log = {
+                'timestamp': time.time(),
+                'datetime': datetime.now().isoformat(),
+                'message': error_message,
+                'details': error_details or {}
+            }
+            
+            self.test_logs[self.current_test_id]['errors'].append(error_log)
+            
+            logger.error(f"Logged error: {error_message}")
+            self._write_log_to_disk(self.current_test_id)
     
     def log_test_completion(self, test_result: ExecutionResult) -> None:
         """Log the completion of a test scenario with final execution results."""
-        if test_result.scenario_id not in self.test_logs:
-            logger.warning(f"No log found for test {test_result.scenario_id}")
-            return
-        
-        self.test_logs[test_result.scenario_id].update({
-            'end_time': test_result.end_time,
-            'end_timestamp': datetime.fromtimestamp(test_result.end_time).isoformat(),
-            'duration': test_result.end_time - test_result.start_time,
-            'success': test_result.success,
-            'operations_executed': test_result.operations_executed,
-            'final_error_message': test_result.error_message,
-            'status': 'completed' if test_result.success else 'failed'
-        })
-        
-        logger.info(f"Completed test {test_result.scenario_id} - {'SUCCESS' if test_result.success else 'FAILED'} "
-                   f"(duration: {test_result.end_time - test_result.start_time:.2f}s)")
-        
-        self._write_log_to_disk(test_result.scenario_id)
-        
-        if self.current_test_id == test_result.scenario_id:
-            self.current_test_id = None
+        with self._lock:
+            if test_result.scenario_id not in self.test_logs:
+                logger.warning(f"No log found for test {test_result.scenario_id}")
+                return
+            
+            self.test_logs[test_result.scenario_id].update({
+                'end_time': test_result.end_time,
+                'end_timestamp': datetime.fromtimestamp(test_result.end_time).isoformat(),
+                'duration': test_result.end_time - test_result.start_time,
+                'success': test_result.success,
+                'operations_executed': test_result.operations_executed,
+                'final_error_message': test_result.error_message,
+                'status': 'completed' if test_result.success else 'failed'
+            })
+            
+            logger.info(f"Completed test {test_result.scenario_id} - {'SUCCESS' if test_result.success else 'FAILED'} "
+                       f"(duration: {test_result.end_time - test_result.start_time:.2f}s)")
+            
+            self._write_log_to_disk(test_result.scenario_id)
+            
+            if self.current_test_id == test_result.scenario_id:
+                self.current_test_id = None
     
     def generate_report(self, test_results: List[ExecutionResult]) -> str:
         """Generate a summary report from multiple test executions."""

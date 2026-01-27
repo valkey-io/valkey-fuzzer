@@ -96,7 +96,7 @@ class FuzzerEngine(IFuzzerEngine):
         cluster_instance = None
         cluster_connection = None
         
-        logger.info(f"Starting test execution: {scenario.scenario_id}")
+        logger.info(f"Starting test execution for scenario: {scenario.scenario_id}")
         
         # Reinitialize chaos coordinator with scenario seed for deterministic chaos selection
         self.chaos_coordinator = ChaosCoordinator(seed=scenario.seed)
@@ -136,12 +136,12 @@ class FuzzerEngine(IFuzzerEngine):
             # Create StateValidator with config from scenario or use defaults
             if hasattr(scenario, 'state_validation_config') and scenario.state_validation_config:
                 validation_config = deepcopy(scenario.state_validation_config)
-                logger.info("Using scenario-specific StateValidationConfig")
+                logger.debug("Using scenario-specific StateValidationConfig")
             else:
                 validation_config = StateValidationConfig()
                 # Allow 'unknown' state after failovers - it's transient and expected
                 validation_config.cluster_status_config.acceptable_states = ['ok', 'unknown']
-                logger.info("Using default StateValidationConfig")
+                logger.debug("Using default StateValidationConfig")
             
             # Adjust replication validation config based on cluster topology (for DSL scenarios)
             # If the cluster has no replicas, disable the min_replicas_per_shard check
@@ -331,7 +331,7 @@ class FuzzerEngine(IFuzzerEngine):
         )
         
         def create_cluster_operation():
-            return self.cluster_coordinator.create_cluster(scenario.cluster_config)
+            return self.cluster_coordinator.create_cluster(scenario.cluster_config, seed=scenario.seed)
         
         success, cluster_instance = self.error_handler.retry_with_backoff(
             operation=create_cluster_operation,
