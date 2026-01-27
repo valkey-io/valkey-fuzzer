@@ -16,8 +16,8 @@ def test_killed_nodes_tracking():
     
     assert len(validator.killed_nodes) == 0
     
-    validator.register_killed_node("127.0.0.1:6379")
-    validator.register_killed_node("127.0.0.1:6380")
+    validator.register_killed_node("127.0.0.1:6379", "primary", 0)
+    validator.register_killed_node("127.0.0.1:6380", "replica", 1)
     
     assert len(validator.killed_nodes) == 2
     validator.clear_killed_nodes()

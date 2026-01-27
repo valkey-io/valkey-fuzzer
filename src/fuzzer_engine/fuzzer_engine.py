@@ -4,8 +4,9 @@ Fuzzer Engine - Main orchestrator for test scenario execution
 import time
 import logging
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import Optional
-from ..models import Scenario, ExecutionResult, DSLConfig, ClusterConnection
+from ..models import Scenario, ExecutionResult, DSLConfig, ClusterConnection, LogValidationContext
 from ..interfaces import IFuzzerEngine
 from ..valkey_client.load_data import load_all_slots
 from .test_case_generator import ScenarioGenerator
@@ -188,8 +189,8 @@ class FuzzerEngine(IFuzzerEngine):
                     for node in cluster_instance.nodes:
                         if node.node_id == target_node_id:
                             node_address = f"{node.host}:{node.port}"
-                            state_validator.register_killed_node(node_address, target_role)
-                            logger.info(f"Registered killed node for validation: {node_address} (role: {target_role})")
+                            state_validator.register_killed_node(node_address, target_role, node.shard_id)
+                            logger.info(f"Registered killed node for validation: {node_address} (role: {target_role}, shard: {node.shard_id})")
                             break
             
             # Step 5: Final cluster validation
@@ -204,7 +205,26 @@ class FuzzerEngine(IFuzzerEngine):
             )
             
             # Execute final validation with retry (consistent with per-operation validation)
-            final_validation_result = state_validator.validate_with_retry(cluster_connection, expected_topology, None)
+            # Create operation context for log validation - only include successful operations
+            # Match operations by type and target
+            operation_logs = self.logger.test_logs.get(scenario.scenario_id, {}).get('operation_logs', [])
+            successful_operations = []
+            
+            for op in scenario.operations:
+                for log in operation_logs:
+                    if (log.get('success') and 
+                        log.get('operation_type') == op.type.value and 
+                        log.get('target_node') == op.target_node):
+                        successful_operations.append(op)
+                        break
+            
+            operation_context = LogValidationContext(operations=successful_operations)
+            
+            final_validation_result = state_validator.validate_with_retry(
+                cluster_connection,
+                expected_topology,
+                operation_context
+            )
             
             # Store final validation for API consumers
             final_validation = final_validation_result

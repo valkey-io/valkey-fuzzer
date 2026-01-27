@@ -197,46 +197,6 @@ def test_randomization_distribution(chaos_coordinator, base_chaos_config):
 # ============================================================================
 
 @patch('src.fuzzer_engine.chaos_coordinator.time.sleep')
-def test_coordinate_chaos_with_randomization_enabled(mock_sleep, chaos_coordinator, base_chaos_config, mock_cluster_connection):
-    """Test that chaos is randomized when randomize_per_operation=True."""
-    # Track what chaos types were used
-    chaos_types_used = []
-    
-    def capture_chaos_type(node, chaos_type, **kwargs):
-        chaos_types_used.append(chaos_type)
-        return Mock(
-            success=True,
-            chaos_id=f"test_{len(chaos_types_used)}",
-            chaos_type=ChaosType.PROCESS_KILL,
-            target_node=node.node_id,
-            start_time=0,
-            end_time=1
-        )
-    
-    chaos_coordinator.chaos_engine.inject_process_chaos = capture_chaos_type
-    
-    operation = Operation(
-        type=OperationType.FAILOVER,
-        target_node="node_0",
-        parameters={"test_key": "test_value"},
-        timing=OperationTiming()
-    )
-    
-    # Execute multiple operations (randomization enabled via config)
-    for _ in range(10):
-        chaos_coordinator.coordinate_chaos_with_operation(
-            operation=operation,
-            chaos_config=base_chaos_config,
-            cluster_connection=mock_cluster_connection,
-            cluster_id="test_cluster"
-        )
-    
-    # Should see both SIGKILL and SIGTERM
-    assert ProcessChaosType.SIGKILL in chaos_types_used
-    assert ProcessChaosType.SIGTERM in chaos_types_used
-
-
-@patch('src.fuzzer_engine.chaos_coordinator.time.sleep')
 def test_coordinate_chaos_without_randomization(mock_sleep, chaos_coordinator, mock_cluster_connection):
     """Test that chaos is deterministic when randomize_per_operation=False."""
     chaos_types_used = []

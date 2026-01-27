@@ -18,6 +18,7 @@ from ..models import (
     DataConsistencyValidation, DataConsistencyValidationConfig, DataInconsistency,
     ExpectedTopology, StateValidationConfig, StateValidationResult
 )
+from .log_validator import ShardLogValidator
 from .state_validator_helpers import (
     format_node_address,
     validate_killed_vs_failed_nodes,
@@ -2207,22 +2208,24 @@ class StateValidator:
 
         # Track killed nodes from chaos injections
         self.killed_nodes: set[str] = set()
-        
+        self.shards_with_primary_killed: set[int] = set()
         # Track killed node roles at time of death: node_address -> role
         self.killed_node_roles: dict[str, str] = {}
 
         logger.debug("StateValidator initialized")
 
-    def register_killed_node(self, node_address: str, role: Optional[str] = None) -> None:
+    def register_killed_node(self, node_address: str, node_role: str, shard_id: int) -> None:
         """Register a node that was killed by chaos injection."""
         self.killed_nodes.add(node_address)
-        if role:
-            self.killed_node_roles[node_address] = role
-        logger.debug(f"Registered killed node: {node_address} (role: {role})")
+        self.killed_node_roles[node_address] = node_role
+        if node_role == 'primary':
+            self.shards_with_primary_killed.add(shard_id)
+        logger.debug(f"Registered killed node: {node_address} (role: {node_role}, shard: {shard_id})")
 
     def clear_killed_nodes(self) -> None:
         """Clear the list of killed nodes (e.g., after recovery)."""
         self.killed_nodes.clear()
+        self.shards_with_primary_killed.clear()
         self.killed_node_roles.clear()
         logger.debug("Cleared killed nodes list")
 
@@ -2465,6 +2468,45 @@ class StateValidator:
                         error_messages=error_messages,
                         display_name="Data Consistency"
                     )
+                
+                # 7. Log validation for affected shards
+                log_result = None
+                if self.config.check_logs and operation_context:
+                    if time.time() >= timeout_deadline:
+                        raise ValidationTimeoutError(f"Validation timeout ({self.config.validation_timeout}s) exceeded")
+                    
+                    log_validator = ShardLogValidator()
+                    all_nodes = cluster_connection.get_current_nodes(include_failed=True)
+                    
+                    # Convert dict nodes to NodeInfo for log validator
+                    node_info_list = []
+                    for node_dict in all_nodes:
+                        # Find matching node from initial_nodes to get log_file path
+                        matching_node = next(
+                            (n for n in cluster_connection.initial_nodes 
+                            if n.cluster_node_id == node_dict.get('node_id')),
+                            None
+                        )
+                        if matching_node:
+                            matching_node.role = node_dict.get('role', matching_node.role)
+                            node_info_list.append(matching_node)
+                    
+                    log_result = log_validator.validate_affected_shards(
+                        node_info_list,
+                        operation_context.operations if hasattr(operation_context, 'operations') else [],
+                        self.killed_nodes,
+                        self.shards_with_primary_killed
+                    )
+                    
+                    if not log_result.success:
+                        failed_checks.append("log_validation")
+                        for finding in log_result.findings:
+                            if finding.severity == 'error':
+                                logger.error(f"Log validation error - Shard {finding.shard_id}, Node {finding.node_id}: {finding.message} | Log: {finding.log_line}")
+                            elif finding.severity == 'warning':
+                                logger.warning(f"Log validation warning - Shard {finding.shard_id}, Node {finding.node_id}: {finding.message} | Log: {finding.log_line}")
+                    
+                    logger.info(f"Log validation: {'PASSED' if log_result.success else 'FAILED'}")
 
         except ValidationTimeoutError as e:
             logger.error(f"Validation timeout: {e}")
@@ -2492,6 +2534,7 @@ class StateValidator:
             topology=topology_result,
             view_consistency=view_consistency_result,
             data_consistency=data_consistency_result,
+            log_validation=log_result if 'log_result' in locals() else None,
             failed_checks=failed_checks,
             error_messages=error_messages
         )
