@@ -207,18 +207,17 @@ class FuzzerEngine(IFuzzerEngine):
             
             # Execute final validation with retry (consistent with per-operation validation)
             # Create operation context for log validation - only include successful operations
-            # Match operations by index to handle repeated operations on same target
+            # Match operations by type and target
             operation_logs = self.logger.test_logs.get(scenario.scenario_id, {}).get('operation_logs', [])
             successful_operations = []
             
-            for idx, op in enumerate(scenario.operations):
-                # Find the log entry at the same index
-                if idx < len(operation_logs):
-                    log = operation_logs[idx]
+            for op in scenario.operations:
+                for log in operation_logs:
                     if (log.get('success') and 
                         log.get('operation_type') == op.type.value and 
                         log.get('target_node') == op.target_node):
                         successful_operations.append(op)
+                        break
             
             operation_context = LogValidationContext(operations=successful_operations)
             
