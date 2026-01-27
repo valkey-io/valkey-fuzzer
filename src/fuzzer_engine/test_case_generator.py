@@ -162,14 +162,20 @@ class ScenarioGenerator(ITestCaseGenerator):
         if not (0 <= replicas_per_shard <= 2):
             raise ValueError(f"replicas_per_shard must be between 0 and 2, got {replicas_per_shard}")
         
-        return ClusterConfig(
-            num_shards=num_shards,
-            replicas_per_shard=replicas_per_shard,
-            base_port=cluster_dict.get("base_port", 6379),
-            base_data_dir=cluster_dict.get("base_data_dir", "/tmp/valkey-fuzzer"),
-            valkey_binary=cluster_dict.get("valkey_binary", "/usr/local/bin/valkey-server"),
-            enable_cleanup=cluster_dict.get("enable_cleanup", True)
-        )
+        kwargs = {
+            'num_shards': num_shards,
+            'replicas_per_shard': replicas_per_shard
+        }
+        if 'base_port' in cluster_dict:
+            kwargs['base_port'] = cluster_dict['base_port']
+        if 'base_data_dir' in cluster_dict:
+            kwargs['base_data_dir'] = cluster_dict['base_data_dir']
+        if 'valkey_binary' in cluster_dict:
+            kwargs['valkey_binary'] = cluster_dict['valkey_binary']
+        if 'enable_cleanup' in cluster_dict:
+            kwargs['enable_cleanup'] = cluster_dict['enable_cleanup']
+        
+        return ClusterConfig(**kwargs)
     
     def _parse_operations(self, operations_list: List[Dict[str, Any]]) -> List[Operation]:
         """Parse operations from DSL"""
