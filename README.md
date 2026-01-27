@@ -123,13 +123,12 @@ valkey-fuzzer cluster --dsl captured_scenario.yaml
 
 ```yaml
 # simple_failover.yaml
-scenario:
-  name: "basic_failover_test"
-  seed: 42
+scenario_id: "basic_failover_test"
+seed: 42
   
 cluster:
   num_shards: 3
-  replicas: 1
+  replicas_per_shard: 1
   
 operations:
   - type: "failover"
@@ -155,13 +154,12 @@ state_validation:
 #### Complex Multi-Operation Test
 
 ```yaml
-scenario:
-  name: "complex_chaos_test"
-  seed: 98765
+scenario_id: "complex_chaos_test"
+seed: 98765
   
 cluster:
   num_shards: 8
-  replicas: 2
+  replicas_per_shard: 2
   
 operations:
   - type: "failover"

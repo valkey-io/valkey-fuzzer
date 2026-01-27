@@ -399,6 +399,11 @@ class ClusterManager:
     def assign_and_verify_slots(self, nodes_in_cluster: List[NodeInfo]) -> Dict[str, str]:
         """Assign hash slots to primary nodes and verify assignment"""
         primary_nodes = [node for node in nodes_in_cluster if node.role == 'primary']
+
+        if not primary_nodes:
+            logger.info("No primary nodes to assign slots to")
+            return {}
+
         
         logger.info("")
         logger.info(f"Assigning slots to {len(primary_nodes)} primaries")

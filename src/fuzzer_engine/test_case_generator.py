@@ -136,7 +136,10 @@ class ScenarioGenerator(ITestCaseGenerator):
         operations = self._parse_operations(config["operations"])
         chaos_config = self._parse_chaos_config(config.get("chaos", {}))
         state_validation_config = self._parse_state_validation_config(config.get("state_validation"))
+        
         seed = config.get("seed")
+        if seed is None:
+            seed = random.randint(0, 2**32 - 1)
         
         return Scenario(
             scenario_id=config["scenario_id"],
