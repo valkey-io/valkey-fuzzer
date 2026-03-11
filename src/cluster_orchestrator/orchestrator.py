@@ -54,9 +54,14 @@ class ConfigurationManager:
     
     def setup_valkey_from_source(self, base_dir: str = "/tmp/valkey-build") -> str:
         """Clone and build Valkey binary, return path to valkey-server binary"""
-        result = subprocess.run(['which', 'valkey-server'], capture_output=True, text=True)
-        if result.returncode == 0:
-            valkey_binary = result.stdout.strip()
+        configured_binary = self.clusterConfig.valkey_binary
+        if configured_binary:
+            resolved_binary = shutil.which(configured_binary)
+            if resolved_binary:
+                return resolved_binary
+
+        valkey_binary = shutil.which('valkey-server')
+        if valkey_binary:
             return valkey_binary
                 
         valkey_dir = os.path.join(base_dir, "valkey")

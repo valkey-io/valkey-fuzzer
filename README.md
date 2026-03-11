@@ -88,7 +88,51 @@ valkey-fuzzer cluster --random --verbose
 # Run with iterations 
 valkey-fuzzer cluster --seed 42 --iterations 2 --verbose
 
+# Run against a specific Valkey binary
+valkey-fuzzer cluster --random --valkey-binary /tmp/valkey/src/valkey-server
+
+# Run a DSL scenario against a specific Valkey binary
+valkey-fuzzer cluster --dsl examples/simple_failover.yaml --valkey-binary /tmp/valkey/src/valkey-server
+
 ```
+
+### PR-Triggered Fuzzer Runs
+
+This repo now includes a reusable GitHub Actions workflow at `.github/workflows/pr-merge-fuzzer.yml` that can:
+
+- build Valkey from a specific ref, including a PR merge ref such as `refs/pull/123/merge`
+- fan out a configurable number of random fuzzer runs, defaulting to `10`
+- upload per-run artifacts with the console log, node logs, and JSON result payload
+- fail the overall workflow if any run fails, while still letting all matrix runs complete
+- treat a run as failed if any operation fails, any chaos injection fails, any post-operation validation wave fails, or the final validation fails
+
+If you want this to run when a label is applied in the Valkey repo, the Valkey repo needs a small caller workflow. Example:
+
+```yaml
+name: Label-triggered Valkey Fuzzer
+
+on:
+  pull_request_target:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  pr-fuzzer:
+    if: github.event.label.name == 'run-fuzzer'
+    uses: sarthakaggarwal97/valkey-fuzzer/.github/workflows/pr-merge-fuzzer.yml@main
+    with:
+      fuzzer_ref: main
+      valkey_repository: ${{ github.repository }}
+      valkey_ref: refs/pull/${{ github.event.pull_request.number }}/merge
+      pr_number: ${{ github.event.pull_request.number }}
+      pr_url: ${{ github.event.pull_request.html_url }}
+      label_name: ${{ github.event.label.name }}
+      run_count: 10
+```
+
+This keeps the status visible on the Valkey PR as a normal workflow check. If the PR cannot produce a merge ref, for example due to merge conflicts, the workflow will fail during the Valkey checkout/build stage.
 
 ### DSL-Based Test Execution
 

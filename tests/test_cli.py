@@ -98,6 +98,7 @@ class TestFuzzerCLI:
             seed=42,
             iterations=1,
             config=None,
+            valkey_binary=None,
             output=None,
             verbose=False,
             export_dsl=None
@@ -128,6 +129,7 @@ class TestFuzzerCLI:
             seed=None,
             iterations=1,
             config=str(config_file),
+            valkey_binary=None,
             output=None,
             verbose=False,
             export_dsl=None
@@ -151,6 +153,7 @@ class TestFuzzerCLI:
             seed=42,
             iterations=3,
             config=None,
+            valkey_binary=None,
             output=None,
             verbose=False,
             export_dsl=None
@@ -176,6 +179,7 @@ class TestFuzzerCLI:
             seed=42,
             iterations=1,
             config=None,
+            valkey_binary=None,
             output=str(output_file),
             format='json',
             verbose=False,
@@ -211,6 +215,7 @@ class TestFuzzerCLI:
             seed=42,
             iterations=1,
             config=None,
+            valkey_binary=None,
             output=None,
             verbose=False,
             export_dsl=str(export_file)
@@ -238,6 +243,7 @@ class TestFuzzerCLI:
         cli = FuzzerCLI()
         args = Mock(
             file=str(dsl_file),
+            valkey_binary=None,
             output=None,
             verbose=False
         )
@@ -247,6 +253,63 @@ class TestFuzzerCLI:
         assert result == 0
         mock_loader.load_from_file.assert_called_once_with(str(dsl_file))
         mock_fuzzer.run_dsl_test.assert_called_once_with(mock_dsl_config)
+
+    @patch('src.cli.ClusterBusFuzzer')
+    def test_run_random_test_passes_valkey_binary(self, mock_fuzzer_class, mock_result):
+        """Test running random test with explicit Valkey binary override"""
+        mock_fuzzer = Mock()
+        mock_fuzzer.run_random_test.return_value = mock_result
+        mock_fuzzer.last_scenario = Mock()
+        mock_fuzzer_class.return_value = mock_fuzzer
+
+        cli = FuzzerCLI()
+        args = Mock(
+            seed=42,
+            iterations=1,
+            config=None,
+            valkey_binary="/tmp/valkey/src/valkey-server",
+            output=None,
+            verbose=False,
+            export_dsl=None
+        )
+
+        result = cli.run_random_test(args)
+
+        assert result == 0
+        mock_fuzzer.run_random_test.assert_called_once_with(
+            seed=42,
+            valkey_binary="/tmp/valkey/src/valkey-server"
+        )
+
+    @patch('src.cli.ClusterBusFuzzer')
+    @patch('src.cli.DSLLoader')
+    def test_run_dsl_test_passes_valkey_binary(self, mock_loader, mock_fuzzer_class, mock_result, tmp_path):
+        """Test running DSL test with explicit Valkey binary override"""
+        dsl_file = tmp_path / "test.yaml"
+        dsl_file.write_text("scenario:\n  id: test\n")
+
+        mock_dsl_config = Mock()
+        mock_loader.load_from_file.return_value = mock_dsl_config
+
+        mock_fuzzer = Mock()
+        mock_fuzzer.run_dsl_test.return_value = mock_result
+        mock_fuzzer_class.return_value = mock_fuzzer
+
+        cli = FuzzerCLI()
+        args = Mock(
+            file=str(dsl_file),
+            valkey_binary="/tmp/valkey/src/valkey-server",
+            output=None,
+            verbose=False
+        )
+
+        result = cli.run_dsl_test(args)
+
+        assert result == 0
+        mock_fuzzer.run_dsl_test.assert_called_once_with(
+            mock_dsl_config,
+            valkey_binary="/tmp/valkey/src/valkey-server"
+        )
     
     @patch('src.cli.ClusterBusFuzzer')
     def test_run_dsl_test_file_not_found(self, mock_fuzzer_class, capsys):
@@ -351,6 +414,14 @@ class TestCLIParser:
         
         assert args.command == 'cluster'
         assert args.dsl == 'test.yaml'
+
+    def test_parse_valkey_binary_option(self):
+        """Test parsing explicit Valkey binary option"""
+        parser = create_parser()
+        args = parser.parse_args(['cluster', '--random', '--valkey-binary', '/tmp/valkey-server'])
+
+        assert args.command == 'cluster'
+        assert args.valkey_binary == '/tmp/valkey-server'
     
     def test_parse_output_options(self):
         """Test parsing output options"""

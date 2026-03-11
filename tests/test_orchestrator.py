@@ -1,5 +1,6 @@
 import pytest
 import logging
+from unittest.mock import patch
 from src.cluster_orchestrator.orchestrator import PortManager, ConfigurationManager, ClusterManager
 from src.models import ClusterConfig
 
@@ -65,6 +66,43 @@ def test_configuration_manager_topology():
         assert primary.slot_start is not None
         assert primary.slot_end is not None
         assert primary.slot_start <= primary.slot_end
+
+
+@patch('src.cluster_orchestrator.orchestrator.shutil.which')
+def test_setup_valkey_from_source_uses_configured_binary(mock_which):
+    """Test that an explicit Valkey binary path is preferred when it exists"""
+    config = ClusterConfig(
+        num_shards=3,
+        replicas_per_shard=1,
+        valkey_binary='/tmp/valkey/src/valkey-server'
+    )
+    config_mgr = ConfigurationManager(config, PortManager())
+
+    mock_which.side_effect = ['/tmp/valkey/src/valkey-server']
+
+    valkey_binary = config_mgr.setup_valkey_from_source()
+
+    assert valkey_binary == '/tmp/valkey/src/valkey-server'
+    assert mock_which.call_args_list[0].args == ('/tmp/valkey/src/valkey-server',)
+
+
+@patch('src.cluster_orchestrator.orchestrator.subprocess.run')
+@patch('src.cluster_orchestrator.orchestrator.shutil.which')
+def test_setup_valkey_from_source_falls_back_to_path_binary(mock_which, mock_run):
+    """Test that setup falls back to PATH when the configured binary is unavailable"""
+    config = ClusterConfig(
+        num_shards=3,
+        replicas_per_shard=1,
+        valkey_binary='/tmp/missing-valkey-server'
+    )
+    config_mgr = ConfigurationManager(config, PortManager())
+
+    mock_which.side_effect = [None, '/usr/local/bin/valkey-server']
+
+    valkey_binary = config_mgr.setup_valkey_from_source()
+
+    assert valkey_binary == '/usr/local/bin/valkey-server'
+    mock_run.assert_not_called()
 
 
 def test_full_cluster_creation():

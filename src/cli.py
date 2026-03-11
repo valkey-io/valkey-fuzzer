@@ -79,7 +79,11 @@ class FuzzerCLI:
                 print(f"\n--- Iteration {i + 1}/{args.iterations} ---")
             
             try:
-                result = self.fuzzer.run_random_test(seed=seed)
+                run_kwargs = {'seed': seed}
+                if args.valkey_binary:
+                    run_kwargs['valkey_binary'] = args.valkey_binary
+
+                result = self.fuzzer.run_random_test(**run_kwargs)
                 results.append(result)
                 
                 if args.verbose:
@@ -134,7 +138,11 @@ class FuzzerCLI:
             print()
             
             # Run test
-            result = self.fuzzer.run_dsl_test(dsl_config)
+            run_kwargs = {}
+            if args.valkey_binary:
+                run_kwargs['valkey_binary'] = args.valkey_binary
+
+            result = self.fuzzer.run_dsl_test(dsl_config, **run_kwargs)
             
             if args.verbose:
                 self._print_detailed_result(result)
@@ -550,6 +558,11 @@ Examples:
         '--config',
         type=str,
         help='Path to configuration file (YAML or JSON)'
+    )
+    cluster_parser.add_argument(
+        '--valkey-binary',
+        type=str,
+        help='Path to the valkey-server binary to run'
     )
     cluster_parser.add_argument(
         '--output',

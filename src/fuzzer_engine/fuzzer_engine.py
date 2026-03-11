@@ -4,8 +4,7 @@ Fuzzer Engine - Main orchestrator for test scenario execution
 import time
 import logging
 from copy import deepcopy
-from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional
 from ..models import Scenario, ExecutionResult, DSLConfig, ClusterConnection, LogValidationContext
 from ..interfaces import IFuzzerEngine
 from ..valkey_client.load_data import load_all_slots
@@ -41,13 +40,16 @@ class FuzzerEngine(IFuzzerEngine):
         logger.info(f"Generating random scenario with seed: {seed}")
         return self.scenario_generator.generate_random_scenario(seed)
     
-    def execute_dsl_scenario(self, dsl_config: DSLConfig) -> ExecutionResult:
+    def execute_dsl_scenario(self, dsl_config: DSLConfig, valkey_binary: Optional[str] = None) -> ExecutionResult:
         """Execute a test scenario from DSL configuration."""
         logger.info("Executing DSL-based scenario")
         
         try:
             # Parse DSL configuration into scenario
             scenario = self.scenario_generator.parse_dsl_config(dsl_config.config_text)
+
+            if valkey_binary:
+                scenario.cluster_config.valkey_binary = valkey_binary
             
             # Validate scenario
             self.scenario_generator.validate_scenario(scenario)
@@ -92,7 +94,7 @@ class FuzzerEngine(IFuzzerEngine):
         start_time = time.time()
         operations_executed = 0
         chaos_events = []
-        validation_results = []  # Collect validation results for each operation
+        validation_results = []  # Collect validation results for each operation wave
         final_validation = None
         cluster_instance = None
         cluster_connection = None
@@ -143,9 +145,7 @@ class FuzzerEngine(IFuzzerEngine):
                 logger.debug("Using scenario-specific StateValidationConfig")
             else:
                 validation_config = StateValidationConfig()
-                # Allow 'unknown' state after failovers - it's transient and expected
-                validation_config.cluster_status_config.acceptable_states = ['ok', 'unknown']
-                logger.debug("Using default StateValidationConfig")
+                logger.info("Using default StateValidationConfig")
             
             # Adjust replication validation config based on cluster topology (for DSL scenarios)
             # If the cluster has no replicas, disable the min_replicas_per_shard check
@@ -165,11 +165,7 @@ class FuzzerEngine(IFuzzerEngine):
                 logger.info("Writing test data for data consistency validation")
                 test_data_written = state_validator.write_test_data(cluster_connection)
                 if not test_data_written:
-                    logger.warning("Failed to write test data - disabling data consistency validation for this run")
-                    state_validator.config.check_data_consistency = False
-            
-            # Track killed nodes for chaos-aware validation
-            killed_nodes_tracker = set()
+                    raise Exception("Failed to write test data required for data consistency validation")
             
             # Step 4: Execute operations in parallel with chaos coordination
             logger.info("")
@@ -177,37 +173,48 @@ class FuzzerEngine(IFuzzerEngine):
             logger.info("")
             
             parallel_executor = ParallelExecutor(self.operation_orchestrator, self.chaos_coordinator, self.logger)
+            expected_topology = self._build_expected_topology(scenario)
+
+            def validate_operation_wave(wave_number, wave_results):
+                wave_chaos_events = []
+                successful_operations = []
+                for _, _, chaos_events, _ in wave_results:
+                    wave_chaos_events.extend(chaos_events)
+                for op_index, executed, _, _ in wave_results:
+                    if executed:
+                        successful_operations.append(scenario.operations[op_index])
+
+                self._register_killed_nodes(
+                    state_validator,
+                    cluster_instance.nodes,
+                    wave_chaos_events
+                )
+
+                operation_context = None
+                if successful_operations:
+                    operation_context = LogValidationContext(operations=successful_operations)
+
+                validation_result = state_validator.validate_with_retry(
+                    cluster_connection,
+                    expected_topology,
+                    operation_context
+                )
+                self.logger.log_state_validation_result(validation_result, f"wave-{wave_number}")
+                return validation_result
             
             operations_executed, chaos_events, validation_results = parallel_executor.execute_operations_parallel(
                 scenario.operations,
                 scenario.chaos_config,
                 cluster_connection,
-                cluster_instance.cluster_id
+                cluster_instance.cluster_id,
+                validation_runner=validate_operation_wave,
+                halt_on_validation_failure=validation_config.blocking_on_failure
             )
-            
-            # Register killed nodes with state validator
-            for chaos_event in chaos_events:
-                if chaos_event.success and chaos_event.chaos_type == ChaosType.PROCESS_KILL:
-                    target_node_id = chaos_event.target_node
-                    target_role = chaos_event.target_role
-                    for node in cluster_instance.nodes:
-                        if node.node_id == target_node_id:
-                            node_address = f"{node.host}:{node.port}"
-                            state_validator.register_killed_node(node_address, target_role, node.shard_id)
-                            logger.info(f"Registered killed node for validation: {node_address} (role: {target_role}, shard: {node.shard_id})")
-                            break
             
             # Step 5: Final cluster validation
             logger.info("")
             logger.info("Step 5: Final cluster validation")
             logger.info("")
-            
-            # Build expected topology for final validation
-            expected_topology = ExpectedTopology(
-                num_primaries=scenario.cluster_config.num_shards,
-                num_replicas=scenario.cluster_config.num_shards * scenario.cluster_config.replicas_per_shard,
-                shard_structure={}
-            )
             
             # Execute final validation with retry (consistent with per-operation validation)
             # Create operation context for log validation - only include successful operations
@@ -238,9 +245,14 @@ class FuzzerEngine(IFuzzerEngine):
             self.logger.log_state_validation_result(final_validation_result, "final")
             
             # Determine overall success
-            # Success means: operations executed and validation passed
-            # Use the validation's overall_success which respects enabled/disabled checks
-            success = (operations_executed > 0 and final_validation_result.overall_success)
+            failure_reasons = self._collect_failure_reasons(
+                total_operations=len(scenario.operations),
+                operations_executed=operations_executed,
+                chaos_events=chaos_events,
+                validation_results=validation_results,
+                final_validation_result=final_validation_result
+            )
+            success = len(failure_reasons) == 0
             
             end_time = time.time()
             
@@ -252,6 +264,7 @@ class FuzzerEngine(IFuzzerEngine):
                 end_time=end_time,
                 operations_executed=operations_executed,
                 chaos_events=chaos_events,
+                error_message="; ".join(failure_reasons) if failure_reasons else None,
                 seed=scenario.seed,
                 validation_results=validation_results,
                 final_validation=final_validation
@@ -346,6 +359,74 @@ class FuzzerEngine(IFuzzerEngine):
         
         logger.info("Running standalone validation (data consistency check disabled - no test data)")
         return validator.validate_state(cluster_connection, expected_topology, None)
+
+    def _build_expected_topology(self, scenario: Scenario) -> ExpectedTopology:
+        """Build the expected topology for validation from the scenario."""
+        return ExpectedTopology(
+            num_primaries=scenario.cluster_config.num_shards,
+            num_replicas=scenario.cluster_config.num_shards * scenario.cluster_config.replicas_per_shard,
+            shard_structure={}
+        )
+
+    def _register_killed_nodes(
+        self,
+        state_validator: StateValidator,
+        cluster_nodes,
+        chaos_events: List
+    ) -> None:
+        """Register chaos-killed nodes so topology and health checks can reason about them."""
+        for chaos_event in chaos_events:
+            if not chaos_event.success or chaos_event.chaos_type != ChaosType.PROCESS_KILL:
+                continue
+
+            target_node_id = chaos_event.target_node
+            target_role = chaos_event.target_role
+            for node in cluster_nodes:
+                if node.node_id == target_node_id:
+                    node_address = f"{node.host}:{node.port}"
+                    state_validator.register_killed_node(node_address, target_role, node.shard_id)
+                    logger.info(
+                        f"Registered killed node for validation: {node_address} "
+                        f"(role: {target_role}, shard: {node.shard_id})"
+                    )
+                    break
+
+    def _collect_failure_reasons(
+        self,
+        total_operations: int,
+        operations_executed: int,
+        chaos_events: List,
+        validation_results: List,
+        final_validation_result
+    ) -> List[str]:
+        """Summarize all execution failures that should make the run fail."""
+        failure_reasons = []
+
+        if operations_executed != total_operations:
+            failed_operations = total_operations - operations_executed
+            failure_reasons.append(f"{failed_operations} operation(s) failed")
+
+        failed_chaos_events = [event for event in chaos_events if not event.success]
+        if failed_chaos_events:
+            failure_reasons.append(f"{len(failed_chaos_events)} chaos injection(s) failed")
+
+        if total_operations > 0 and not validation_results:
+            failure_reasons.append("post-operation validation did not run")
+        else:
+            failed_validation_waves = [
+                result for result in validation_results
+                if not result.overall_success
+            ]
+            if failed_validation_waves:
+                failure_reasons.append(
+                    f"{len(failed_validation_waves)} post-operation validation wave(s) failed"
+                )
+
+        if not final_validation_result.overall_success:
+            failed_checks = ", ".join(final_validation_result.failed_checks) or "unknown checks"
+            failure_reasons.append(f"final validation failed ({failed_checks})")
+
+        return failure_reasons
     
     def _create_cluster_with_retry(self, scenario: Scenario, max_retries: int = 3):
         """Create cluster with retry logic for failure recovery."""
