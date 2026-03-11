@@ -659,6 +659,7 @@ def main():
             if args.dsl:
                 dsl_args = type('obj', (object,), {
                     'file': args.dsl,
+                    'valkey_binary': args.valkey_binary,
                     'output': args.output,
                     'format': args.format,
                     'verbose': args.verbose

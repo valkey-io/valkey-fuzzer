@@ -469,6 +469,23 @@ class TestCLIMain:
         
         assert result == 0
         mock_cli.run_dsl_test.assert_called_once()
+        dsl_args = mock_cli.run_dsl_test.call_args.args[0]
+        assert dsl_args.valkey_binary is None
+
+    @patch('src.cli.FuzzerCLI')
+    def test_main_dsl_command_with_valkey_binary(self, mock_cli_class):
+        """Test main with DSL command and explicit Valkey binary"""
+        mock_cli = Mock()
+        mock_cli.run_dsl_test.return_value = 0
+        mock_cli_class.return_value = mock_cli
+
+        with patch('sys.argv', ['cli', 'cluster', '--dsl', 'test.yaml', '--valkey-binary', '/tmp/valkey-server']):
+            result = main()
+
+        assert result == 0
+        mock_cli.run_dsl_test.assert_called_once()
+        dsl_args = mock_cli.run_dsl_test.call_args.args[0]
+        assert dsl_args.valkey_binary == '/tmp/valkey-server'
     
     @patch('src.cli.FuzzerCLI')
     def test_main_validate_command(self, mock_cli_class):
