@@ -10,6 +10,8 @@ jobs:
   random-fuzzer:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      FUZZER_ARTIFACT_DIR: /tmp/valkey-fuzzer/artifacts
     
     steps:
     - name: Checkout repository
@@ -29,11 +31,15 @@ jobs:
     
     - name: Run random fuzzer test
       run: |
+        mkdir -p "${FUZZER_ARTIFACT_DIR}"
         echo "========================================"
         echo "Random Fuzzer Test"
         echo "Timestamp: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
         echo "========================================"
-        valkey-fuzzer cluster --random --verbose
+        valkey-fuzzer cluster --random --verbose \
+          --output "${FUZZER_ARTIFACT_DIR}/results.json" \
+          --format json \
+          --export-dsl "${FUZZER_ARTIFACT_DIR}/scenario.yaml"
     
     - name: Print Valkey node logs
       if: always()
@@ -53,3 +59,84 @@ jobs:
         else
           echo "No Valkey logs found at /tmp/valkey-fuzzer/logs"
         fi
+
+    - name: Prepare analysis bundle
+      if: always()
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p "${FUZZER_ARTIFACT_DIR}/logs"
+        if [ -d "/tmp/valkey-fuzzer/logs" ]; then
+          cp -R /tmp/valkey-fuzzer/logs/. "${FUZZER_ARTIFACT_DIR}/logs/"
+        fi
+
+        python - <<'PY'
+        import json
+        import os
+        from pathlib import Path
+
+        artifact_dir = Path(os.environ["FUZZER_ARTIFACT_DIR"])
+        results_path = artifact_dir / "results.json"
+        scenario_path = artifact_dir / "scenario.yaml"
+        logs_dir = artifact_dir / "logs"
+
+        result = None
+        if results_path.exists():
+            payload = json.loads(results_path.read_text())
+            results = payload.get("results") or []
+            if results:
+                result = results[0]
+
+        manifest = {
+            "schema_version": 1,
+            "results_path": "results.json" if results_path.exists() else None,
+            "scenario_path": "scenario.yaml" if scenario_path.exists() else None,
+            "log_files": sorted(
+                str(path.relative_to(artifact_dir))
+                for path in logs_dir.rglob("*")
+                if path.is_file()
+            ),
+            "scenario_id": result.get("scenario_id") if isinstance(result, dict) else None,
+            "seed": result.get("seed") if isinstance(result, dict) else None,
+            "success": result.get("success") if isinstance(result, dict) else None,
+        }
+        (artifact_dir / "manifest.json").write_text(
+            json.dumps(manifest, indent=2),
+            encoding="utf-8",
+        )
+
+        lines = ["## Fuzzer Run Artifact Bundle", ""]
+        if isinstance(result, dict):
+            lines.append(f"- Scenario: `{result.get('scenario_id', 'unknown')}`")
+            lines.append(f"- Seed: `{result.get('seed', 'unknown')}`")
+            lines.append(
+                f"- Status: `{'PASSED' if result.get('success') else 'FAILED'}`"
+            )
+            validation = result.get("final_validation") or {}
+            failed_checks = validation.get("failed_checks") or []
+            if failed_checks:
+                lines.append(
+                    f"- Failed checks: {', '.join(str(item) for item in failed_checks)}"
+                )
+        else:
+            lines.append("- Structured results were not generated for this run.")
+
+        lines.append(
+            f"- Collected files: `{len(manifest['log_files']) + int(results_path.exists()) + int(scenario_path.exists()) + 1}`"
+        )
+        lines.append("")
+
+        summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+        if summary_path:
+            with open(summary_path, "a", encoding="utf-8") as handle:
+                handle.write("\n".join(lines) + "\n")
+        PY
+
+    - name: Upload fuzzer run artifacts
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: fuzzer-run-artifacts-${{ github.run_id }}
+        path: ${{ env.FUZZER_ARTIFACT_DIR }}
+        if-no-files-found: warn
+        retention-days: 14

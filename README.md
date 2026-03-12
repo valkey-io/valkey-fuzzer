@@ -319,6 +319,7 @@ The architecture is designed to support expansion in multiple dimensions:
 
 ## Daily Test Runs
 - We run a randomly generated scenario every 4 hours and the results are listed here: https://github.com/valkey-io/valkey-fuzzer/actions/workflows/fuzzer-run.yml
+- Each scheduled run uploads a `fuzzer-run-artifacts-*` bundle containing the structured `results.json`, the exported scenario DSL, and the collected node/test logs from `/tmp/valkey-fuzzer/logs`.
 - These results can be analyzed to find potential bugs in Valkey
 
 ## License
