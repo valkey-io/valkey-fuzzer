@@ -86,6 +86,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
   pull-requests: write
 
 concurrency:
@@ -399,6 +400,7 @@ jobs:
       - random-fuzzer
     permissions:
       contents: read
+      issues: write
       pull-requests: write
     runs-on: ubuntu-latest
     steps:
@@ -555,19 +557,17 @@ jobs:
               handle.write("\n".join(lines) + "\n")
 
           if os.environ["PR_NUMBER"]:
+              def format_comment_value(value, limit=120):
+                  text = str(value).replace("\n", " ").replace("|", "/")
+                  return text if len(text) <= limit else text[: limit - 3] + "..."
+
               comment_lines = [
                   "<!-- valkey-cluster-fuzzer-results -->",
                   "## Valkey Cluster Fuzzer Results",
                   "",
                   f"- Overall result: `{overall_status}`",
                   f"- Workflow run: [View run]({os.environ['RUN_URL']})",
-                  f"- Trigger label: `{os.environ['LABEL_NAME']}`",
-                  f"- Requested ref: `{os.environ['VALKEY_REF']}`",
                   f"- Resolved SHA: `{os.environ['RESOLVED_SHA'] or 'unavailable'}`",
-                  f"- Fuzzer repository: `{os.environ['FUZZER_REPOSITORY'] or 'unavailable'}`",
-                  f"- Fuzzer ref: `{os.environ['FUZZER_REF'] or 'unavailable'}`",
-                  f"- Matrix preparation: `{prepare_matrix_result}`",
-                  f"- Build stage: `{build_result}`",
               ]
 
               if run_count_error is not None:
@@ -580,37 +580,41 @@ jobs:
                       f"- Passed runs: {passed_runs}/{run_count}",
                       f"- Failed runs: {failed_runs}",
                       f"- Missing run artifacts: {len(missing_runs)}",
-                      "",
-                      "<details>",
-                      "<summary>Per-run results</summary>",
-                      "",
-                      "| Run | Status | Seed | Stage | Duration (s) | Post-op Failures | Final Checks | Error |",
-                      "| --- | --- | --- | --- | --- | --- | --- | --- |",
                   ])
 
-                  for run_id in range(1, run_count + 1):
-                      result = run_results.get(run_id)
-                      if result is None:
+                  if overall_failed:
+                      comment_lines.extend([
+                          "",
+                          "<details>",
+                          "<summary>Failure details</summary>",
+                          "",
+                          "| Run | Status | Seed | Stage | Final Checks | Error |",
+                          "| --- | --- | --- | --- | --- | --- |",
+                      ])
+
+                      for run_id in range(1, run_count + 1):
+                          result = run_results.get(run_id)
+                          if result is None:
+                              comment_lines.append(
+                                  f"| {run_id} | missing | - | artifact | - | artifact not uploaded |"
+                              )
+                              continue
+
+                          if result["status"] == "success":
+                              continue
+
+                          error = format_comment_value(result.get("error_message") or "-")
+                          seed = result.get("seed") if result.get("seed") is not None else "-"
+                          final_checks = ", ".join(result.get("final_failed_checks", [])) or "-"
+                          final_checks = format_comment_value(final_checks, limit=80)
                           comment_lines.append(
-                              f"| {run_id} | missing | - | artifact | - | - | - | artifact not uploaded |"
+                              f"| {run_id} | {result['status']} | {seed} | {result.get('stage', '-')} | {final_checks} | {error} |"
                           )
-                          continue
 
-                      error = result.get("error_message") or "-"
-                      error = str(error).replace("\n", " ").replace("|", "/")
-                      seed = result.get("seed") if result.get("seed") is not None else "-"
-                      duration = result.get("duration") if result.get("duration") is not None else "-"
-                      post_op_failures = result.get("post_operation_validation_failures", 0)
-                      final_checks = ", ".join(result.get("final_failed_checks", [])) or "-"
-                      final_checks = final_checks.replace("|", "/")
-                      comment_lines.append(
-                          f"| {run_id} | {result['status']} | {seed} | {result.get('stage', '-')} | {duration} | {post_op_failures} | {final_checks} | {error} |"
-                      )
-
-                  comment_lines.extend([
-                      "",
-                      "</details>",
-                  ])
+                      comment_lines.extend([
+                          "",
+                          "</details>",
+                      ])
 
               if missing_runs:
                   comment_lines.extend([

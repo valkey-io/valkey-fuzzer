@@ -122,6 +122,7 @@ jobs:
   pr-fuzzer:
     permissions:
       contents: read
+      issues: write
       pull-requests: write
     if: github.event.label.name == 'run-cluster-fuzzer'
     uses: valkey-io/valkey-fuzzer/.github/workflows/valkey-pr-fuzzer.yml@main
@@ -139,6 +140,8 @@ jobs:
 For the simplest setup, point both the reusable workflow ref and `fuzzer_ref` at `main`, along with the matching `fuzzer_repository`, so the caller executes the current upstream workflow and fuzzer code. If you want tighter reproducibility, switch both references to the same tag or commit SHA instead.
 
 This keeps the status visible on the Valkey PR as a normal workflow check, and the reusable workflow updates a sticky PR comment with the latest run summary. If the PR cannot produce a merge ref, for example due to merge conflicts, the workflow will fail during the Valkey checkout/build stage.
+
+You can also add a small cleanup job in the caller workflow to remove `run-cluster-fuzzer` after the run finishes, so maintainers can rerun by simply reapplying the label.
 
 ### DSL-Based Test Execution
 
