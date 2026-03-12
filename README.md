@@ -109,7 +109,7 @@ This repo now includes a reusable GitHub Actions workflow at `.github/workflows/
 If you want this to run when a label is applied in the Valkey repo, the Valkey repo needs a small caller workflow. Example:
 
 ```yaml
-name: Label-triggered Valkey Fuzzer
+name: Label-triggered Valkey Cluster Fuzzer
 
 on:
   pull_request_target:
@@ -120,7 +120,10 @@ permissions:
 
 jobs:
   pr-fuzzer:
-    if: github.event.label.name == 'run-fuzzer'
+    permissions:
+      contents: read
+      pull-requests: write
+    if: github.event.label.name == 'run-cluster-fuzzer'
     uses: valkey-io/valkey-fuzzer/.github/workflows/valkey-pr-fuzzer.yml@main
     with:
       fuzzer_repository: valkey-io/valkey-fuzzer
@@ -135,7 +138,7 @@ jobs:
 
 For the simplest setup, point both the reusable workflow ref and `fuzzer_ref` at `main`, along with the matching `fuzzer_repository`, so the caller executes the current upstream workflow and fuzzer code. If you want tighter reproducibility, switch both references to the same tag or commit SHA instead.
 
-This keeps the status visible on the Valkey PR as a normal workflow check. If the PR cannot produce a merge ref, for example due to merge conflicts, the workflow will fail during the Valkey checkout/build stage.
+This keeps the status visible on the Valkey PR as a normal workflow check, and the reusable workflow updates a sticky PR comment with the latest run summary. If the PR cannot produce a merge ref, for example due to merge conflicts, the workflow will fail during the Valkey checkout/build stage.
 
 ### DSL-Based Test Execution
 

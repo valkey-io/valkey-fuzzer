@@ -1,4 +1,4 @@
-name: Valkey PR Fuzzer
+name: Valkey Cluster PR Fuzzer
 
 on:
   workflow_call:
@@ -36,7 +36,7 @@ on:
         description: Trigger label, used only for summaries
         required: false
         type: string
-        default: run-fuzzer
+        default: run-cluster-fuzzer
       run_count:
         description: Positive integer number of random fuzzer runs to queue
         required: false
@@ -77,7 +77,7 @@ on:
         description: Trigger label, used only for summaries
         required: false
         type: string
-        default: run-fuzzer
+        default: run-cluster-fuzzer
       run_count:
         description: Positive integer number of random fuzzer runs to queue
         required: false
@@ -86,6 +86,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
 
 concurrency:
   group: valkey-pr-fuzzer-${{ inputs.valkey_repository }}-${{ inputs.pr_number != '' && inputs.pr_number || inputs.valkey_ref }}
@@ -93,6 +94,8 @@ concurrency:
 
 jobs:
   prepare-matrix:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     outputs:
       fuzzer_repository: ${{ steps.resolve_fuzzer_source.outputs.repository }}
@@ -169,6 +172,8 @@ jobs:
     name: Build Valkey
     needs:
       - prepare-matrix
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
@@ -181,6 +186,7 @@ jobs:
           ref: ${{ inputs.valkey_ref }}
           fetch-depth: 1
           path: valkey-src
+          persist-credentials: false
 
       - name: Install build dependencies
         run: |
@@ -211,6 +217,8 @@ jobs:
     needs:
       - prepare-matrix
       - build-valkey
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
@@ -223,6 +231,7 @@ jobs:
         with:
           repository: ${{ needs.prepare-matrix.outputs.fuzzer_repository }}
           ref: ${{ needs.prepare-matrix.outputs.fuzzer_ref }}
+          persist-credentials: false
 
       - name: Download Valkey binaries
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -382,12 +391,15 @@ jobs:
         run: exit 1
 
   summarize:
-    name: Summarize PR fuzzer results
+    name: Summarize cluster fuzzer results
     if: ${{ always() }}
     needs:
       - prepare-matrix
       - build-valkey
       - random-fuzzer
+    permissions:
+      contents: read
+      pull-requests: write
     runs-on: ubuntu-latest
     steps:
       - name: Download run artifacts
@@ -398,6 +410,7 @@ jobs:
           path: collected-results
 
       - name: Write workflow summary
+        id: summary
         env:
           PREPARE_MATRIX_RESULT: ${{ needs.prepare-matrix.result }}
           BUILD_RESULT: ${{ needs.build-valkey.result }}
@@ -410,12 +423,12 @@ jobs:
           PR_NUMBER: ${{ inputs.pr_number }}
           PR_URL: ${{ inputs.pr_url }}
           LABEL_NAME: ${{ inputs.label_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           python - <<'PY'
           import glob
           import json
           import os
-          import sys
 
           raw_run_count = os.environ["RUN_COUNT"]
           run_count_error = None
@@ -444,6 +457,8 @@ jobs:
           prepare_matrix_result = os.environ["PREPARE_MATRIX_RESULT"]
           build_result = os.environ["BUILD_RESULT"]
           summary_path = os.environ["GITHUB_STEP_SUMMARY"]
+          output_path = os.environ["GITHUB_OUTPUT"]
+          comment_path = "pr-comment.md"
 
           metadata_paths = sorted(
               glob.glob("collected-results/**/metadata.json", recursive=True)
@@ -477,8 +492,10 @@ jobs:
               else:
                   pr_line = f"- PR: #{os.environ['PR_NUMBER']}\n"
 
+          overall_status = "FAIL" if overall_failed else "PASS"
+
           lines = [
-              "## Valkey PR Fuzzer",
+              "## Valkey Cluster Fuzzer",
               "",
               f"- Valkey repository: `{os.environ['VALKEY_REPOSITORY']}`",
               f"- Requested ref: `{os.environ['VALKEY_REF']}`",
@@ -486,7 +503,9 @@ jobs:
               f"- Fuzzer repository: `{os.environ['FUZZER_REPOSITORY'] or 'unavailable'}`",
               f"- Fuzzer ref: `{os.environ['FUZZER_REF'] or 'unavailable'}`",
               f"- Trigger label: `{os.environ['LABEL_NAME']}`",
+              f"- Overall result: `{overall_status}`",
               f"- Matrix preparation: `{prepare_matrix_result}`",
+              f"- Build stage: `{build_result}`",
           ]
 
           if pr_line:
@@ -535,6 +554,116 @@ jobs:
           with open(summary_path, "a", encoding="utf-8") as handle:
               handle.write("\n".join(lines) + "\n")
 
-          if overall_failed:
-              sys.exit(1)
+          if os.environ["PR_NUMBER"]:
+              comment_lines = [
+                  "<!-- valkey-cluster-fuzzer-results -->",
+                  "## Valkey Cluster Fuzzer Results",
+                  "",
+                  f"- Overall result: `{overall_status}`",
+                  f"- Workflow run: [View run]({os.environ['RUN_URL']})",
+                  f"- Trigger label: `{os.environ['LABEL_NAME']}`",
+                  f"- Requested ref: `{os.environ['VALKEY_REF']}`",
+                  f"- Resolved SHA: `{os.environ['RESOLVED_SHA'] or 'unavailable'}`",
+                  f"- Fuzzer repository: `{os.environ['FUZZER_REPOSITORY'] or 'unavailable'}`",
+                  f"- Fuzzer ref: `{os.environ['FUZZER_REF'] or 'unavailable'}`",
+                  f"- Matrix preparation: `{prepare_matrix_result}`",
+                  f"- Build stage: `{build_result}`",
+              ]
+
+              if run_count_error is not None:
+                  comment_lines.extend([
+                      f"- Requested runs: `{raw_run_count}`",
+                      f"- Invalid `run_count`: {run_count_error}",
+                  ])
+              else:
+                  comment_lines.extend([
+                      f"- Passed runs: {passed_runs}/{run_count}",
+                      f"- Failed runs: {failed_runs}",
+                      f"- Missing run artifacts: {len(missing_runs)}",
+                      "",
+                      "<details>",
+                      "<summary>Per-run results</summary>",
+                      "",
+                      "| Run | Status | Seed | Stage | Duration (s) | Post-op Failures | Final Checks | Error |",
+                      "| --- | --- | --- | --- | --- | --- | --- | --- |",
+                  ])
+
+                  for run_id in range(1, run_count + 1):
+                      result = run_results.get(run_id)
+                      if result is None:
+                          comment_lines.append(
+                              f"| {run_id} | missing | - | artifact | - | - | - | artifact not uploaded |"
+                          )
+                          continue
+
+                      error = result.get("error_message") or "-"
+                      error = str(error).replace("\n", " ").replace("|", "/")
+                      seed = result.get("seed") if result.get("seed") is not None else "-"
+                      duration = result.get("duration") if result.get("duration") is not None else "-"
+                      post_op_failures = result.get("post_operation_validation_failures", 0)
+                      final_checks = ", ".join(result.get("final_failed_checks", [])) or "-"
+                      final_checks = final_checks.replace("|", "/")
+                      comment_lines.append(
+                          f"| {run_id} | {result['status']} | {seed} | {result.get('stage', '-')} | {duration} | {post_op_failures} | {final_checks} | {error} |"
+                      )
+
+                  comment_lines.extend([
+                      "",
+                      "</details>",
+                  ])
+
+              if missing_runs:
+                  comment_lines.extend([
+                      "",
+                      f"Missing artifacts for runs: {', '.join(str(run_id) for run_id in missing_runs)}",
+                  ])
+
+              with open(comment_path, "w", encoding="utf-8") as handle:
+                  handle.write("\n".join(comment_lines) + "\n")
+
+          with open(output_path, "a", encoding="utf-8") as handle:
+              handle.write(f"overall_failed={'true' if overall_failed else 'false'}\n")
           PY
+
+      - name: Comment on PR with fuzzer results
+        if: ${{ inputs.pr_number != '' }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('pr-comment.md', 'utf8');
+            const marker = '<!-- valkey-cluster-fuzzer-results -->';
+            const issue_number = Number('${{ inputs.pr_number }}');
+            const {owner, repo} = context.repo;
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number,
+              per_page: 100,
+            });
+
+            const existing = comments.find(comment =>
+              comment.user?.type === 'Bot' && comment.body?.includes(marker)
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number,
+                body,
+              });
+            }
+
+      - name: Mark summary job as failed when any run fails
+        if: steps.summary.outputs.overall_failed == 'true'
+        run: exit 1
