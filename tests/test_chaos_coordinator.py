@@ -390,7 +390,55 @@ def test_coordinate_chaos_with_operation_no_target(mock_sleep):
     # Empty node list - no target will be found
     results = coordinator.coordinate_chaos_with_operation(operation, chaos_config, mock_connection, "test_cluster")
     
-    assert len(results) == 0
+    assert len(results) == 1
+    assert results[0].success is False
+    assert results[0].chaos_type == ChaosType.PROCESS_KILL
+    assert results[0].target_node == "node-0"
+    assert "No suitable chaos target found" in results[0].error_message
+    assert coordinator.chaos_history == results
+
+
+@patch('src.fuzzer_engine.chaos_coordinator.time.sleep')
+def test_coordinate_chaos_with_operation_returns_failure_result_on_exception(mock_sleep):
+    """Test that unexpected coordination exceptions become explicit failed chaos results"""
+    coordinator = ChaosCoordinator()
+
+    operation = Operation(
+        type=OperationType.FAILOVER,
+        target_node="node-0",
+        parameters={},
+        timing=OperationTiming()
+    )
+
+    chaos_config = ChaosConfig(
+        chaos_type=ChaosType.PROCESS_KILL,
+        target_selection=TargetSelection(strategy="random"),
+        timing=ChaosTiming(),
+        coordination=ChaosCoordination(chaos_during_operation=True),
+        process_chaos_type=ProcessChaosType.SIGKILL
+    )
+
+    mock_connection = MagicMock()
+    mock_connection.get_live_nodes.return_value = []
+    mock_connection.initial_nodes = []
+
+    with patch.object(
+        coordinator.chaos_engine.target_selector,
+        'select_target',
+        side_effect=RuntimeError("selector exploded")
+    ):
+        results = coordinator.coordinate_chaos_with_operation(
+            operation,
+            chaos_config,
+            mock_connection,
+            "test_cluster"
+        )
+
+    assert len(results) == 1
+    assert results[0].success is False
+    assert results[0].target_node == "node-0"
+    assert "selector exploded" in results[0].error_message
+    assert coordinator.chaos_history == results
 
 
 if __name__ == "__main__":

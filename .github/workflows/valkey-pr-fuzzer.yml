@@ -3,11 +3,16 @@ name: Valkey PR Fuzzer
 on:
   workflow_call:
     inputs:
-      fuzzer_ref:
-        description: Ref of this repo to check out when called from another repo
+      fuzzer_repository:
+        description: Repository containing the fuzzer workflow and code to check out when called from another repo
         required: false
         type: string
-        default: main
+        default: ""
+      fuzzer_ref:
+        description: Full commit SHA of the fuzzer repo to check out when called from another repo
+        required: false
+        type: string
+        default: ""
       valkey_repository:
         description: Repository containing the Valkey PR to test
         required: false
@@ -39,11 +44,16 @@ on:
         default: 10
   workflow_dispatch:
     inputs:
-      fuzzer_ref:
-        description: Ref of this repo to check out
+      fuzzer_repository:
+        description: Repository containing the fuzzer workflow and code to check out
         required: false
         type: string
-        default: main
+        default: ""
+      fuzzer_ref:
+        description: Ref of the fuzzer repo to check out
+        required: false
+        type: string
+        default: ""
       valkey_repository:
         description: Repository containing the Valkey commit to test
         required: false
@@ -85,8 +95,55 @@ jobs:
   prepare-matrix:
     runs-on: ubuntu-latest
     outputs:
+      fuzzer_repository: ${{ steps.resolve_fuzzer_source.outputs.repository }}
+      fuzzer_ref: ${{ steps.resolve_fuzzer_source.outputs.ref }}
       runs: ${{ steps.matrix.outputs.runs }}
     steps:
+      - name: Resolve fuzzer source
+        id: resolve_fuzzer_source
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_FUZZER_REPOSITORY: ${{ inputs.fuzzer_repository }}
+          INPUT_FUZZER_REF: ${{ inputs.fuzzer_ref }}
+          DEFAULT_FUZZER_REPOSITORY: ${{ github.repository }}
+          DEFAULT_FUZZER_REF: ${{ github.sha }}
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import os
+          import re
+
+          event_name = os.environ["EVENT_NAME"]
+          input_repository = os.environ["INPUT_FUZZER_REPOSITORY"].strip()
+          input_ref = os.environ["INPUT_FUZZER_REF"].strip()
+          default_repository = os.environ["DEFAULT_FUZZER_REPOSITORY"]
+          default_ref = os.environ["DEFAULT_FUZZER_REF"]
+
+          if event_name == "workflow_call":
+              missing_inputs = []
+              if not input_repository:
+                  missing_inputs.append("fuzzer_repository")
+              if not input_ref:
+                  missing_inputs.append("fuzzer_ref")
+              if missing_inputs:
+                  missing_list = ", ".join(f"inputs.{name}" for name in missing_inputs)
+                  raise SystemExit(
+                      "workflow_call requires "
+                      f"{missing_list} so the reusable workflow checks out the exact fuzzer repo and commit it was reviewed with"
+                  )
+              if not re.fullmatch(r"[0-9a-fA-F]{40}", input_ref):
+                  raise SystemExit(
+                      "workflow_call requires inputs.fuzzer_ref to be a full 40-character commit SHA"
+                  )
+              resolved_repository = input_repository
+              resolved_ref = input_ref
+          else:
+              resolved_repository = input_repository or default_repository
+              resolved_ref = input_ref or default_ref
+
+          print(f"repository={resolved_repository}")
+          print(f"ref={resolved_ref}")
+          PY
+
       - name: Build matrix
         id: matrix
         env:
@@ -169,8 +226,8 @@ jobs:
       - name: Checkout valkey-fuzzer
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          repository: ${{ github.event_name == 'workflow_call' && 'sarthakaggarwal97/valkey-fuzzer' || github.repository }}
-          ref: ${{ github.event_name == 'workflow_call' && inputs.fuzzer_ref || github.sha }}
+          repository: ${{ needs.prepare-matrix.outputs.fuzzer_repository }}
+          ref: ${{ needs.prepare-matrix.outputs.fuzzer_ref }}
 
       - name: Download Valkey binaries
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -350,6 +407,8 @@ jobs:
           PREPARE_MATRIX_RESULT: ${{ needs.prepare-matrix.result }}
           BUILD_RESULT: ${{ needs.build-valkey.result }}
           RESOLVED_SHA: ${{ needs.build-valkey.outputs.resolved_sha }}
+          FUZZER_REPOSITORY: ${{ needs.prepare-matrix.outputs.fuzzer_repository }}
+          FUZZER_REF: ${{ needs.prepare-matrix.outputs.fuzzer_ref }}
           RUN_COUNT: ${{ inputs.run_count }}
           VALKEY_REPOSITORY: ${{ inputs.valkey_repository }}
           VALKEY_REF: ${{ inputs.valkey_ref }}
@@ -429,6 +488,8 @@ jobs:
               f"- Valkey repository: `{os.environ['VALKEY_REPOSITORY']}`",
               f"- Requested ref: `{os.environ['VALKEY_REF']}`",
               f"- Resolved SHA: `{os.environ['RESOLVED_SHA'] or 'unavailable'}`",
+              f"- Fuzzer repository: `{os.environ['FUZZER_REPOSITORY'] or 'unavailable'}`",
+              f"- Fuzzer ref: `{os.environ['FUZZER_REF'] or 'unavailable'}`",
               f"- Trigger label: `{os.environ['LABEL_NAME']}`",
               f"- Matrix preparation: `{prepare_matrix_result}`",
           ]

@@ -80,7 +80,18 @@ class ChaosCoordinator:
             target_node = self.chaos_engine.target_selector.select_target(cluster_id, chaos_config.target_selection, log_buffer=log)
             
             if not target_node:
-                log.warning("No suitable chaos target found")
+                error_message = (
+                    f"No suitable chaos target found for operation "
+                    f"{operation.type.value} on {operation.target_node}"
+                )
+                log.error(error_message)
+                failure_result = self._build_failed_chaos_result(
+                    chaos_config,
+                    operation.target_node,
+                    error_message
+                )
+                chaos_results.append(failure_result)
+                self.chaos_history.append(failure_result)
                 return chaos_results
             
             # Execute chaos based on coordination configuration
@@ -134,9 +145,39 @@ class ChaosCoordinator:
             self.chaos_history.extend(actual_results)
             
         except Exception as e:
-            logger.error(f"Failed to coordinate chaos with operation: {e}")
+            error_message = (
+                f"Failed to coordinate chaos with operation "
+                f"{operation.type.value} on {operation.target_node}: {e}"
+            )
+            log.error(error_message)
+            failure_result = self._build_failed_chaos_result(
+                chaos_config,
+                operation.target_node,
+                error_message
+            )
+            chaos_results.append(failure_result)
+            actual_results = [r for r in chaos_results if isinstance(r, ChaosResult)]
+            self.chaos_history.extend(actual_results)
         
         return chaos_results
+
+    def _build_failed_chaos_result(
+        self,
+        chaos_config: ChaosConfig,
+        target_node: str,
+        error_message: str
+    ) -> ChaosResult:
+        """Create a failed chaos result for coordination or target-selection failures."""
+        failure_time = time.time()
+        return ChaosResult(
+            chaos_id="coordination-failure",
+            chaos_type=chaos_config.chaos_type,
+            target_node=target_node,
+            success=False,
+            start_time=failure_time,
+            end_time=failure_time,
+            error_message=error_message
+        )
     
     def _convert_dict_nodes_to_nodeinfo(self, live_nodes_dict: List[dict], initial_nodes: List[NodeInfo]) -> List[NodeInfo]:
         """Convert dictionary node representations to NodeInfo objects with live roles."""
