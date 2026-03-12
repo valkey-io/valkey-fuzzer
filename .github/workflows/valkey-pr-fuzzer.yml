@@ -114,12 +114,33 @@ jobs:
         run: |
           python - <<'PY' >> "$GITHUB_OUTPUT"
           import os
+          import subprocess
 
           event_name = os.environ["EVENT_NAME"]
           input_repository = os.environ["INPUT_FUZZER_REPOSITORY"].strip()
           input_ref = os.environ["INPUT_FUZZER_REF"].strip()
           default_repository = os.environ["DEFAULT_FUZZER_REPOSITORY"]
           default_ref = os.environ["DEFAULT_FUZZER_REF"]
+
+          def resolve_default_branch(repository):
+              remote = f"https://github.com/{repository}.git"
+              try:
+                  output = subprocess.check_output(
+                      ["git", "ls-remote", "--symref", remote, "HEAD"],
+                      text=True,
+                      stderr=subprocess.STDOUT,
+                  )
+              except subprocess.CalledProcessError as exc:
+                  error_output = exc.output.strip() or str(exc)
+                  raise SystemExit(
+                      f"Could not determine the default branch for {repository!r}: {error_output}"
+                  ) from exc
+              for line in output.splitlines():
+                  if line.startswith("ref: refs/heads/") and line.endswith("\tHEAD"):
+                      return line[len("ref: refs/heads/"):-len("\tHEAD")]
+              raise SystemExit(
+                  f"Could not determine the default branch for {repository!r} from {remote}"
+              )
 
           if event_name == "workflow_call":
               missing_inputs = []
@@ -137,7 +158,12 @@ jobs:
               resolved_ref = input_ref
           else:
               resolved_repository = input_repository or default_repository
-              resolved_ref = input_ref or default_ref
+              if input_ref:
+                  resolved_ref = input_ref
+              elif input_repository and input_repository != default_repository:
+                  resolved_ref = resolve_default_branch(resolved_repository)
+              else:
+                  resolved_ref = default_ref
 
           print(f"repository={resolved_repository}")
           print(f"ref={resolved_ref}")
