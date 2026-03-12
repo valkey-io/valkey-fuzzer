@@ -33,7 +33,7 @@ on:
         type: string
         default: run-fuzzer
       run_count:
-        description: Number of random fuzzer runs to queue
+        description: Positive integer number of random fuzzer runs to queue
         required: false
         type: number
         default: 10
@@ -69,7 +69,7 @@ on:
         type: string
         default: run-fuzzer
       run_count:
-        description: Number of random fuzzer runs to queue
+        description: Positive integer number of random fuzzer runs to queue
         required: false
         type: number
         default: 10
@@ -96,13 +96,27 @@ jobs:
           import json
           import os
 
-          run_count = int(float(os.environ["RUN_COUNT"]))
+          raw_run_count = os.environ["RUN_COUNT"]
+          parsed_run_count = float(raw_run_count)
+          if not parsed_run_count.is_integer():
+              raise SystemExit(
+                  f"inputs.run_count must be a positive integer, got {raw_run_count!r}"
+              )
+
+          run_count = int(parsed_run_count)
+          if run_count < 1:
+              raise SystemExit(
+                  f"inputs.run_count must be at least 1, got {raw_run_count!r}"
+              )
+
           runs = [{"run_id": run_id} for run_id in range(1, run_count + 1)]
           print(f"runs={json.dumps(runs)}")
           PY
 
   build-valkey:
     name: Build Valkey
+    needs:
+      - prepare-matrix
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
@@ -319,6 +333,7 @@ jobs:
     name: Summarize PR fuzzer results
     if: ${{ always() }}
     needs:
+      - prepare-matrix
       - build-valkey
       - random-fuzzer
     runs-on: ubuntu-latest
@@ -332,6 +347,7 @@ jobs:
 
       - name: Write workflow summary
         env:
+          PREPARE_MATRIX_RESULT: ${{ needs.prepare-matrix.result }}
           BUILD_RESULT: ${{ needs.build-valkey.result }}
           RESOLVED_SHA: ${{ needs.build-valkey.outputs.resolved_sha }}
           RUN_COUNT: ${{ inputs.run_count }}
@@ -347,7 +363,31 @@ jobs:
           import os
           import sys
 
-          run_count = int(float(os.environ["RUN_COUNT"]))
+          raw_run_count = os.environ["RUN_COUNT"]
+          run_count_error = None
+
+          try:
+              parsed_run_count = float(raw_run_count)
+          except ValueError:
+              run_count_error = (
+                  f"inputs.run_count must be a positive integer, got {raw_run_count!r}"
+              )
+              run_count = 0
+          else:
+              if not parsed_run_count.is_integer():
+                  run_count_error = (
+                      f"inputs.run_count must be a positive integer, got {raw_run_count!r}"
+                  )
+                  run_count = 0
+              else:
+                  run_count = int(parsed_run_count)
+                  if run_count < 1:
+                      run_count_error = (
+                          f"inputs.run_count must be at least 1, got {raw_run_count!r}"
+                      )
+                      run_count = 0
+
+          prepare_matrix_result = os.environ["PREPARE_MATRIX_RESULT"]
           build_result = os.environ["BUILD_RESULT"]
           summary_path = os.environ["GITHUB_STEP_SUMMARY"]
 
@@ -368,7 +408,13 @@ jobs:
 
           passed_runs = sum(1 for result in run_results.values() if result["status"] == "success")
           failed_runs = sum(1 for result in run_results.values() if result["status"] != "success")
-          overall_failed = build_result != "success" or failed_runs > 0 or bool(missing_runs)
+          overall_failed = (
+              prepare_matrix_result != "success"
+              or build_result != "success"
+              or failed_runs > 0
+              or bool(missing_runs)
+              or run_count_error is not None
+          )
 
           pr_line = ""
           if os.environ["PR_NUMBER"]:
@@ -384,36 +430,45 @@ jobs:
               f"- Requested ref: `{os.environ['VALKEY_REF']}`",
               f"- Resolved SHA: `{os.environ['RESOLVED_SHA'] or 'unavailable'}`",
               f"- Trigger label: `{os.environ['LABEL_NAME']}`",
+              f"- Matrix preparation: `{prepare_matrix_result}`",
           ]
 
           if pr_line:
               lines.append(pr_line.rstrip())
 
-          lines.extend([
-              f"- Passed runs: {passed_runs}/{run_count}",
-              f"- Failed runs: {failed_runs}",
-              f"- Missing run artifacts: {len(missing_runs)}",
-              "",
-              "| Run | Status | Seed | Stage | Duration (s) | Post-op Failures | Final Checks | Error |",
-              "| --- | --- | --- | --- | --- | --- | --- | --- |",
-          ])
+          if run_count_error is not None:
+              lines.extend([
+                  f"- Requested runs: `{raw_run_count}`",
+                  f"- Invalid `run_count`: {run_count_error}",
+              ])
+          else:
+              lines.extend([
+                  f"- Passed runs: {passed_runs}/{run_count}",
+                  f"- Failed runs: {failed_runs}",
+                  f"- Missing run artifacts: {len(missing_runs)}",
+                  "",
+                  "| Run | Status | Seed | Stage | Duration (s) | Post-op Failures | Final Checks | Error |",
+                  "| --- | --- | --- | --- | --- | --- | --- | --- |",
+              ])
 
-          for run_id in range(1, run_count + 1):
-              result = run_results.get(run_id)
-              if result is None:
-                  lines.append(f"| {run_id} | missing | - | artifact | - | artifact not uploaded |")
-                  continue
+              for run_id in range(1, run_count + 1):
+                  result = run_results.get(run_id)
+                  if result is None:
+                      lines.append(
+                          f"| {run_id} | missing | - | artifact | - | - | - | artifact not uploaded |"
+                      )
+                      continue
 
-              error = result.get("error_message") or "-"
-              error = str(error).replace("\n", " ").replace("|", "/")
-              seed = result.get("seed") if result.get("seed") is not None else "-"
-              duration = result.get("duration") if result.get("duration") is not None else "-"
-              post_op_failures = result.get("post_operation_validation_failures", 0)
-              final_checks = ", ".join(result.get("final_failed_checks", [])) or "-"
-              final_checks = final_checks.replace("|", "/")
-              lines.append(
-                  f"| {run_id} | {result['status']} | {seed} | {result.get('stage', '-')} | {duration} | {post_op_failures} | {final_checks} | {error} |"
-              )
+                  error = result.get("error_message") or "-"
+                  error = str(error).replace("\n", " ").replace("|", "/")
+                  seed = result.get("seed") if result.get("seed") is not None else "-"
+                  duration = result.get("duration") if result.get("duration") is not None else "-"
+                  post_op_failures = result.get("post_operation_validation_failures", 0)
+                  final_checks = ", ".join(result.get("final_failed_checks", [])) or "-"
+                  final_checks = final_checks.replace("|", "/")
+                  lines.append(
+                      f"| {run_id} | {result['status']} | {seed} | {result.get('stage', '-')} | {duration} | {post_op_failures} | {final_checks} | {error} |"
+                  )
 
           if missing_runs:
               lines.extend([
