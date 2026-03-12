@@ -98,7 +98,7 @@ valkey-fuzzer cluster --dsl examples/simple_failover.yaml --valkey-binary /tmp/v
 
 ### PR-Triggered Fuzzer Runs
 
-This repo now includes a reusable GitHub Actions workflow at `.github/workflows/pr-merge-fuzzer.yml` that can:
+This repo now includes a reusable GitHub Actions workflow at `.github/workflows/valkey-pr-fuzzer.yml` that can:
 
 - build Valkey from a specific ref, including a PR merge ref such as `refs/pull/123/merge`
 - fan out a configurable number of random fuzzer runs, defaulting to `10`
@@ -121,7 +121,7 @@ permissions:
 jobs:
   pr-fuzzer:
     if: github.event.label.name == 'run-fuzzer'
-    uses: sarthakaggarwal97/valkey-fuzzer/.github/workflows/pr-merge-fuzzer.yml@main
+    uses: sarthakaggarwal97/valkey-fuzzer/.github/workflows/valkey-pr-fuzzer.yml@main
     with:
       fuzzer_ref: main
       valkey_repository: ${{ github.repository }}

@@ -1,4 +1,4 @@
-name: PR Merge Valkey Fuzzer
+name: Valkey PR Fuzzer
 
 on:
   workflow_call:
@@ -78,7 +78,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: pr-merge-fuzzer-${{ inputs.valkey_repository }}-${{ inputs.pr_number != '' && inputs.pr_number || inputs.valkey_ref }}
+  group: valkey-pr-fuzzer-${{ inputs.valkey_repository }}-${{ inputs.pr_number != '' && inputs.pr_number || inputs.valkey_ref }}
   cancel-in-progress: false
 
 jobs:
@@ -191,7 +191,7 @@ jobs:
         continue-on-error: true
         env:
           RUN_ID: ${{ matrix.run_id }}
-          RUN_ROOT: ${{ runner.temp }}/pr-merge-fuzzer
+          RUN_ROOT: ${{ runner.temp }}/valkey-pr-fuzzer
           VALKEY_BINARY: ${{ runner.temp }}/valkey-binaries/valkey-server
         run: |
           set +e
@@ -323,7 +323,7 @@ jobs:
         with:
           name: valkey-pr-fuzzer-run-${{ matrix.run_id }}
           if-no-files-found: error
-          path: ${{ runner.temp }}/pr-merge-fuzzer/run-${{ matrix.run_id }}
+          path: ${{ runner.temp }}/valkey-pr-fuzzer/run-${{ matrix.run_id }}
 
       - name: Mark job as failed when the fuzzer run fails
         if: steps.execute.outputs.exit_code != '0'
@@ -424,7 +424,7 @@ jobs:
                   pr_line = f"- PR: #{os.environ['PR_NUMBER']}\n"
 
           lines = [
-              "## PR Merge Valkey Fuzzer",
+              "## Valkey PR Fuzzer",
               "",
               f"- Valkey repository: `{os.environ['VALKEY_REPOSITORY']}`",
               f"- Requested ref: `{os.environ['VALKEY_REF']}`",
