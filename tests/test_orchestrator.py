@@ -86,10 +86,9 @@ def test_setup_valkey_from_source_uses_configured_binary(mock_which):
     assert mock_which.call_args_list[0].args == ('/tmp/valkey/src/valkey-server',)
 
 
-@patch('src.cluster_orchestrator.orchestrator.subprocess.run')
 @patch('src.cluster_orchestrator.orchestrator.shutil.which')
-def test_setup_valkey_from_source_falls_back_to_path_binary(mock_which, mock_run):
-    """Test that setup falls back to PATH when the configured binary is unavailable"""
+def test_setup_valkey_from_source_fails_when_configured_binary_missing(mock_which):
+    """Test that setup raises when the configured binary cannot be resolved"""
     config = ClusterConfig(
         num_shards=3,
         replicas_per_shard=1,
@@ -97,12 +96,10 @@ def test_setup_valkey_from_source_falls_back_to_path_binary(mock_which, mock_run
     )
     config_mgr = ConfigurationManager(config, PortManager())
 
-    mock_which.side_effect = [None, '/usr/local/bin/valkey-server']
+    mock_which.return_value = None
 
-    valkey_binary = config_mgr.setup_valkey_from_source()
-
-    assert valkey_binary == '/usr/local/bin/valkey-server'
-    mock_run.assert_not_called()
+    with pytest.raises(FileNotFoundError, match="missing-valkey-server"):
+        config_mgr.setup_valkey_from_source()
 
 
 def test_full_cluster_creation():

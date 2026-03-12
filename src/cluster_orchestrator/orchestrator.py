@@ -59,6 +59,10 @@ class ConfigurationManager:
             resolved_binary = shutil.which(configured_binary)
             if resolved_binary:
                 return resolved_binary
+            raise FileNotFoundError(
+                f"Configured valkey_binary '{configured_binary}' could not be resolved. "
+                "Check the path or ensure the binary is on PATH."
+            )
 
         valkey_binary = shutil.which('valkey-server')
         if valkey_binary:
