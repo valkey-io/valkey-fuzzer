@@ -121,10 +121,10 @@ permissions:
 jobs:
   pr-fuzzer:
     if: github.event.label.name == 'run-fuzzer'
-    uses: valkey-io/valkey-fuzzer/.github/workflows/valkey-pr-fuzzer.yml@<full-commit-sha>
+    uses: valkey-io/valkey-fuzzer/.github/workflows/valkey-pr-fuzzer.yml@main
     with:
       fuzzer_repository: valkey-io/valkey-fuzzer
-      fuzzer_ref: <same-full-commit-sha>
+      fuzzer_ref: main
       valkey_repository: ${{ github.repository }}
       valkey_ref: refs/pull/${{ github.event.pull_request.number }}/merge
       pr_number: ${{ github.event.pull_request.number }}
@@ -133,7 +133,7 @@ jobs:
       run_count: 10
 ```
 
-Pin the reusable workflow and pass the same full commit SHA in `fuzzer_ref`, along with the matching `fuzzer_repository`, so the caller executes the exact immutable version of the fuzzer workflow and code that was reviewed.
+For the simplest setup, point both the reusable workflow ref and `fuzzer_ref` at `main`, along with the matching `fuzzer_repository`, so the caller executes the current upstream workflow and fuzzer code. If you want tighter reproducibility, switch both references to the same tag or commit SHA instead.
 
 This keeps the status visible on the Valkey PR as a normal workflow check. If the PR cannot produce a merge ref, for example due to merge conflicts, the workflow will fail during the Valkey checkout/build stage.
 
