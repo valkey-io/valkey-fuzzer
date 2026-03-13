@@ -145,7 +145,7 @@ class FuzzerEngine(IFuzzerEngine):
                 logger.debug("Using scenario-specific StateValidationConfig")
             else:
                 validation_config = StateValidationConfig()
-                logger.info("Using default StateValidationConfig")
+                logger.debug("Using default StateValidationConfig")
             
             # Adjust replication validation config based on cluster topology (for DSL scenarios)
             # If the cluster has no replicas, disable the min_replicas_per_shard check
