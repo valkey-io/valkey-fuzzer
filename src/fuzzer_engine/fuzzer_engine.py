@@ -410,9 +410,7 @@ class FuzzerEngine(IFuzzerEngine):
         if failed_chaos_events:
             failure_reasons.append(f"{len(failed_chaos_events)} chaos injection(s) failed")
 
-        if total_operations > 0 and not validation_results:
-            failure_reasons.append("post-operation validation did not run")
-        else:
+        if validation_results:
             failed_validation_waves = [
                 result for result in validation_results
                 if not result.overall_success

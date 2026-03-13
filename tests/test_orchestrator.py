@@ -68,8 +68,9 @@ def test_configuration_manager_topology():
         assert primary.slot_start <= primary.slot_end
 
 
-@patch('src.cluster_orchestrator.orchestrator.shutil.which')
-def test_setup_valkey_from_source_uses_configured_binary(mock_which):
+@patch('os.access', return_value=True)
+@patch('os.path.isfile', return_value=True)
+def test_setup_valkey_from_source_uses_configured_binary(mock_isfile, mock_access):
     """Test that an explicit Valkey binary path is preferred when it exists"""
     config = ClusterConfig(
         num_shards=3,
@@ -78,16 +79,14 @@ def test_setup_valkey_from_source_uses_configured_binary(mock_which):
     )
     config_mgr = ConfigurationManager(config, PortManager())
 
-    mock_which.side_effect = ['/tmp/valkey/src/valkey-server']
-
     valkey_binary = config_mgr.setup_valkey_from_source()
 
     assert valkey_binary == '/tmp/valkey/src/valkey-server'
-    assert mock_which.call_args_list[0].args == ('/tmp/valkey/src/valkey-server',)
+    mock_isfile.assert_called_once_with('/tmp/valkey/src/valkey-server')
 
 
-@patch('src.cluster_orchestrator.orchestrator.shutil.which')
-def test_setup_valkey_from_source_fails_when_configured_binary_missing(mock_which):
+@patch('os.path.isfile', return_value=False)
+def test_setup_valkey_from_source_fails_when_configured_binary_missing(mock_isfile):
     """Test that setup raises when the configured binary cannot be resolved"""
     config = ClusterConfig(
         num_shards=3,
@@ -95,8 +94,6 @@ def test_setup_valkey_from_source_fails_when_configured_binary_missing(mock_whic
         valkey_binary='/tmp/missing-valkey-server'
     )
     config_mgr = ConfigurationManager(config, PortManager())
-
-    mock_which.return_value = None
 
     with pytest.raises(FileNotFoundError, match="missing-valkey-server"):
         config_mgr.setup_valkey_from_source()

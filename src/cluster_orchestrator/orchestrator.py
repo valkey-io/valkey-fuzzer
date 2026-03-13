@@ -56,12 +56,23 @@ class ConfigurationManager:
         """Clone and build Valkey binary, return path to valkey-server binary"""
         configured_binary = self.clusterConfig.valkey_binary
         if configured_binary:
+            # For absolute/relative paths, check existence and permissions directly
+            if os.path.sep in configured_binary or configured_binary.startswith('.'):
+                if not os.path.isfile(configured_binary):
+                    raise FileNotFoundError(
+                        f"Configured valkey_binary '{configured_binary}' does not exist."
+                    )
+                if not os.access(configured_binary, os.X_OK):
+                    raise PermissionError(
+                        f"Configured valkey_binary '{configured_binary}' exists but is not executable."
+                    )
+                return os.path.abspath(configured_binary)
+            # Bare command name — search PATH
             resolved_binary = shutil.which(configured_binary)
             if resolved_binary:
                 return resolved_binary
             raise FileNotFoundError(
-                f"Configured valkey_binary '{configured_binary}' could not be resolved. "
-                "Check the path or ensure the binary is on PATH."
+                f"Configured valkey_binary '{configured_binary}' could not be found on PATH."
             )
 
         valkey_binary = shutil.which('valkey-server')
