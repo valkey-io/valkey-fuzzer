@@ -420,7 +420,7 @@ class FuzzerEngine(IFuzzerEngine):
                     f"{len(failed_validation_waves)} post-operation validation wave(s) failed"
                 )
         elif total_operations > 0 and operations_executed == total_operations:
-            failure_reasons.append("post-operation validation did not run")
+        if not final_validation_result.overall_success:
 
         if not final_validation_result.overall_success:
             failed_checks = ", ".join(final_validation_result.failed_checks) or "unknown checks"
