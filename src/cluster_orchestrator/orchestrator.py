@@ -67,12 +67,7 @@ class ConfigurationManager:
                         f"Configured valkey_binary '{configured_binary}' exists but is not executable."
                     )
                 return os.path.abspath(configured_binary)
-            resolved_binary = shutil.which(configured_binary)
-            if resolved_binary:
-                return resolved_binary
-            raise FileNotFoundError(
-                f"Configured valkey_binary '{configured_binary}' could not be found on PATH."
-            )
+            # Bare command name — search PATH
             resolved_binary = shutil.which(configured_binary)
             if resolved_binary:
                 return resolved_binary
