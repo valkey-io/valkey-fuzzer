@@ -237,7 +237,10 @@ jobs:
           cp valkey-src/src/valkey-server valkey-binaries/
           cp valkey-src/src/valkey-cli valkey-binaries/
           cp valkey-src/src/valkey-benchmark valkey-binaries/
-          cp valkey-src/src/modules/lua/libvalkeylua.so valkey-binaries/
+          
+          if [ -f valkey-src/src/modules/lua/libvalkeylua.so ]; then
+            cp valkey-src/src/modules/lua/libvalkeylua.so valkey-binaries/
+          fi
 
       - name: Upload Valkey binaries
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
