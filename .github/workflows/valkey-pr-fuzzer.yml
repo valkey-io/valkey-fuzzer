@@ -222,23 +222,28 @@ jobs:
 
       - name: Build Valkey
         working-directory: valkey-src
-        run: make -j"$(nproc)"
+        run: |
+          make -j"$(nproc)"
+          sudo make install PREFIX=/usr/local
 
       - name: Capture resolved SHA
         id: commit
         working-directory: valkey-src
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+      - name: Package installed binaries
+        run: |
+          mkdir -p valkey-binaries
+          cp /usr/local/bin/valkey-server valkey-binaries/
+          cp /usr/local/bin/valkey-cli valkey-binaries/
+          cp /usr/local/bin/valkey-benchmark valkey-binaries/
+
       - name: Upload Valkey binaries
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: valkey-pr-binaries
           if-no-files-found: error
-          path: |
-            valkey-src/src/valkey-server
-            valkey-src/src/valkey-cli
-            valkey-src/src/valkey-benchmark
-            valkey-src/src/*.so
+          path: valkey-binaries/
 
   random-fuzzer:
     name: Random fuzzer run ${{ matrix.run_id }}
@@ -267,8 +272,10 @@ jobs:
           name: valkey-pr-binaries
           path: ${{ runner.temp }}/valkey-binaries
 
-      - name: Restore executable bits
-        run: chmod +x "${{ runner.temp }}/valkey-binaries/"*
+      - name: Install Valkey binaries
+        run: |
+          chmod +x "${{ runner.temp }}/valkey-binaries/"*
+          sudo cp "${{ runner.temp }}/valkey-binaries/"* /usr/local/bin/
 
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
@@ -281,7 +288,7 @@ jobs:
         env:
           RUN_ID: ${{ matrix.run_id }}
           RUN_ROOT: ${{ runner.temp }}/valkey-pr-fuzzer
-          VALKEY_BINARY: ${{ runner.temp }}/valkey-binaries/valkey-server
+          VALKEY_BINARY: /usr/local/bin/valkey-server
         run: |
           set +e
 
