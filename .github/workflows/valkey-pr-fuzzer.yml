@@ -163,6 +163,23 @@ jobs:
                       "Either pr_link or valkey_ref must be provided"
                   )
 
+          # Guard against a URL being pasted into pr_number by mistake
+          if pr_number and not pr_number.isdigit():
+              url_match = re.match(
+                  r"https?://github\.com/([^/]+/[^/]+)/pull/(\d+)/?$", pr_number
+              )
+              if url_match:
+                  # Recover: treat it as if it were pr_link
+                  valkey_repository = valkey_repository or url_match.group(1)
+                  valkey_ref = valkey_ref or f"refs/pull/{url_match.group(2)}/merge"
+                  pr_url = pr_url or pr_number
+                  pr_number = url_match.group(2)
+              else:
+                  raise SystemExit(
+                      f"inputs.pr_number must be a numeric PR number, got {pr_number!r}. "
+                      "Use the pr_link input for full URLs."
+                  )
+
           print(f"valkey_repository={valkey_repository}")
           print(f"valkey_ref={valkey_ref}")
           print(f"pr_number={pr_number}")
