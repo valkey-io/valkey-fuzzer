@@ -224,7 +224,8 @@ jobs:
         working-directory: valkey-src
         run: |
           make -j"$(nproc)"
-          src/valkey-server --version
+          sudo make install PREFIX=/usr/local
+          valkey-server --version
 
       - name: Capture resolved SHA
         id: commit
@@ -234,12 +235,12 @@ jobs:
       - name: Package installed binaries
         run: |
           mkdir -p valkey-binaries
-          cp valkey-src/src/valkey-server valkey-binaries/
-          cp valkey-src/src/valkey-cli valkey-binaries/
-          cp valkey-src/src/valkey-benchmark valkey-binaries/
+          cp /usr/local/bin/valkey-server valkey-binaries/
+          cp /usr/local/bin/valkey-cli valkey-binaries/
+          cp /usr/local/bin/valkey-benchmark valkey-binaries/
           
-          if [ -f valkey-src/src/libvalkeylua.so ]; then
-            cp valkey-src/src/libvalkeylua.so valkey-binaries/
+          if find /usr/local -name "libvalkeylua.so" -type f 2>/dev/null; then
+            find /usr/local -name "libvalkeylua.so" -type f -exec cp {} valkey-binaries/ \;
           fi
           
           ls -la valkey-binaries/
@@ -281,6 +282,7 @@ jobs:
       - name: Install Valkey binaries
         run: |
           chmod +x "${{ runner.temp }}/valkey-binaries/"*
+          sudo cp "${{ runner.temp }}/valkey-binaries/valkey-"* /usr/local/bin/
           
           if [ -f "${{ runner.temp }}/valkey-binaries/libvalkeylua.so" ]; then
             sudo cp "${{ runner.temp }}/valkey-binaries/libvalkeylua.so" /usr/local/lib/
@@ -298,7 +300,7 @@ jobs:
         env:
           RUN_ID: ${{ matrix.run_id }}
           RUN_ROOT: ${{ runner.temp }}/valkey-pr-fuzzer
-          VALKEY_BINARY: ${{ runner.temp }}/valkey-binaries/valkey-server
+          VALKEY_BINARY: /usr/local/bin/valkey-server
         run: |
           set +e
 
