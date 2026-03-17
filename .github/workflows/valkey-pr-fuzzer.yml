@@ -283,7 +283,8 @@ jobs:
           chmod +x "${{ runner.temp }}/valkey-binaries/"*
           
           if [ -f "${{ runner.temp }}/valkey-binaries/libvalkeylua.so" ]; then
-            echo "LD_LIBRARY_PATH=${{ runner.temp }}/valkey-binaries:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+            sudo cp "${{ runner.temp }}/valkey-binaries/libvalkeylua.so" /usr/local/lib/
+            sudo ldconfig
           fi
 
       - name: Set up Python
