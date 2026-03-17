@@ -765,6 +765,7 @@ jobs:
 
       - name: Comment on PR with fuzzer results
         if: ${{ needs.resolve-inputs.outputs.pr_number != '' }}
+        continue-on-error: true
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           github-token: ${{ github.token }}
@@ -803,5 +804,5 @@ jobs:
             }
 
       - name: Mark summary job as failed when any run fails
-        if: steps.summary.outputs.overall_failed == 'true'
+        if: always() && steps.summary.outputs.overall_failed == 'true'
         run: exit 1
