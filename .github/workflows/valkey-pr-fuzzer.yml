@@ -224,12 +224,30 @@ jobs:
         working-directory: valkey-src
         run: |
           make -j"$(nproc)"
+          
+          # Check what .so files were built
+          echo "Checking for shared libraries:"
+          ls -la src/*.so 2>/dev/null || echo "No .so files found in src/"
+          
+          # Install binaries
           sudo make install PREFIX=/usr/local
-          # Copy shared libraries to system library path
+          
+          # Explicitly copy any .so files to system library path
           if ls src/*.so 1> /dev/null 2>&1; then
-            sudo cp src/*.so /usr/local/lib/
+            echo "Installing shared libraries to /usr/local/lib/"
+            sudo cp -v src/*.so /usr/local/lib/
             sudo ldconfig
+            echo "Shared libraries installed and ldconfig updated"
+          else
+            echo "No shared libraries to install"
           fi
+          
+          # Verify installation
+          echo "Verifying valkey-server installation:"
+          which valkey-server
+          valkey-server --version
+          echo "Checking library dependencies:"
+          ldd /usr/local/bin/valkey-server | grep -i lua || echo "No lua library dependency found"
 
       - name: Capture resolved SHA
         id: commit
@@ -281,6 +299,16 @@ jobs:
         run: |
           chmod +x "${{ runner.temp }}/valkey-binaries/"*
           sudo cp "${{ runner.temp }}/valkey-binaries/"* /usr/local/bin/
+          
+          # Verify what was installed
+          echo "Installed binaries:"
+          ls -la /usr/local/bin/valkey-*
+          
+          echo "Checking library dependencies:"
+          ldd /usr/local/bin/valkey-server | grep -i lua || echo "No lua library dependency found"
+          
+          echo "Checking /usr/local/lib/ for .so files:"
+          ls -la /usr/local/lib/*.so 2>/dev/null || echo "No .so files in /usr/local/lib/"
 
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
