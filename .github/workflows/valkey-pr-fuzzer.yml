@@ -231,16 +231,13 @@ jobs:
         working-directory: valkey-src
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Package installed binaries
+      - name: Package Valkey binaries
         run: |
           mkdir -p valkey-binaries
           cp valkey-src/src/valkey-server valkey-binaries/
           cp valkey-src/src/valkey-cli valkey-binaries/
           cp valkey-src/src/valkey-benchmark valkey-binaries/
           cp valkey-src/src/modules/lua/libvalkeylua.so valkey-binaries/
-          
-          echo "Packaged binaries:"
-          ls -la valkey-binaries/
 
       - name: Upload Valkey binaries
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -277,20 +274,7 @@ jobs:
           path: ${{ runner.temp }}/valkey-binaries
 
       - name: Install Valkey binaries
-        run: |
-          echo "=== Valkey binaries setup ==="
-          chmod +x "${{ runner.temp }}/valkey-binaries/"*
-          
-          echo "Binaries in temp directory:"
-          ls -la "${{ runner.temp }}/valkey-binaries/"
-          
-          if [ -f "${{ runner.temp }}/valkey-binaries/libvalkeylua.so" ]; then
-            echo "✓ libvalkeylua.so found in binaries"
-          else
-            echo "✗ libvalkeylua.so NOT found in binaries"
-          fi
-          
-          echo "=== Setup complete ==="
+        run: chmod +x "${{ runner.temp }}/valkey-binaries/"*
 
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
@@ -307,18 +291,6 @@ jobs:
           LD_LIBRARY_PATH: ${{ runner.temp }}/valkey-binaries
         run: |
           set +e
-          
-          echo "=== Environment check ==="
-          echo "VALKEY_BINARY: ${VALKEY_BINARY}"
-          echo "LD_LIBRARY_PATH: ${LD_LIBRARY_PATH}"
-          
-          echo "Testing valkey-server directly:"
-          "${VALKEY_BINARY}" --version || echo "Failed to run valkey-server --version"
-          
-          echo "Checking library dependencies:"
-          ldd "${VALKEY_BINARY}" | grep valkeylua || echo "libvalkeylua.so not in dependencies or not found"
-          
-          echo "=== Starting fuzzer ==="
 
           artifact_dir="${RUN_ROOT}/run-${RUN_ID}"
           mkdir -p "${artifact_dir}"
