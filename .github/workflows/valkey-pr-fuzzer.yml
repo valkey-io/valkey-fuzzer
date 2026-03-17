@@ -224,8 +224,7 @@ jobs:
         working-directory: valkey-src
         run: |
           make -j"$(nproc)"
-          sudo make install PREFIX=/usr/local
-          valkey-server --version
+          src/valkey-server --version
 
       - name: Capture resolved SHA
         id: commit
@@ -235,12 +234,12 @@ jobs:
       - name: Package installed binaries
         run: |
           mkdir -p valkey-binaries
-          cp /usr/local/bin/valkey-server valkey-binaries/
-          cp /usr/local/bin/valkey-cli valkey-binaries/
-          cp /usr/local/bin/valkey-benchmark valkey-binaries/
+          cp valkey-src/src/valkey-server valkey-binaries/
+          cp valkey-src/src/valkey-cli valkey-binaries/
+          cp valkey-src/src/valkey-benchmark valkey-binaries/
           
-          if find /usr/local -name "libvalkeylua.so" -type f 2>/dev/null; then
-            find /usr/local -name "libvalkeylua.so" -type f -exec cp {} valkey-binaries/ \;
+          if [ -f valkey-src/src/libvalkeylua.so ]; then
+            cp valkey-src/src/libvalkeylua.so valkey-binaries/
           fi
           
           ls -la valkey-binaries/
@@ -286,7 +285,10 @@ jobs:
           
           if [ -f "${{ runner.temp }}/valkey-binaries/libvalkeylua.so" ]; then
             sudo cp "${{ runner.temp }}/valkey-binaries/libvalkeylua.so" /usr/local/lib/
+            echo "/usr/local/lib" | sudo tee /etc/ld.so.conf.d/usrlocal.conf
             sudo ldconfig
+            echo "Library installed and ldconfig run:"
+            ldconfig -p | grep valkeylua || echo "Warning: libvalkeylua.so not found in ldconfig cache"
           fi
 
       - name: Set up Python
