@@ -224,7 +224,7 @@ jobs:
         working-directory: valkey-src
         run: |
           make -j"$(nproc)"
-          valkey-src/src/valkey-server --version
+          src/valkey-server --version
 
       - name: Capture resolved SHA
         id: commit
