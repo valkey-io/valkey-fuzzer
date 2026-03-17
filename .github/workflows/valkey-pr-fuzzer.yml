@@ -281,14 +281,9 @@ jobs:
       - name: Install Valkey binaries
         run: |
           chmod +x "${{ runner.temp }}/valkey-binaries/"*
-          mkdir -p "$HOME/.local/bin"
-          cp "${{ runner.temp }}/valkey-binaries/valkey-"* "$HOME/.local/bin/"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           
           if [ -f "${{ runner.temp }}/valkey-binaries/libvalkeylua.so" ]; then
-            mkdir -p "$HOME/.local/lib"
-            cp "${{ runner.temp }}/valkey-binaries/libvalkeylua.so" "$HOME/.local/lib/"
-            echo "LD_LIBRARY_PATH=$HOME/.local/lib:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+            echo "LD_LIBRARY_PATH=${{ runner.temp }}/valkey-binaries:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
           fi
 
       - name: Set up Python
