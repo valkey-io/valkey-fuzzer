@@ -237,13 +237,7 @@ jobs:
           cp valkey-src/src/valkey-server valkey-binaries/
           cp valkey-src/src/valkey-cli valkey-binaries/
           cp valkey-src/src/valkey-benchmark valkey-binaries/
-          
-          if [ -f valkey-src/src/libvalkeylua.so ]; then
-            cp valkey-src/src/libvalkeylua.so valkey-binaries/
-            echo "✓ libvalkeylua.so found and copied"
-          else
-            echo "✗ libvalkeylua.so NOT found in valkey-src/src/"
-          fi
+          cp valkey-src/src/modules/lua/libvalkeylua.so valkey-binaries/
           
           echo "Packaged binaries:"
           ls -la valkey-binaries/
@@ -292,8 +286,6 @@ jobs:
           
           if [ -f "${{ runner.temp }}/valkey-binaries/libvalkeylua.so" ]; then
             echo "✓ libvalkeylua.so found in binaries"
-            echo "Setting LD_LIBRARY_PATH for future steps"
-            echo "LD_LIBRARY_PATH=${{ runner.temp }}/valkey-binaries" >> "$GITHUB_ENV"
           else
             echo "✗ libvalkeylua.so NOT found in binaries"
           fi
@@ -312,6 +304,7 @@ jobs:
           RUN_ID: ${{ matrix.run_id }}
           RUN_ROOT: ${{ runner.temp }}/valkey-pr-fuzzer
           VALKEY_BINARY: ${{ runner.temp }}/valkey-binaries/valkey-server
+          LD_LIBRARY_PATH: ${{ runner.temp }}/valkey-binaries
         run: |
           set +e
           
