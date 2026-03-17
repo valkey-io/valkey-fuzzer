@@ -238,6 +238,7 @@ jobs:
             valkey-src/src/valkey-server
             valkey-src/src/valkey-cli
             valkey-src/src/valkey-benchmark
+            valkey-src/src/*.so
 
   random-fuzzer:
     name: Random fuzzer run ${{ matrix.run_id }}
