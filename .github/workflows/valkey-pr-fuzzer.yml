@@ -306,18 +306,18 @@ jobs:
           
           # Install .so files if present
           if [ -f "${{ runner.temp }}/valkey-binaries/libvalkeylua.so" ]; then
-            echo "Installing libvalkeylua.so"
-            sudo mkdir -p /usr/local/lib/valkey/modules/lua
-            sudo cp "${{ runner.temp }}/valkey-binaries/libvalkeylua.so" /usr/local/lib/valkey/modules/lua/
+            echo "Installing libvalkeylua.so to /usr/local/lib/"
+            sudo cp "${{ runner.temp }}/valkey-binaries/libvalkeylua.so" /usr/local/lib/
             sudo ldconfig
+            echo "libvalkeylua.so installed and ldconfig updated"
           fi
           
-          # Verify what was installed
+          # Verify installation
           echo "Installed binaries:"
           ls -la /usr/local/bin/valkey-*
           
           echo "Installed libraries:"
-          find /usr/local/lib -name "*.so" 2>/dev/null | grep valkey || echo "No valkey .so files found"
+          ls -la /usr/local/lib/libvalkeylua.so 2>/dev/null || echo "libvalkeylua.so not found"
 
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
