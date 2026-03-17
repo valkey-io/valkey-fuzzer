@@ -227,27 +227,18 @@ jobs:
           
           # Check what .so files were built
           echo "Checking for shared libraries:"
-          ls -la src/*.so 2>/dev/null || echo "No .so files found in src/"
+          find src -name "*.so" -type f
           
-          # Install binaries
+          # Install binaries and libraries
           sudo make install PREFIX=/usr/local
-          
-          # Explicitly copy any .so files to system library path
-          if ls src/*.so 1> /dev/null 2>&1; then
-            echo "Installing shared libraries to /usr/local/lib/"
-            sudo cp -v src/*.so /usr/local/lib/
-            sudo ldconfig
-            echo "Shared libraries installed and ldconfig updated"
-          else
-            echo "No shared libraries to install"
-          fi
           
           # Verify installation
           echo "Verifying valkey-server installation:"
           which valkey-server
           valkey-server --version
-          echo "Checking library dependencies:"
-          ldd /usr/local/bin/valkey-server | grep -i lua || echo "No lua library dependency found"
+          
+          echo "Checking installed .so files:"
+          find /usr/local -name "*.so" -type f 2>/dev/null | grep valkey || echo "No valkey .so files found"
 
       - name: Capture resolved SHA
         id: commit
@@ -257,9 +248,20 @@ jobs:
       - name: Package installed binaries
         run: |
           mkdir -p valkey-binaries
+          
+          # Copy binaries
           cp /usr/local/bin/valkey-server valkey-binaries/
           cp /usr/local/bin/valkey-cli valkey-binaries/
           cp /usr/local/bin/valkey-benchmark valkey-binaries/
+          
+          # Find and copy any installed .so files
+          echo "Looking for installed .so files:"
+          if find /usr/local -name "libvalkeylua.so" -type f 2>/dev/null; then
+            find /usr/local -name "libvalkeylua.so" -type f -exec cp -v {} valkey-binaries/ \;
+          fi
+          
+          echo "Artifact contents:"
+          ls -la valkey-binaries/
 
       - name: Upload Valkey binaries
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -298,17 +300,24 @@ jobs:
       - name: Install Valkey binaries
         run: |
           chmod +x "${{ runner.temp }}/valkey-binaries/"*
-          sudo cp "${{ runner.temp }}/valkey-binaries/"* /usr/local/bin/
+          
+          # Install binaries
+          sudo cp "${{ runner.temp }}/valkey-binaries/valkey-"* /usr/local/bin/
+          
+          # Install .so files if present
+          if [ -f "${{ runner.temp }}/valkey-binaries/libvalkeylua.so" ]; then
+            echo "Installing libvalkeylua.so"
+            sudo mkdir -p /usr/local/lib/valkey/modules/lua
+            sudo cp "${{ runner.temp }}/valkey-binaries/libvalkeylua.so" /usr/local/lib/valkey/modules/lua/
+            sudo ldconfig
+          fi
           
           # Verify what was installed
           echo "Installed binaries:"
           ls -la /usr/local/bin/valkey-*
           
-          echo "Checking library dependencies:"
-          ldd /usr/local/bin/valkey-server | grep -i lua || echo "No lua library dependency found"
-          
-          echo "Checking /usr/local/lib/ for .so files:"
-          ls -la /usr/local/lib/*.so 2>/dev/null || echo "No .so files in /usr/local/lib/"
+          echo "Installed libraries:"
+          find /usr/local/lib -name "*.so" 2>/dev/null | grep valkey || echo "No valkey .so files found"
 
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
