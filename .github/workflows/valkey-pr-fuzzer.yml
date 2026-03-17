@@ -774,11 +774,25 @@ jobs:
             const body = fs.readFileSync('pr-comment.md', 'utf8');
             const marker = '<!-- valkey-cluster-fuzzer-results -->';
             const issue_number = Number('${{ needs.resolve-inputs.outputs.pr_number }}');
-            const {owner, repo} = context.repo;
+            const valkey_repository = '${{ needs.resolve-inputs.outputs.valkey_repository }}';
+            const [target_owner, target_repo] = valkey_repository.split('/');
+            const {owner: workflow_owner, repo: workflow_repo} = context.repo;
+
+            // The GITHUB_TOKEN only has permissions on the workflow repo.
+            // When the PR lives in a different repository (e.g. valkey-io/valkey
+            // while the workflow runs in valkey-io/valkey-fuzzer), skip commenting
+            // because the token cannot access the target repo.
+            if (target_owner !== workflow_owner || target_repo !== workflow_repo) {
+              core.info(
+                `Skipping PR comment: PR is in ${valkey_repository} but workflow ` +
+                `is running in ${workflow_owner}/${workflow_repo}`
+              );
+              return;
+            }
 
             const comments = await github.paginate(github.rest.issues.listComments, {
-              owner,
-              repo,
+              owner: target_owner,
+              repo: target_repo,
               issue_number,
               per_page: 100,
             });
@@ -789,15 +803,15 @@ jobs:
 
             if (existing) {
               await github.rest.issues.updateComment({
-                owner,
-                repo,
+                owner: target_owner,
+                repo: target_repo,
                 comment_id: existing.id,
                 body,
               });
             } else {
               await github.rest.issues.createComment({
-                owner,
-                repo,
+                owner: target_owner,
+                repo: target_repo,
                 issue_number,
                 body,
               });
