@@ -98,7 +98,7 @@ permissions:
 concurrency:
   # Lightweight guard keyed off the resolved target. The resolve-inputs
   # job is cheap (no build); once it finishes, the expensive build and
-  # fuzz jobs carry their own concurrency group derived from the
+  # final summarize path carry their own concurrency group derived from the
   # canonical repository + ref so that different URL variants for the
   # same PR always serialize correctly.
   group: valkey-pr-fuzzer-${{ inputs.pr_link || format('{0}-{1}', inputs.valkey_repository || 'valkey-io/valkey', inputs.pr_number != '' && format('pr-{0}', inputs.pr_number) || inputs.valkey_ref || 'pending') }}
@@ -166,7 +166,6 @@ jobs:
                   # Treat the URL as if it were pr_link — pr_link is
                   # authoritative, so it overwrites the target fields.
                   pr_link = pr_link or pr_number
-                  pr_url = pr_url or pr_number
                   pr_number = parsed[1]
               else:
                   raise SystemExit(
@@ -215,7 +214,6 @@ jobs:
               valkey_repository = parsed_repo
               valkey_ref = parsed_ref
               pr_number = parsed_number
-              pr_url = pr_url or pr_link
           else:
               # No pr_link provided — fall back to explicit inputs
               valkey_repository = valkey_repository or "valkey-io/valkey"
@@ -223,6 +221,12 @@ jobs:
                   raise SystemExit(
                       "Either pr_link or valkey_ref must be provided"
                   )
+
+          # Always publish a canonical PR URL once the repository and PR
+          # number are known so summaries and comments cannot drift from
+          # the actual target.
+          if pr_number:
+              pr_url = f"https://github.com/{valkey_repository}/pull/{pr_number}"
 
           print(f"valkey_repository={valkey_repository}")
           print(f"valkey_ref={valkey_ref}")
@@ -593,6 +597,9 @@ jobs:
       issues: write
       pull-requests: write
     runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ needs.resolve-inputs.outputs.concurrency_key }}
+      cancel-in-progress: false
     steps:
       - name: Download run artifacts
         continue-on-error: true
