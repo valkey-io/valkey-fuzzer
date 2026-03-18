@@ -96,10 +96,11 @@ permissions:
   pull-requests: write
 
 concurrency:
-  # pr_link is authoritative for dispatch; for workflow_call the caller
-  # provides valkey_repository + valkey_ref directly.  Using the raw
-  # inputs here is acceptable because resolve-inputs will fail fast on
-  # any mismatch, so only consistent input sets reach the expensive jobs.
+  # Lightweight guard keyed off the resolved target. The resolve-inputs
+  # job is cheap (no build); once it finishes, the expensive build and
+  # fuzz jobs carry their own concurrency group derived from the
+  # canonical repository + ref so that different URL variants for the
+  # same PR always serialize correctly.
   group: valkey-pr-fuzzer-${{ inputs.pr_link || format('{0}-{1}', inputs.valkey_repository || 'valkey-io/valkey', inputs.valkey_ref || 'pending') }}
   cancel-in-progress: false
 
@@ -114,6 +115,7 @@ jobs:
       valkey_ref: ${{ steps.resolve.outputs.valkey_ref }}
       pr_number: ${{ steps.resolve.outputs.pr_number }}
       pr_url: ${{ steps.resolve.outputs.pr_url }}
+      concurrency_key: ${{ steps.resolve.outputs.concurrency_key }}
     steps:
       - name: Resolve PR link and inputs
         id: resolve
@@ -127,6 +129,7 @@ jobs:
         run: |
           python - <<'PY' >> "$GITHUB_OUTPUT"
           import os
+          from urllib.parse import urlparse
 
           event_name = os.environ["EVENT_NAME"]
           pr_link = os.environ.get("INPUT_PR_LINK", "").strip()
@@ -134,8 +137,6 @@ jobs:
           valkey_ref = os.environ.get("INPUT_VALKEY_REF", "").strip()
           pr_number = os.environ.get("INPUT_PR_NUMBER", "").strip()
           pr_url = os.environ.get("INPUT_PR_URL", "").strip()
-
-          from urllib.parse import urlparse
 
           def parse_pr_url(url):
               """Extract (owner/repo, number) from a GitHub PR URL.
@@ -227,6 +228,9 @@ jobs:
           print(f"valkey_ref={valkey_ref}")
           print(f"pr_number={pr_number}")
           print(f"pr_url={pr_url}")
+          # Canonical concurrency key derived from the resolved target so
+          # that different URL variants for the same PR always serialize.
+          print(f"concurrency_key=valkey-pr-fuzzer-{valkey_repository}-{valkey_ref}")
           PY
 
   prepare-matrix:
@@ -341,6 +345,9 @@ jobs:
       contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    concurrency:
+      group: ${{ needs.resolve-inputs.outputs.concurrency_key }}
+      cancel-in-progress: false
     outputs:
       resolved_sha: ${{ steps.commit.outputs.sha }}
     steps:
