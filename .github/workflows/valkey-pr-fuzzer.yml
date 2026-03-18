@@ -50,32 +50,32 @@ on:
         type: string
         default: ""
       fuzzer_repository:
-        description: Repository containing the fuzzer workflow and code to check out
+        description: "Advanced: alternate fuzzer repository to check out for manual testing. Defaults to the current repository/commit."
         required: false
         type: string
         default: ""
       fuzzer_ref:
-        description: Branch, tag, or commit SHA of the fuzzer repo to check out
+        description: "Advanced: alternate fuzzer branch, tag, or commit SHA to check out for manual testing. Defaults to the current commit."
         required: false
         type: string
         default: ""
       valkey_repository:
-        description: "Repository containing the Valkey commit to test (auto-filled from pr_link)"
+        description: "Repository containing the Valkey commit to test when not using pr_link"
         required: false
         type: string
         default: ""
       valkey_ref:
-        description: "Ref to build and test (auto-filled from pr_link, e.g. refs/pull/123/merge)"
+        description: "Ref to build and test when not using pr_link (e.g. refs/pull/123/merge)"
         required: false
         type: string
         default: ""
       pr_number:
-        description: "Pull request number (auto-filled from pr_link)"
+        description: "Optional PR number for summary/comment metadata when not using pr_link"
         required: false
         type: string
         default: ""
       pr_url:
-        description: "Pull request URL (auto-filled from pr_link)"
+        description: "Optional PR URL for summary/comment metadata when not using pr_link"
         required: false
         type: string
         default: ""
