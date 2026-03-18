@@ -101,7 +101,7 @@ concurrency:
   # fuzz jobs carry their own concurrency group derived from the
   # canonical repository + ref so that different URL variants for the
   # same PR always serialize correctly.
-  group: valkey-pr-fuzzer-${{ inputs.pr_link || format('{0}-{1}', inputs.valkey_repository || 'valkey-io/valkey', inputs.valkey_ref || 'pending') }}
+  group: valkey-pr-fuzzer-${{ inputs.pr_link || format('{0}-{1}', inputs.valkey_repository || 'valkey-io/valkey', inputs.pr_number != '' && format('pr-{0}', inputs.pr_number) || inputs.valkey_ref || 'pending') }}
   cancel-in-progress: false
 
 jobs:
@@ -230,7 +230,13 @@ jobs:
           print(f"pr_url={pr_url}")
           # Canonical concurrency key derived from the resolved target so
           # that different URL variants for the same PR always serialize.
-          print(f"concurrency_key=valkey-pr-fuzzer-{valkey_repository}-{valkey_ref}")
+          # When pr_number is set, key off repository + pr_number so that
+          # runs targeting the same PR (even with different refs) serialize
+          # and don't overwrite each other's PR comment.
+          if pr_number:
+              print(f"concurrency_key=valkey-pr-fuzzer-{valkey_repository}-pr-{pr_number}")
+          else:
+              print(f"concurrency_key=valkey-pr-fuzzer-{valkey_repository}-{valkey_ref}")
           PY
 
   prepare-matrix:
