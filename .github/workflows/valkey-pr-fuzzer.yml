@@ -169,11 +169,34 @@ jobs:
                   )
               parsed_repo = match.group(1)
               parsed_number = match.group(2)
+              parsed_ref = f"refs/pull/{parsed_number}/merge"
 
-              # PR link values are defaults; explicit inputs override them
-              valkey_repository = valkey_repository or parsed_repo
-              valkey_ref = valkey_ref or f"refs/pull/{parsed_number}/merge"
-              pr_number = pr_number or parsed_number
+              # Reject explicit overrides that contradict the PR link so we
+              # never mix metadata from different PRs (e.g. building one ref
+              # but commenting on a different PR number).
+              conflicts = []
+              if valkey_repository and valkey_repository != parsed_repo:
+                  conflicts.append(
+                      f"valkey_repository={valkey_repository!r} vs pr_link repo {parsed_repo!r}"
+                  )
+              if valkey_ref and valkey_ref != parsed_ref:
+                  conflicts.append(
+                      f"valkey_ref={valkey_ref!r} vs pr_link ref {parsed_ref!r}"
+                  )
+              if pr_number and pr_number != parsed_number:
+                  conflicts.append(
+                      f"pr_number={pr_number!r} vs pr_link number {parsed_number!r}"
+                  )
+              if conflicts:
+                  raise SystemExit(
+                      "Conflicting inputs: "
+                      + "; ".join(conflicts)
+                      + ". Remove the conflicting overrides or adjust pr_link."
+                  )
+
+              valkey_repository = parsed_repo
+              valkey_ref = parsed_ref
+              pr_number = parsed_number
               pr_url = pr_url or pr_link
           else:
               # No pr_link provided — fall back to explicit inputs
