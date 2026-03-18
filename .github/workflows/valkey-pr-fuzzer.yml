@@ -96,7 +96,11 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: valkey-pr-fuzzer-${{ inputs.pr_link || inputs.valkey_repository || 'pending' }}-${{ inputs.pr_number != '' && inputs.pr_number || inputs.valkey_ref || inputs.pr_link || 'pending' }}
+  # pr_link is authoritative for dispatch; for workflow_call the caller
+  # provides valkey_repository + valkey_ref directly.  Using the raw
+  # inputs here is acceptable because resolve-inputs will fail fast on
+  # any mismatch, so only consistent input sets reach the expensive jobs.
+  group: valkey-pr-fuzzer-${{ inputs.pr_link || format('{0}-{1}', inputs.valkey_repository || 'valkey-io/valkey', inputs.valkey_ref || 'pending') }}
   cancel-in-progress: false
 
 jobs:
@@ -123,7 +127,6 @@ jobs:
         run: |
           python - <<'PY' >> "$GITHUB_OUTPUT"
           import os
-          import re
 
           event_name = os.environ["EVENT_NAME"]
           pr_link = os.environ.get("INPUT_PR_LINK", "").strip()
@@ -132,20 +135,38 @@ jobs:
           pr_number = os.environ.get("INPUT_PR_NUMBER", "").strip()
           pr_url = os.environ.get("INPUT_PR_URL", "").strip()
 
+          from urllib.parse import urlparse
+
+          def parse_pr_url(url):
+              """Extract (owner/repo, number) from a GitHub PR URL.
+
+              Accepts common variants such as:
+                https://github.com/owner/repo/pull/123
+                https://github.com/owner/repo/pull/123/files
+                https://github.com/owner/repo/pull/123/commits
+                https://github.com/owner/repo/pull/123?w=1
+                https://github.com/owner/repo/pull/123#discussion_r...
+              """
+              parsed = urlparse(url)
+              if parsed.hostname != "github.com":
+                  return None
+              parts = parsed.path.strip("/").split("/")
+              # Expect at least owner/repo/pull/number
+              if len(parts) < 4 or parts[2] != "pull" or not parts[3].isdigit():
+                  return None
+              return f"{parts[0]}/{parts[1]}", parts[3]
+
           # Recover a full PR URL pasted into pr_number before any
           # validation so that the extracted values are available to the
           # pr_link / valkey_ref branches below.
           if pr_number and not pr_number.isdigit():
-              url_match = re.match(
-                  r"https?://github\.com/([^/]+/[^/]+)/pull/(\d+)/?$", pr_number
-              )
-              if url_match:
-                  # Treat the URL as if it were pr_link
+              parsed = parse_pr_url(pr_number)
+              if parsed:
+                  # Treat the URL as if it were pr_link — pr_link is
+                  # authoritative, so it overwrites the target fields.
                   pr_link = pr_link or pr_number
-                  valkey_repository = valkey_repository or url_match.group(1)
-                  valkey_ref = valkey_ref or f"refs/pull/{url_match.group(2)}/merge"
                   pr_url = pr_url or pr_number
-                  pr_number = url_match.group(2)
+                  pr_number = parsed[1]
               else:
                   raise SystemExit(
                       f"inputs.pr_number must be a numeric PR number, got {pr_number!r}. "
@@ -158,22 +179,17 @@ jobs:
               if not valkey_ref:
                   raise SystemExit("workflow_call requires inputs.valkey_ref")
           elif pr_link:
-              # Parse the PR URL: https://github.com/{owner}/{repo}/pull/{number}
-              match = re.match(
-                  r"https?://github\.com/([^/]+/[^/]+)/pull/(\d+)/?$", pr_link
-              )
-              if not match:
+              parsed = parse_pr_url(pr_link)
+              if not parsed:
                   raise SystemExit(
                       f"Invalid PR link format: {pr_link!r}. "
                       "Expected: https://github.com/OWNER/REPO/pull/NUMBER"
                   )
-              parsed_repo = match.group(1)
-              parsed_number = match.group(2)
+              parsed_repo, parsed_number = parsed
               parsed_ref = f"refs/pull/{parsed_number}/merge"
 
-              # Reject explicit overrides that contradict the PR link so we
-              # never mix metadata from different PRs (e.g. building one ref
-              # but commenting on a different PR number).
+              # pr_link is authoritative: reject any explicit overrides that
+              # disagree so we never mix metadata from different PRs.
               conflicts = []
               if valkey_repository and valkey_repository != parsed_repo:
                   conflicts.append(
@@ -194,6 +210,7 @@ jobs:
                       + ". Remove the conflicting overrides or adjust pr_link."
                   )
 
+              # Overwrite target fields from the link (authoritative).
               valkey_repository = parsed_repo
               valkey_ref = parsed_ref
               pr_number = parsed_number
