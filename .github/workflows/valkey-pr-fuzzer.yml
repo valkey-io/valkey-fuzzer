@@ -793,14 +793,17 @@ jobs:
         if: ${{ needs.resolve-inputs.outputs.pr_number != '' }}
         continue-on-error: true
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          PR_NUMBER: ${{ needs.resolve-inputs.outputs.pr_number }}
+          VALKEY_REPOSITORY: ${{ needs.resolve-inputs.outputs.valkey_repository }}
         with:
           github-token: ${{ github.token }}
           script: |
             const fs = require('fs');
             const body = fs.readFileSync('pr-comment.md', 'utf8');
             const marker = '<!-- valkey-cluster-fuzzer-results -->';
-            const issue_number = Number('${{ needs.resolve-inputs.outputs.pr_number }}');
-            const valkey_repository = '${{ needs.resolve-inputs.outputs.valkey_repository }}';
+            const issue_number = Number(process.env.PR_NUMBER);
+            const valkey_repository = process.env.VALKEY_REPOSITORY;
             const [target_owner, target_repo] = valkey_repository.split('/');
             const {owner: workflow_owner, repo: workflow_repo} = context.repo;
 
