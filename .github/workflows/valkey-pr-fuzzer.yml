@@ -414,6 +414,9 @@ jobs:
       contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    concurrency:
+      group: ${{ needs.resolve-inputs.outputs.concurrency_key }}-run-${{ matrix.run_id }}
+      cancel-in-progress: false
     strategy:
       fail-fast: false
       matrix:
@@ -828,7 +831,6 @@ jobs:
 
       - name: Comment on PR with fuzzer results
         if: ${{ needs.resolve-inputs.outputs.pr_number != '' }}
-        continue-on-error: true
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
           PR_NUMBER: ${{ needs.resolve-inputs.outputs.pr_number }}
