@@ -78,7 +78,7 @@ class ParallelExecutor:
 
                 success = self.operation_orchestrator.execute_operation(
                     operation, log_buffer=buffer,
-                    chaos_events=self.chaos_coordinator.chaos_history
+                    chaos_events=immediate_chaos
                 )
 
                 for deferred in deferred_chaos:

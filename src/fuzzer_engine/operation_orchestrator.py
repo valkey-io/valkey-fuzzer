@@ -192,14 +192,7 @@ class OperationOrchestrator(IOperationOrchestrator):
             return False
 
     def _all_replicas_killed_by_chaos(self, replica_nodes, chaos_events, log) -> bool:
-        """Check if every replica of the shard was killed by chaos injection.
-        
-        Returns True only if ALL dead replicas can be accounted for by a matching
-        chaos event. If any replica is dead for an unexplained reason, returns False.
-        
-        Uses port-based matching because chaos events use logical node IDs (e.g. "node-0")
-        while replica_nodes from CLUSTER NODES use Valkey cluster hex IDs.
-        """
+        """Check if every replica of the shard was killed by chaos injection"""
         if not chaos_events:
             return False
 
