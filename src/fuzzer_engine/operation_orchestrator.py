@@ -4,7 +4,7 @@ Operation Orchestrator - Executes cluster operations with timing and state manag
 import time
 import logging
 import threading
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 from ..models import Operation, OperationType, ClusterStatus, ClusterConnection
 from ..interfaces import IOperationOrchestrator
 from ..cluster_orchestrator.orchestrator import ClusterManager
@@ -32,7 +32,7 @@ class OperationOrchestrator(IOperationOrchestrator):
         """Set reference to killed nodes set from StateValidator"""
         self.killed_nodes = killed_nodes
     
-    def execute_operation(self, operation: Operation, log_buffer=None) -> bool:
+    def execute_operation(self, operation: Operation, log_buffer=None, recent_chaos_events: Optional[List] = None) -> bool:
         """Execute a single cluster operation"""
         log = log_buffer if log_buffer else logging
         
@@ -55,7 +55,7 @@ class OperationOrchestrator(IOperationOrchestrator):
             # Execute based on operation type
             success = False
             if operation.type == OperationType.FAILOVER:
-                success = self._execute_failover(operation, log)
+                success = self._execute_failover(operation, log, recent_chaos_events)
             else:
                 log.error(f"Unsupported operation type: {operation.type}")
                 return False
@@ -79,7 +79,7 @@ class OperationOrchestrator(IOperationOrchestrator):
                     del self.active_operations[operation_id]
             return False
     
-    def _execute_failover(self, operation: Operation, log=None) -> bool:
+    def _execute_failover(self, operation: Operation, log=None, recent_chaos_events: Optional[List] = None) -> bool:
         """Execute failover operation"""
         if log is None:
             log = logging
@@ -179,9 +179,25 @@ class OperationOrchestrator(IOperationOrchestrator):
                     )
                     
                     if all_replicas_dead:
+                        # Build set of recently killed nodes from chaos events in this operation
+                        recently_killed = set()
+                        if recent_chaos_events:
+                            for chaos_event in recent_chaos_events:
+                                if (hasattr(chaos_event, 'success') and chaos_event.success and 
+                                    hasattr(chaos_event, 'chaos_type') and chaos_event.chaos_type.value == 'process_kill'):
+                                    # Find the node address from target_node (node_id)
+                                    target_node_id = chaos_event.target_node
+                                    for node in current_nodes:
+                                        if node.get('node_id') == target_node_id:
+                                            recently_killed.add(f"{node['host']}:{node['port']}")
+                                            break
+                        
+                        # Combine recently killed with previously tracked killed nodes
+                        all_killed = self.killed_nodes | recently_killed
+                        
                         # Verify replicas were actually killed by chaos, not unexpected failures
                         all_killed_by_chaos = all(
-                            f"{r.get('host', '127.0.0.1')}:{r.get('port')}" in self.killed_nodes
+                            f"{r['host']}:{r['port']}" in all_killed
                             for r in replica_nodes
                         )
                         

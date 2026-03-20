@@ -868,33 +868,44 @@ class SlotCoverageValidator:
                             affected_shards.add(killed_node_to_shard[node_id])
 
                 if slots_on_killed_nodes:
-                    # Check if ALL nodes in the affected shards are killed
-                    # If so, this is expected and should not fail
-                    all_shards_completely_dead = True
-                    for shard_id in affected_shards:
-                        shard_nodes = [n for n in all_nodes if n.get('shard_id') == shard_id]
-                        live_shard_nodes = [n for n in shard_nodes if format_node_address(n) not in killed_nodes]
-                        if live_shard_nodes:
-                            # This shard has live nodes, so slots should have been reassigned
-                            all_shards_completely_dead = False
-                            break
-                    
-                    if not all_shards_completely_dead:
+                    if not affected_shards:
+                        # Killed nodes have slots but no shard mapping - fail safely
                         success = False
                         error_message = (
-                            f"CRITICAL: {len(slots_on_killed_nodes)} slots still assigned to killed nodes. "
+                            f"CRITICAL: {len(slots_on_killed_nodes)} slots assigned to killed nodes, "
+                            f"but shard mapping is unknown. Cannot verify if entire shards are dead. "
                             f"Killed nodes: {killed_nodes}. "
-                            f"This indicates failover did not complete or slots were not reassigned. "
                             f"Affected slots: {group_slots_into_ranges(slots_on_killed_nodes)}"
                         )
                         logger.error(error_message)
                     else:
-                        # All affected shards are completely dead - this is expected
-                        logger.info(
-                            f"{len(slots_on_killed_nodes)} slots assigned to killed nodes, "
-                            f"but all nodes in affected shard(s) {affected_shards} are dead. "
-                            f"This is expected when an entire shard is killed."
-                        )
+                        # Check if ALL nodes in the affected shards are killed
+                        # If so, this is expected and should not fail
+                        all_shards_completely_dead = True
+                        for shard_id in affected_shards:
+                            shard_nodes = [n for n in all_nodes if n.get('shard_id') == shard_id]
+                            live_shard_nodes = [n for n in shard_nodes if format_node_address(n) not in killed_nodes]
+                            if live_shard_nodes:
+                                # This shard has live nodes, so slots should have been reassigned
+                                all_shards_completely_dead = False
+                                break
+                        
+                        if not all_shards_completely_dead:
+                            success = False
+                            error_message = (
+                                f"CRITICAL: {len(slots_on_killed_nodes)} slots still assigned to killed nodes. "
+                                f"Killed nodes: {killed_nodes}. "
+                                f"This indicates failover did not complete or slots were not reassigned. "
+                                f"Affected slots: {group_slots_into_ranges(slots_on_killed_nodes)}"
+                            )
+                            logger.error(error_message)
+                        else:
+                            # All affected shards are completely dead - this is expected
+                            logger.info(
+                                f"{len(slots_on_killed_nodes)} slots assigned to killed nodes, "
+                                f"but all nodes in affected shard(s) {affected_shards} are dead. "
+                                f"This is expected when an entire shard is killed."
+                            )
 
             if success and config.require_full_coverage and unassigned_slots:
                 success = False
