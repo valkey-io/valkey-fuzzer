@@ -170,48 +170,39 @@ class OperationOrchestrator(IOperationOrchestrator):
             
             if not replica:
                 # No alive replicas - check if they were killed by chaos
-                if replica_nodes:
-                    all_replicas_dead = all(
-                        r.get('status') == 'failed' or 
-                        any(n.get('node_id') == r['node_id'] and n.get('status') == 'failed' 
-                            for n in current_nodes)
+                if replica_nodes:                    
+                    recently_killed = set()
+                    if recent_chaos_events:
+                        for chaos_event in recent_chaos_events:
+                            if (hasattr(chaos_event, 'success') and chaos_event.success and 
+                                hasattr(chaos_event, 'chaos_type') and chaos_event.chaos_type.value == 'process_kill'):
+                                target_id = chaos_event.target_node
+                                for initial_node in self.cluster_connection.initial_nodes:
+                                    if initial_node.node_id == target_id or initial_node.cluster_node_id == target_id:
+                                        recently_killed.add(f"{initial_node.host}:{initial_node.port}")
+                                        break
+                    
+                    # Combine recently killed with previously tracked killed nodes
+                    all_killed = self.killed_nodes | recently_killed
+                    
+                    # Verify replicas were actually killed by chaos, not unexpected failures
+                    all_killed_by_chaos = all(
+                        f"{r['host']}:{r['port']}" in all_killed
                         for r in replica_nodes
                     )
                     
-                    if all_replicas_dead:
-                        # Build set of recently killed nodes from chaos events in this operation
-                        recently_killed = set()
-                        if recent_chaos_events:
-                            for chaos_event in recent_chaos_events:
-                                if (hasattr(chaos_event, 'success') and chaos_event.success and 
-                                    hasattr(chaos_event, 'chaos_type') and chaos_event.chaos_type.value == 'process_kill'):
-                                    target_id = chaos_event.target_node
-                                    for initial_node in self.cluster_connection.initial_nodes:
-                                        if initial_node.node_id == target_id or initial_node.cluster_node_id == target_id:
-                                            recently_killed.add(f"{initial_node.host}:{initial_node.port}")
-                                            break
-                        
-                        # Combine recently killed with previously tracked killed nodes
-                        all_killed = self.killed_nodes | recently_killed
-                        
-                        # Verify replicas were actually killed by chaos, not unexpected failures
-                        all_killed_by_chaos = all(
-                            f"{r['host']}:{r['port']}" in all_killed
-                            for r in replica_nodes
+                    if all_killed_by_chaos:
+                        log.info(
+                            f"All replicas for primary {operation.target_node} are dead (killed by chaos). "
+                            f"Failover cannot proceed - marking as success."
                         )
-                        
-                        if all_killed_by_chaos:
-                            log.info(
-                                f"All replicas for primary {operation.target_node} are dead (killed by chaos). "
-                                f"Failover cannot proceed - marking as success."
-                            )
-                            return True
-                        else:
-                            log.error(
-                                f"All replicas for primary {operation.target_node} are dead, "
-                                f"but NOT all were killed by chaos - unexpected failure detected"
-                            )
-                            return False
+                        return True
+                    else:
+                        log.error(
+                            f"All replicas for primary {operation.target_node} are dead, "
+                            f"but NOT all were killed by chaos - unexpected failure detected"
+                        )
+                        return False
                 
                 log.error(f"Cannot execute failover: No replicas found for primary {operation.target_node}")
                 return False

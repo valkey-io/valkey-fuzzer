@@ -175,7 +175,7 @@ class FuzzerEngine(IFuzzerEngine):
             logger.info(f"Step 4: Executing {len(scenario.operations)} operations in parallel")
             logger.info("")
             
-            parallel_executor = ParallelExecutor(self.operation_orchestrator, self.chaos_coordinator, self.logger)
+            parallel_executor = ParallelExecutor(self.operation_orchestrator, self.chaos_coordinator, self.logger, state_validator)
             expected_topology = self._build_expected_topology(scenario)
 
             def validate_operation_wave(wave_number, wave_results):
