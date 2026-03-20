@@ -185,11 +185,12 @@ class OperationOrchestrator(IOperationOrchestrator):
                             for chaos_event in recent_chaos_events:
                                 if (hasattr(chaos_event, 'success') and chaos_event.success and 
                                     hasattr(chaos_event, 'chaos_type') and chaos_event.chaos_type.value == 'process_kill'):
-                                    # Find the node address from target_node (node_id)
-                                    target_node_id = chaos_event.target_node
-                                    for node in current_nodes:
-                                        if node.get('node_id') == target_node_id:
-                                            recently_killed.add(f"{node['host']}:{node['port']}")
+                                    # chaos_event.target_node is the logical NodeInfo.node_id (e.g., "node-0")
+                                    # We need to find the corresponding node address (host:port)
+                                    target_logical_id = chaos_event.target_node
+                                    for initial_node in self.cluster_connection.initial_nodes:
+                                        if initial_node.node_id == target_logical_id:
+                                            recently_killed.add(f"{initial_node.host}:{initial_node.port}")
                                             break
                         
                         # Combine recently killed with previously tracked killed nodes
