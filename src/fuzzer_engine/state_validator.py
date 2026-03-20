@@ -1122,12 +1122,14 @@ class TopologyValidator:
                 # With replicas, failover maintains primary count UNLESS the entire shard is killed
                 if chaos_killed_shards is None:
                     chaos_killed_shards = set()
-                fully_killed_primary_count = sum(
-                    1 for node in failed_nodes
+                # Count fully-killed shards (not nodes) to avoid double-counting
+                # when a shard had multiple primary promotions before being fully killed
+                fully_killed_primary_count = len({
+                    node.get('shard_id') for node in failed_nodes
                     if is_node_killed_by_chaos(node, killed_nodes)
                     and killed_node_roles.get(format_node_address(node), node['role']) == 'primary'
                     and node.get('shard_id') in chaos_killed_shards
-                )
+                })
                 # Primaries in fully-killed shards can't be replaced; others can via failover
                 adjusted_expected_primaries = expected_topology.num_primaries - fully_killed_primary_count
             
