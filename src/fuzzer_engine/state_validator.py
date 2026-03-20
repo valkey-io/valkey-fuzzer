@@ -851,25 +851,31 @@ class SlotCoverageValidator:
                 # Build reverse mapping: node_address -> node_id for killed nodes
                 killed_node_ids = set()
                 killed_node_to_shard = {}  # Track which shard each killed node belongs to
+                killed_nodes_without_shard = set()  # Track killed nodes with missing shard_id
                 for node in all_nodes:
                     node_address = format_node_address(node)
                     if node_address in killed_nodes:
                         killed_node_ids.add(node['node_id'])
                         if node.get('shard_id') is not None:
                             killed_node_to_shard[node['node_id']] = node.get('shard_id')
+                        else:
+                            killed_nodes_without_shard.add(node['node_id'])
 
                 # Check if any slots are assigned to killed nodes
                 slots_on_killed_nodes = []
                 affected_shards = set()
+                unmapped_killed_nodes_with_slots = set()  # Killed nodes with slots but no shard_id
                 for node_id in killed_node_ids:
                     if node_id in slot_distribution:
                         slots_on_killed_nodes.extend(slot_distribution[node_id])
                         if node_id in killed_node_to_shard:
                             affected_shards.add(killed_node_to_shard[node_id])
+                        else:
+                            # This killed node has slots but no shard mapping
+                            unmapped_killed_nodes_with_slots.add(node_id)
 
                 if slots_on_killed_nodes:
-                    if not affected_shards:
-                        # Killed nodes have slots but no shard mapping - fail safely
+                    if unmapped_killed_nodes_with_slots:
                         success = False
                         error_message = (
                             f"CRITICAL: {len(slots_on_killed_nodes)} slots assigned to killed nodes, "
@@ -879,8 +885,7 @@ class SlotCoverageValidator:
                         )
                         logger.error(error_message)
                     else:
-                        # Check if ALL nodes in the affected shards are killed
-                        # If so, this is expected and should not fail
+                        # All killed nodes with slots have shard mapping - check if entire shards are dead
                         all_shards_completely_dead = True
                         for shard_id in affected_shards:
                             shard_nodes = [n for n in all_nodes if n.get('shard_id') == shard_id]
