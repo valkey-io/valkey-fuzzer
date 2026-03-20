@@ -1105,17 +1105,7 @@ class TopologyValidator:
             
             total_killed_nodes = killed_primaries + killed_replicas
             
-            # Adjust expectations:
-            # - Primary count: stays the same if replicas can promote, otherwise reduces by killed primaries
-            #   * With replicas: failover promotes replicas to replace killed primaries
-            #   * Without replicas: killed primaries reduce the primary count
-            # - Replica count reduces by ALL killed nodes:
-            #   * Each killed replica directly reduces replica count
-            #   * Each killed primary causes a replica to promote (also reduces replica count)
-            # - Clamp replica count at 0 to handle zero-replica scenarios where killing primaries
-            #   would otherwise make the expected count negative
-            
-            # In zero-replica clusters, killed primaries reduce the primary count
+            fully_killed_primary_count = 0
             if expected_topology.num_replicas == 0:
                 adjusted_expected_primaries = expected_topology.num_primaries - killed_primaries
             else:
@@ -1133,7 +1123,8 @@ class TopologyValidator:
                 # Primaries in fully-killed shards can't be replaced; others can via failover
                 adjusted_expected_primaries = expected_topology.num_primaries - fully_killed_primary_count
             
-            adjusted_expected_replicas = max(0, expected_topology.num_replicas - total_killed_nodes)
+            promoted_primaries = killed_primaries - fully_killed_primary_count if chaos_killed_shards else killed_primaries
+            adjusted_expected_replicas = max(0, expected_topology.num_replicas - killed_replicas - promoted_primaries)
             
             if total_killed_nodes > 0:
                 logger.info(
