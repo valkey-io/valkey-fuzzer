@@ -141,7 +141,7 @@ class IOperationOrchestrator(ABC):
     """Interface for operation execution"""
     
     @abstractmethod
-    def execute_operation(self, operation: Operation, log_buffer=None) -> bool:
+    def execute_operation(self, operation: Operation, log_buffer=None, chaos_events=None) -> bool:
         """Execute a single cluster operation"""
         pass
 

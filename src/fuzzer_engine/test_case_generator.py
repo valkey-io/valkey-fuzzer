@@ -52,7 +52,7 @@ class ScenarioGenerator(ITestCaseGenerator):
         """Generate random cluster configuration"""
         num_shards = random.randint(3, 16)
         # Ensure at least 1 replica per shard for failover operations
-        replicas_per_shard = random.randint(1, 2)
+        replicas_per_shard = random.randint(1, 5)
         base_port = random.randint(7000, 8000)
         
         return ClusterConfig(
@@ -62,8 +62,9 @@ class ScenarioGenerator(ITestCaseGenerator):
         )
     
     def _generate_random_operations(self, cluster_config: ClusterConfig) -> List[Operation]:
-        """Generate random failover operations"""
-        num_operations = random.randint(1, 5)
+        """Generate random failover operations."""
+        max_safe_operations = cluster_config.replicas_per_shard * cluster_config.num_shards
+        num_operations = random.randint(1, min(5, max_safe_operations))
         operations = []
         num_primaries = cluster_config.num_shards
         
@@ -162,8 +163,8 @@ class ScenarioGenerator(ITestCaseGenerator):
         
         if not (3 <= num_shards <= 16):
             raise ValueError(f"num_shards must be between 3 and 16, got {num_shards}")
-        if not (0 <= replicas_per_shard <= 2):
-            raise ValueError(f"replicas_per_shard must be between 0 and 2, got {replicas_per_shard}")
+        if not (0 <= replicas_per_shard <= 5):
+            raise ValueError(f"replicas_per_shard must be between 0 and 5, got {replicas_per_shard}")
         
         kwargs = {
             'num_shards': num_shards,
@@ -387,7 +388,7 @@ class ScenarioGenerator(ITestCaseGenerator):
         """Validate test scenario configuration, raises ValueError if invalid."""
         if not (3 <= scenario.cluster_config.num_shards <= 16):
             raise ValueError(f"Invalid num_shards: {scenario.cluster_config.num_shards}")
-        if not (0 <= scenario.cluster_config.replicas_per_shard <= 2):
+        if not (0 <= scenario.cluster_config.replicas_per_shard <= 5):
             raise ValueError(f"Invalid replicas_per_shard: {scenario.cluster_config.replicas_per_shard}")
         
         if not scenario.operations:

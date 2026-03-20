@@ -159,6 +159,13 @@ class FuzzerEngine(IFuzzerEngine):
                 logger.info(f"Adjusted min_replicas_per_shard to {expected_replicas_per_shard} to match cluster configuration")
 
             state_validator = StateValidator(validation_config)
+
+            # Set nodes per shard for full-shard-kill detection
+            nodes_per_shard_count = 1 + scenario.cluster_config.replicas_per_shard  # primary + replicas
+            state_validator.set_nodes_per_shard({
+                shard_id: nodes_per_shard_count
+                for shard_id in range(scenario.cluster_config.num_shards)
+            })
             
             # Write test data for data consistency validation
             if validation_config.check_data_consistency:
@@ -385,7 +392,7 @@ class FuzzerEngine(IFuzzerEngine):
                 if node.node_id == target_node_id:
                     node_address = f"{node.host}:{node.port}"
                     state_validator.register_killed_node(node_address, target_role, node.shard_id)
-                    logger.info(
+                    logger.debug(
                         f"Registered killed node for validation: {node_address} "
                         f"(role: {target_role}, shard: {node.shard_id})"
                     )

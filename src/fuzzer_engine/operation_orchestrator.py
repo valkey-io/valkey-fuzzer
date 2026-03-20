@@ -5,7 +5,7 @@ import time
 import logging
 import threading
 from typing import Dict, Optional
-from ..models import Operation, OperationType, ClusterStatus, ClusterConnection
+from ..models import Operation, OperationType, ClusterStatus, ClusterConnection, ChaosResult
 from ..interfaces import IOperationOrchestrator
 from ..cluster_orchestrator.orchestrator import ClusterManager
 from ..utils.valkey_utils import valkey_client, query_cluster_nodes
@@ -27,7 +27,7 @@ class OperationOrchestrator(IOperationOrchestrator):
         """Set or update cluster connection"""
         self.cluster_connection = cluster_connection
     
-    def execute_operation(self, operation: Operation, log_buffer=None) -> bool:
+    def execute_operation(self, operation: Operation, log_buffer=None, chaos_events=None) -> bool:
         """Execute a single cluster operation"""
         log = log_buffer if log_buffer else logging
         
@@ -50,7 +50,7 @@ class OperationOrchestrator(IOperationOrchestrator):
             # Execute based on operation type
             success = False
             if operation.type == OperationType.FAILOVER:
-                success = self._execute_failover(operation, log)
+                success = self._execute_failover(operation, log, chaos_events=chaos_events)
             else:
                 log.error(f"Unsupported operation type: {operation.type}")
                 return False
@@ -74,42 +74,74 @@ class OperationOrchestrator(IOperationOrchestrator):
                     del self.active_operations[operation_id]
             return False
     
-    def _execute_failover(self, operation: Operation, log=None) -> bool:
+    def _execute_failover(self, operation: Operation, log=None, chaos_events=None) -> bool:
         """Execute failover operation"""
         if log is None:
             log = logging
-        
+
         log.info(f"Executing failover on {operation.target_node}")
-        
-        # Get all cluster nodes (including dead ones) to find target primary
-        # Gets actual Node information from Valkey
-        current_nodes = self.cluster_connection.get_current_nodes()
-        
-        # Find target primary node
+
+        # Get live cluster nodes (exclude failed) to find the CURRENT primary
+        # After a previous failover, the original primary may be dead and a replica promoted
+        current_nodes = self.cluster_connection.get_current_nodes(include_failed=False)
+
+        # Find target primary node from live nodes only
         target_node = find_primary_node_by_identifier(current_nodes, operation.target_node)
-        
+
         if not target_node:
+            # Primary not found among live nodes — check if it was killed by chaos.
+            all_nodes = self.cluster_connection.get_current_nodes(include_failed=True)
+            dead_primary = find_primary_node_by_identifier(all_nodes, operation.target_node)
+            if dead_primary and dead_primary.get('status') == 'failed':
+                if self._is_node_killed_by_chaos(dead_primary, chaos_events, log):
+                    # The primary was chaos-killed. If replicas are alive, Valkey's
+                    # automatic failover should be promoting one:
+                    #   1. Whole shard down (no live replicas) → expected, return True
+                    #   2. Replicas alive → auto-failover in progress, wait and verify
+                    target_node_id = dead_primary.get('node_id')
+                    target_shard_id = dead_primary.get('shard_id')
+                    live_nodes = self.cluster_connection.get_current_nodes(include_failed=False)
+                    has_live_replicas = False
+
+                    if target_shard_id is not None and live_nodes:
+                        has_live_replicas = any(n.get('role') == 'replica' and n.get('shard_id') == target_shard_id for n in live_nodes)
+
+                    if not has_live_replicas and target_node_id and live_nodes:
+                        for node in live_nodes:
+                            parsed_nodes = query_cluster_nodes(node, timeout=3.0)
+                            if parsed_nodes:
+                                has_live_replicas = any(
+                                    p['is_slave'] and p['master_id'] == target_node_id
+                                    for p in parsed_nodes
+                                )
+                                if has_live_replicas:
+                                    break
+
+                    if has_live_replicas:
+                        return self.wait_for_operation_completion(operation.timing.timeout, log)
+                    else:
+                        return True
             log.error(f"Target primary node {operation.target_node} not found in cluster")
             return False
-        
+
         # Get replicas of this primary to execute failover
         # Use cluster_connection to find replicas from any live node (resilient to dead primary)
         target_node_id = target_node['node_id']
         target_shard_id = target_node.get('shard_id')
-        
+
         log.info(f"Finding replicas for primary {operation.target_node} (node_id: {target_node_id})")
-        
+
         try:
             # Get fresh cluster topology from any live node
             current_nodes = self.cluster_connection.get_current_nodes()
-            
+
             if not current_nodes:
                 log.error("Cannot get current cluster nodes - all nodes may be down")
                 return False
-            
+
             # Find replicas of the target primary by shard_id or by querying a live node
             replica_nodes = []
-            
+
             # Strategy 1: Find replicas by shard_id (if available)
             if target_shard_id is not None:
                 for node in current_nodes:
@@ -120,30 +152,30 @@ class OperationOrchestrator(IOperationOrchestrator):
                             'node_id': node['node_id']
                         })
                         log.info(f"Found replica by shard_id: {node['node_id']} at port {node['port']}")
-            
+
             # Strategy 2: Query a live node for cluster topology
             # Try the target primary first for determinism, then fall back to other nodes
             if not replica_nodes:
                 log.info("Querying live nodes for replica information")
-                
+
                 # Build query order: target primary first, then other nodes
                 nodes_to_query = []
-                
+
                 # Add target primary first (if it's in current_nodes)
                 for node in current_nodes:
                     if node.get('node_id') == target_node_id or node.get('port') == target_node.get('port'):
                         nodes_to_query.append(node)
                         break
-                
+
                 # Add remaining nodes as fallback
                 for node in current_nodes:
                     if node not in nodes_to_query:
                         nodes_to_query.append(node)
-                
+
                 # Query nodes in priority order
                 for node in nodes_to_query:
                     parsed_nodes = query_cluster_nodes(node, timeout=3.0)
-                    
+
                     if parsed_nodes:
                         # Find replicas of our target primary
                         for parsed_node in parsed_nodes:
@@ -154,26 +186,26 @@ class OperationOrchestrator(IOperationOrchestrator):
                                     'node_id': parsed_node['node_id']
                                 })
                                 log.info(f"Found replica via CLUSTER NODES from {node['port']}: port {parsed_node['port']}")
-                        
+
                         # If we found replicas, break out of the loop
                         if replica_nodes:
                             break
-            
+
             if not replica_nodes:
                 log.error(f"Cannot execute failover: No replicas found for primary {operation.target_node}. "
                              f"Failover requires at least one replica to promote.")
                 return False
-            
+
             # Find a random alive replica to execute failover
             replica = self.cluster_connection.find_alive_node(replica_nodes, randomize=True)
-            
+
             if not replica:
                 log.error(f"Cannot execute failover: No alive replicas found for primary {operation.target_node}")
-                return False
-            
+                return self._all_replicas_killed_by_chaos(replica_nodes, chaos_events, log)
+
             log.info(f"Selected alive replica at port {replica['port']} for failover")
             log.info(f"Executing CLUSTER FAILOVER from replica at port {replica['port']}")
-            
+
             with valkey_client(replica['host'], replica['port'], timeout=5.0, decode_responses=True) as replica_client:
                 # Execute CLUSTER FAILOVER command
                 force = operation.parameters.get('force', False)
@@ -183,13 +215,66 @@ class OperationOrchestrator(IOperationOrchestrator):
                 else:
                     replica_client.execute_command('CLUSTER', 'FAILOVER')
                     log.info("Executed graceful failover")
-            
+
             # Wait for failover to complete then validate cluster slots and replication links
             return self.wait_for_operation_completion(operation.timing.timeout, log)
-            
+
         except Exception as e:
             log.error(f"Failover execution failed: {e}")
             return False
+
+    def _is_node_killed_by_chaos(self, node, chaos_events, log) -> bool:
+        """Check if a specific node was killed by a chaos event."""
+        if not chaos_events:
+            return False
+
+        # Map logical node_id -> port using initial_nodes
+        logical_id_to_port = {}
+        if self.cluster_connection and self.cluster_connection.initial_nodes:
+            for n in self.cluster_connection.initial_nodes:
+                logical_id_to_port[n.node_id] = n.port
+
+        node_port = node.get('port')
+        for event in chaos_events:
+            if isinstance(event, ChaosResult) and event.success:
+                killed_port = logical_id_to_port.get(event.target_node)
+                if killed_port is not None and killed_port == node_port:
+                    return True
+        return False
+
+    def _all_replicas_killed_by_chaos(self, replica_nodes, chaos_events, log) -> bool:
+        """Check if every replica of the shard was killed by chaos injection"""
+        if not chaos_events:
+            return False
+
+        # Map logical node_id -> port using initial_nodes from cluster connection
+        logical_id_to_port = {}
+        if self.cluster_connection and self.cluster_connection.initial_nodes:
+            for node in self.cluster_connection.initial_nodes:
+                logical_id_to_port[node.node_id] = node.port
+
+        # Build set of ports killed by successful chaos events
+        chaos_killed_ports = set()
+        for event in chaos_events:
+            if isinstance(event, ChaosResult) and event.success:
+                port = logical_id_to_port.get(event.target_node)
+                if port is not None:
+                    chaos_killed_ports.add(port)
+
+        if not chaos_killed_ports:
+            return False
+
+        # Every replica of this shard must be accounted for by a chaos kill
+        unaccounted = []
+        for replica in replica_nodes:
+            if replica.get('port') not in chaos_killed_ports:
+                unaccounted.append(f"{replica.get('host')}:{replica.get('port')}")
+
+        if unaccounted:
+            return False
+
+        killed_ports = sorted(chaos_killed_ports)
+        return True
 
     def wait_for_operation_completion(self, timeout: float, log=None) -> bool:
         """Wait for operation to complete and validate cluster state"""

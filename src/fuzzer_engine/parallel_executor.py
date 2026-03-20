@@ -76,7 +76,10 @@ class ParallelExecutor:
                     if isinstance(chaos, dict) and chaos.get("deferred")
                 ]
 
-                success = self.operation_orchestrator.execute_operation(operation, log_buffer=buffer)
+                success = self.operation_orchestrator.execute_operation(
+                    operation, log_buffer=buffer,
+                    chaos_events=immediate_chaos
+                )
 
                 for deferred in deferred_chaos:
                     buffer.info(f"Injecting deferred chaos after operation (delay: {deferred['delay']:.2f}s)")

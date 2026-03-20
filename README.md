@@ -367,7 +367,7 @@ The current implementation focuses on:
 
 ### Supported Configurations
 - **Cluster Sizes**: 3-16 shards
-- **Replication**: 0-2 replicas per shard
+- **Replication**: 0-5 replicas per shard
 - **Deployment**: Single metal instance with multiple processes
 
 ### Validation Capabilities
