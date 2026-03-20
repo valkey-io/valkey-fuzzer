@@ -77,6 +77,18 @@ class ParallelExecutor:
                     if isinstance(chaos, dict) and chaos.get("deferred")
                 ]
 
+                # Register killed nodes immediately BEFORE operation executes
+                # This ensures parallel operations can see each other's chaos kills
+                if self.state_validator:
+                    for chaos_event in immediate_chaos:
+                        if isinstance(chaos_event, ChaosResult) and chaos_event.success:
+                            for node in cluster_connection.initial_nodes:
+                                if node.node_id == chaos_event.target_node or node.cluster_node_id == chaos_event.target_node:
+                                    node_address = f"{node.host}:{node.port}"
+                                    target_role = getattr(chaos_event, 'target_role', node.role)
+                                    self.state_validator.register_killed_node(node_address, target_role, node.shard_id)
+                                    break
+
                 success = self.operation_orchestrator.execute_operation(
                     operation, 
                     log_buffer=buffer,
@@ -108,18 +120,6 @@ class ParallelExecutor:
                         self.chaos_coordinator.chaos_history.append(result)
 
                 chaos_events = immediate_chaos
-
-                # Register killed nodes immediately for parallel operations to see
-                if self.state_validator:
-                    for chaos_event in chaos_events:
-                        if isinstance(chaos_event, ChaosResult) and chaos_event.success:
-                            # Find the node that was killed
-                            for node in cluster_connection.initial_nodes:
-                                if node.node_id == chaos_event.target_node or node.cluster_node_id == chaos_event.target_node:
-                                    node_address = f"{node.host}:{node.port}"
-                                    target_role = getattr(chaos_event, 'target_role', node.role)
-                                    self.state_validator.register_killed_node(node_address, target_role, node.shard_id)
-                                    break
 
                 self.fuzzer_logger.log_operation(
                     operation,

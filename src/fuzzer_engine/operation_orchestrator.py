@@ -126,12 +126,12 @@ class OperationOrchestrator(IOperationOrchestrator):
                         })
                         log.info(f"Found replica by shard_id: {node['node_id']} at port {node['port']}")
             
-            # Strategy 2: Query a live node for cluster topology
-            # Try the target primary first for determinism, then fall back to other nodes
+            # Strategy 2: Query ALL live nodes for cluster topology to get complete view
+            # During gossip convergence, different nodes may have different views
             if not replica_nodes:
-                log.info("Querying live nodes for replica information")
+                log.info("Querying all live nodes for complete replica information")
                 
-                # Build query order: target primary first, then other nodes
+                # Build query order: target primary first for determinism, then other nodes
                 nodes_to_query = []
                 
                 # Add target primary first (if it's in current_nodes)
@@ -145,7 +145,10 @@ class OperationOrchestrator(IOperationOrchestrator):
                     if node not in nodes_to_query:
                         nodes_to_query.append(node)
                 
-                # Query nodes in priority order
+                # Track unique replicas by node_id to avoid duplicates
+                seen_replica_ids = set()
+                
+                # Query ALL nodes to get complete view during gossip convergence
                 for node in nodes_to_query:
                     parsed_nodes = query_cluster_nodes(node, timeout=3.0)
                     
@@ -153,16 +156,15 @@ class OperationOrchestrator(IOperationOrchestrator):
                         # Find replicas of our target primary
                         for parsed_node in parsed_nodes:
                             if parsed_node['is_slave'] and parsed_node['master_id'] == target_node_id:
-                                replica_nodes.append({
-                                    'host': parsed_node['host'],
-                                    'port': parsed_node['port'],
-                                    'node_id': parsed_node['node_id']
-                                })
-                                log.info(f"Found replica via CLUSTER NODES from {node['port']}: port {parsed_node['port']}")
-                        
-                        # If we found replicas, break out of the loop
-                        if replica_nodes:
-                            break
+                                replica_id = parsed_node['node_id']
+                                if replica_id not in seen_replica_ids:
+                                    replica_nodes.append({
+                                        'host': parsed_node['host'],
+                                        'port': parsed_node['port'],
+                                        'node_id': replica_id
+                                    })
+                                    seen_replica_ids.add(replica_id)
+                                    log.info(f"Found replica via CLUSTER NODES from {node['port']}: port {parsed_node['port']}")
             
             
             # Find a random alive replica to execute failover

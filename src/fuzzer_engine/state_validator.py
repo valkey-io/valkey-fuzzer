@@ -885,12 +885,36 @@ class SlotCoverageValidator:
                         )
                         logger.error(error_message)
                     else:
-                        # All killed nodes with slots have shard mapping - check if entire shards are dead
+                        # During gossip convergence, a single node's view may be incomplete
                         all_shards_completely_dead = True
+                        
+                        # Get comprehensive shard membership by querying ALL live nodes
+                        comprehensive_shard_members = {}
                         for shard_id in affected_shards:
-                            shard_nodes = [n for n in all_nodes if n.get('shard_id') == shard_id]
-                            live_shard_nodes = [n for n in shard_nodes if format_node_address(n) not in killed_nodes]
-                            if live_shard_nodes:
+                            comprehensive_shard_members[shard_id] = set()
+                        
+                        # Query all live nodes to build complete shard membership
+                        for node in live_nodes:
+                            parsed_nodes = query_cluster_nodes(node, timeout=config.timeout)
+                            if parsed_nodes:
+                                for parsed_node in parsed_nodes:
+                                    node_shard_id = None
+                                    # Match shard_id from all_nodes
+                                    for all_node in all_nodes:
+                                        if all_node.get('node_id') == parsed_node['node_id']:
+                                            node_shard_id = all_node.get('shard_id')
+                                            break
+                                    
+                                    if node_shard_id in affected_shards:
+                                        node_addr = f"{parsed_node['host']}:{parsed_node['port']}"
+                                        comprehensive_shard_members[node_shard_id].add(node_addr)
+                        
+                        # Check if any affected shard has live members
+                        for shard_id in affected_shards:
+                            shard_members = comprehensive_shard_members.get(shard_id, set())
+                            live_shard_members = shard_members - killed_nodes
+                            
+                            if live_shard_members:
                                 # This shard has live nodes, so slots should have been reassigned
                                 all_shards_completely_dead = False
                                 break
