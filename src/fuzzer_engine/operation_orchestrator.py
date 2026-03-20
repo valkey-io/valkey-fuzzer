@@ -22,10 +22,15 @@ class OperationOrchestrator(IOperationOrchestrator):
         self.active_operations: Dict[str, Operation] = {}
         self.operation_counter = 0
         self._state_lock = threading.Lock()  # Protect shared state in parallel execution
+        self.killed_nodes: set[str] = set()  # Track nodes killed by chaos
     
     def set_cluster_connection(self, cluster_connection: ClusterConnection):
         """Set or update cluster connection"""
         self.cluster_connection = cluster_connection
+    
+    def set_killed_nodes(self, killed_nodes: set[str]):
+        """Set reference to killed nodes set from StateValidator"""
+        self.killed_nodes = killed_nodes
     
     def execute_operation(self, operation: Operation, log_buffer=None) -> bool:
         """Execute a single cluster operation"""
@@ -165,7 +170,6 @@ class OperationOrchestrator(IOperationOrchestrator):
             
             if not replica:
                 # No alive replicas - check if they were killed by chaos
-                # If replicas exist but are all dead (killed by chaos), this is expected
                 if replica_nodes:
                     all_replicas_dead = all(
                         r.get('status') == 'failed' or 
@@ -175,11 +179,24 @@ class OperationOrchestrator(IOperationOrchestrator):
                     )
                     
                     if all_replicas_dead:
-                        log.info(
-                            f"All replicas for primary {operation.target_node} are dead (killed by chaos). "
-                            f"Failover cannot proceed - marking as success."
+                        # Verify replicas were actually killed by chaos, not unexpected failures
+                        all_killed_by_chaos = all(
+                            f"{r.get('host', '127.0.0.1')}:{r.get('port')}" in self.killed_nodes
+                            for r in replica_nodes
                         )
-                        return True
+                        
+                        if all_killed_by_chaos:
+                            log.info(
+                                f"All replicas for primary {operation.target_node} are dead (killed by chaos). "
+                                f"Failover cannot proceed - marking as success."
+                            )
+                            return True
+                        else:
+                            log.error(
+                                f"All replicas for primary {operation.target_node} are dead, "
+                                f"but NOT all were killed by chaos - unexpected failure detected"
+                            )
+                            return False
                 
                 log.error(f"Cannot execute failover: No replicas found for primary {operation.target_node}")
                 return False

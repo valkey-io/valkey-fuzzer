@@ -160,6 +160,9 @@ class FuzzerEngine(IFuzzerEngine):
 
             state_validator = StateValidator(validation_config)
             
+            # Share killed_nodes set with operation orchestrator for chaos verification
+            self.operation_orchestrator.set_killed_nodes(state_validator.killed_nodes)
+            
             # Write test data for data consistency validation
             if validation_config.check_data_consistency:
                 logger.info("Writing test data for data consistency validation")

@@ -232,8 +232,8 @@ class DSLValidator:
         
         if 'replicas_per_shard' in cluster_dict:
             replicas = cluster_dict['replicas_per_shard']
-            if not isinstance(replicas, int) or not (0 <= replicas <= 2):
-                errors.append(f"cluster.replicas_per_shard: Must be an integer between 0 and 2, got {replicas}")
+            if not isinstance(replicas, int) or not (0 <= replicas <= 5):
+                errors.append(f"cluster.replicas_per_shard: Must be an integer between 0 and 5, got {replicas}")
         
         return errors
     
