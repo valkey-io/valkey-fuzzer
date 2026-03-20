@@ -168,7 +168,7 @@ def generate_random_scenario(self, seed: Optional[int] = None) -> Scenario:
     
     # Generate cluster configuration
     shard_count = rng.randint(3, 16)
-    replica_count = rng.randint(0, 2)
+    replica_count = rng.randint(0, 5)
     cluster_config = self._generate_cluster_config(shard_count, replica_count)
     
     # Generate operations sequence

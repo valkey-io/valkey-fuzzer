@@ -5,7 +5,7 @@ import time
 import logging
 import threading
 from typing import Dict, Optional
-from ..models import Operation, OperationType, ClusterStatus, ClusterConnection
+from ..models import Operation, OperationType, ClusterStatus, ClusterConnection, ChaosResult
 from ..interfaces import IOperationOrchestrator
 from ..cluster_orchestrator.orchestrator import ClusterManager
 from ..utils.valkey_utils import valkey_client, query_cluster_nodes
@@ -27,7 +27,7 @@ class OperationOrchestrator(IOperationOrchestrator):
         """Set or update cluster connection"""
         self.cluster_connection = cluster_connection
     
-    def execute_operation(self, operation: Operation, log_buffer=None) -> bool:
+    def execute_operation(self, operation: Operation, log_buffer=None, chaos_events=None) -> bool:
         """Execute a single cluster operation"""
         log = log_buffer if log_buffer else logging
         
@@ -50,7 +50,7 @@ class OperationOrchestrator(IOperationOrchestrator):
             # Execute based on operation type
             success = False
             if operation.type == OperationType.FAILOVER:
-                success = self._execute_failover(operation, log)
+                success = self._execute_failover(operation, log, chaos_events=chaos_events)
             else:
                 log.error(f"Unsupported operation type: {operation.type}")
                 return False
@@ -74,7 +74,7 @@ class OperationOrchestrator(IOperationOrchestrator):
                     del self.active_operations[operation_id]
             return False
     
-    def _execute_failover(self, operation: Operation, log=None) -> bool:
+    def _execute_failover(self, operation: Operation, log=None, chaos_events=None) -> bool:
         """Execute failover operation"""
         if log is None:
             log = logging
@@ -169,7 +169,7 @@ class OperationOrchestrator(IOperationOrchestrator):
             
             if not replica:
                 log.error(f"Cannot execute failover: No alive replicas found for primary {operation.target_node}")
-                return False
+                return self._all_replicas_killed_by_chaos(replica_nodes, chaos_events, log)
             
             log.info(f"Selected alive replica at port {replica['port']} for failover")
             log.info(f"Executing CLUSTER FAILOVER from replica at port {replica['port']}")
@@ -190,6 +190,55 @@ class OperationOrchestrator(IOperationOrchestrator):
         except Exception as e:
             log.error(f"Failover execution failed: {e}")
             return False
+
+    def _all_replicas_killed_by_chaos(self, replica_nodes, chaos_events, log) -> bool:
+        """Check if every replica of the shard was killed by chaos injection.
+        
+        Returns True only if ALL dead replicas can be accounted for by a matching
+        chaos event. If any replica is dead for an unexplained reason, returns False.
+        
+        Uses port-based matching because chaos events use logical node IDs (e.g. "node-0")
+        while replica_nodes from CLUSTER NODES use Valkey cluster hex IDs.
+        """
+        if not chaos_events:
+            return False
+
+        # Map logical node_id -> port using initial_nodes from cluster connection
+        logical_id_to_port = {}
+        if self.cluster_connection and self.cluster_connection.initial_nodes:
+            for node in self.cluster_connection.initial_nodes:
+                logical_id_to_port[node.node_id] = node.port
+
+        # Build set of ports killed by successful chaos events
+        chaos_killed_ports = set()
+        for event in chaos_events:
+            if isinstance(event, ChaosResult) and event.success:
+                port = logical_id_to_port.get(event.target_node)
+                if port is not None:
+                    chaos_killed_ports.add(port)
+
+        if not chaos_killed_ports:
+            return False
+
+        # Every replica of this shard must be accounted for by a chaos kill
+        unaccounted = []
+        for replica in replica_nodes:
+            if replica.get('port') not in chaos_killed_ports:
+                unaccounted.append(f"{replica.get('host')}:{replica.get('port')}")
+
+        if unaccounted:
+            log.warning(
+                f"Replica(s) {unaccounted} are dead but were not killed by chaos. "
+                f"This is an unexpected failure."
+            )
+            return False
+
+        killed_ports = sorted(chaos_killed_ports)
+        log.info(
+            f"Failover skipped: all replicas of this shard were killed by chaos "
+            f"(killed ports: {killed_ports}). Treating as expected outcome."
+        )
+        return True
 
     def wait_for_operation_completion(self, timeout: float, log=None) -> bool:
         """Wait for operation to complete and validate cluster state"""
