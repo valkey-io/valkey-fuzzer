@@ -89,16 +89,38 @@ class OperationOrchestrator(IOperationOrchestrator):
         target_node = find_primary_node_by_identifier(current_nodes, operation.target_node)
 
         if not target_node:
-            # Primary not found among live nodes — check if it was killed by chaos
+            # Primary not found among live nodes — check if it was killed by chaos.
             all_nodes = self.cluster_connection.get_current_nodes(include_failed=True)
             dead_primary = find_primary_node_by_identifier(all_nodes, operation.target_node)
             if dead_primary and dead_primary.get('status') == 'failed':
                 if self._is_node_killed_by_chaos(dead_primary, chaos_events, log):
-                    log.info(
-                        f"Target primary {operation.target_node} was killed by chaos — "
-                        f"failover not possible, treating as expected outcome"
-                    )
-                    return True
+                    # The primary was chaos-killed. If replicas are alive, Valkey's
+                    # automatic failover should be promoting one:
+                    #   1. Whole shard down (no live replicas) → expected, return True
+                    #   2. Replicas alive → auto-failover in progress, wait and verify
+                    target_node_id = dead_primary.get('node_id')
+                    target_shard_id = dead_primary.get('shard_id')
+                    live_nodes = self.cluster_connection.get_current_nodes(include_failed=False)
+                    has_live_replicas = False
+
+                    if target_shard_id is not None and live_nodes:
+                        has_live_replicas = any(n.get('role') == 'replica' and n.get('shard_id') == target_shard_id for n in live_nodes)
+
+                    if not has_live_replicas and target_node_id and live_nodes:
+                        for node in live_nodes:
+                            parsed_nodes = query_cluster_nodes(node, timeout=3.0)
+                            if parsed_nodes:
+                                has_live_replicas = any(
+                                    p['is_slave'] and p['master_id'] == target_node_id
+                                    for p in parsed_nodes
+                                )
+                                if has_live_replicas:
+                                    break
+
+                    if has_live_replicas:
+                        return self.wait_for_operation_completion(operation.timing.timeout, log)
+                    else:
+                        return True
             log.error(f"Target primary node {operation.target_node} not found in cluster")
             return False
 
