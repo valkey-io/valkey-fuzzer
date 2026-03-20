@@ -705,7 +705,8 @@ class SlotCoverageValidator:
         self,
         cluster_connection: ClusterConnection,
         config: SlotCoverageValidationConfig,
-        killed_nodes: Optional[set[str]] = None
+        killed_nodes: Optional[set[str]] = None,
+        chaos_killed_shards: Optional[set[int]] = None
     ) -> SlotCoverageValidation:
         """Check slot coverage across the cluster from all nodes' perspectives."""
         try:
@@ -845,6 +846,33 @@ class SlotCoverageValidator:
             # Initialize killed_nodes if not provided
             if killed_nodes is None:
                 killed_nodes = set()
+            if chaos_killed_shards is None:
+                chaos_killed_shards = set()
+
+            # Build set of slots belonging to fully chaos-killed shards
+            slots_on_fully_killed_shards = set()
+            if chaos_killed_shards:
+                for node in all_nodes:
+                    shard_id = node.get('shard_id')
+                    if shard_id in chaos_killed_shards and node['role'] == 'primary':
+                        node_id = node['node_id']
+                        if node_id in slot_distribution:
+                            slots_on_fully_killed_shards.update(slot_distribution[node_id])
+                # Also check unassigned slots that were previously owned by killed shard primaries by looking at the consensus view from before the nodes died
+                for node_addr, slot_view in node_perspectives.items():
+                    for slot, owner_id in slot_view.items():
+                        # Find if this owner belongs to a fully killed shard
+                        for node in all_nodes:
+                            if node['node_id'] == owner_id and node.get('shard_id') in chaos_killed_shards:
+                                slots_on_fully_killed_shards.add(slot)
+                                break
+
+                if slots_on_fully_killed_shards:
+                    logger.info(
+                        f"Excluding {len(slots_on_fully_killed_shards)} slots from fully chaos-killed "
+                        f"shard(s) {sorted(chaos_killed_shards)}: "
+                        f"{group_slots_into_ranges(sorted(slots_on_fully_killed_shards))}"
+                    )
 
             # CRITICAL: Check if slots are assigned to killed nodes
             if killed_nodes:
@@ -862,22 +890,42 @@ class SlotCoverageValidator:
                         slots_on_killed_nodes.extend(slot_distribution[node_id])
 
                 if slots_on_killed_nodes:
-                    success = False
-                    error_message = (
-                        f"CRITICAL: {len(slots_on_killed_nodes)} slots still assigned to killed nodes. "
-                        f"Killed nodes: {killed_nodes}. "
-                        f"This indicates failover did not complete or slots were not reassigned. "
-                        f"Affected slots: {group_slots_into_ranges(slots_on_killed_nodes)}"
-                    )
-                    logger.error(error_message)
+                    # Exclude slots from fully chaos-killed shards — those have no node to failover to
+                    unexpected_slots_on_killed = [
+                        s for s in slots_on_killed_nodes if s not in slots_on_fully_killed_shards
+                    ]
+                    if unexpected_slots_on_killed:
+                        success = False
+                        error_message = (
+                            f"CRITICAL: {len(unexpected_slots_on_killed)} slots still assigned to killed nodes. "
+                            f"Killed nodes: {killed_nodes}. "
+                            f"This indicates failover did not complete or slots were not reassigned. "
+                            f"Affected slots: {group_slots_into_ranges(unexpected_slots_on_killed)}"
+                        )
+                        logger.error(error_message)
+                    elif slots_on_killed_nodes:
+                        logger.info(
+                            f"{len(slots_on_killed_nodes)} slots on killed nodes belong to fully "
+                            f"chaos-killed shards — expected, not a failure"
+                        )
 
             if success and config.require_full_coverage and unassigned_slots:
-                success = False
-                error_message = (
-                    f"{len(unassigned_slots)} slots are unassigned "
-                    f"(expected all 16384 slots to be assigned)"
-                )
-                logger.error(error_message)
+                # Exclude unassigned slots from fully chaos-killed shards
+                unexpected_unassigned = [
+                    s for s in unassigned_slots if s not in slots_on_fully_killed_shards
+                ]
+                if unexpected_unassigned:
+                    success = False
+                    error_message = (
+                        f"{len(unexpected_unassigned)} slots are unassigned "
+                        f"(expected all 16384 slots to be assigned)"
+                    )
+                    logger.error(error_message)
+                elif unassigned_slots:
+                    logger.info(
+                        f"{len(unassigned_slots)} unassigned slots belong to fully chaos-killed "
+                        f"shards — expected, not a failure"
+                    )
 
             if success and not config.allow_slot_conflicts and conflicting_slots:
                 success = False
@@ -985,7 +1033,8 @@ class TopologyValidator:
         expected_topology: Optional['ExpectedTopology'],
         config: 'TopologyValidationConfig',
         killed_nodes: Optional[set] = None,
-        killed_node_roles: Optional[dict] = None
+        killed_node_roles: Optional[dict] = None,
+        chaos_killed_shards: Optional[set[int]] = None
     ) -> 'TopologyValidation':
         try:
             if killed_nodes is None:
@@ -1070,8 +1119,17 @@ class TopologyValidator:
             if expected_topology.num_replicas == 0:
                 adjusted_expected_primaries = expected_topology.num_primaries - killed_primaries
             else:
-                # With replicas, failover maintains primary count
-                adjusted_expected_primaries = expected_topology.num_primaries
+                # With replicas, failover maintains primary count UNLESS the entire shard is killed
+                if chaos_killed_shards is None:
+                    chaos_killed_shards = set()
+                fully_killed_primary_count = sum(
+                    1 for node in failed_nodes
+                    if is_node_killed_by_chaos(node, killed_nodes)
+                    and killed_node_roles.get(format_node_address(node), node['role']) == 'primary'
+                    and node.get('shard_id') in chaos_killed_shards
+                )
+                # Primaries in fully-killed shards can't be replaced; others can via failover
+                adjusted_expected_primaries = expected_topology.num_primaries - fully_killed_primary_count
             
             adjusted_expected_replicas = max(0, expected_topology.num_replicas - total_killed_nodes)
             
@@ -2212,6 +2270,10 @@ class StateValidator:
         self.shards_with_primary_killed: set[int] = set()
         # Track killed node roles at time of death: node_address -> role
         self.killed_node_roles: dict[str, str] = {}
+        # Track killed nodes per shard: shard_id -> set of killed node addresses
+        self.killed_nodes_by_shard: dict[int, set[str]] = {}
+        # Total nodes per shard (set during validation setup): shard_id -> count
+        self.nodes_per_shard: dict[int, int] = {}
 
         logger.debug("StateValidator initialized")
 
@@ -2221,6 +2283,9 @@ class StateValidator:
         self.killed_node_roles[node_address] = node_role
         if node_role == 'primary':
             self.shards_with_primary_killed.add(shard_id)
+        if shard_id not in self.killed_nodes_by_shard:
+            self.killed_nodes_by_shard[shard_id] = set()
+        self.killed_nodes_by_shard[shard_id].add(node_address)
         logger.debug(f"Registered killed node: {node_address} (role: {node_role}, shard: {shard_id})")
 
     def clear_killed_nodes(self) -> None:
@@ -2228,7 +2293,22 @@ class StateValidator:
         self.killed_nodes.clear()
         self.shards_with_primary_killed.clear()
         self.killed_node_roles.clear()
+        self.killed_nodes_by_shard.clear()
+        self.nodes_per_shard.clear()
         logger.debug("Cleared killed nodes list")
+
+    def set_nodes_per_shard(self, nodes_per_shard: dict[int, int]) -> None:
+        """Set the total node count per shard (primary + replicas) for full-shard-kill detection."""
+        self.nodes_per_shard = dict(nodes_per_shard)
+
+    def get_chaos_killed_shards(self) -> set[int]:
+        """Return shard IDs where ALL nodes have been killed by chaos"""
+        fully_killed = set()
+        for shard_id, killed in self.killed_nodes_by_shard.items():
+            total = self.nodes_per_shard.get(shard_id, 0)
+            if total > 0 and len(killed) >= total:
+                fully_killed.add(shard_id)
+        return fully_killed
 
     def write_test_data(self, cluster_connection: ClusterConnection) -> bool:
         if not self.config.check_data_consistency:
@@ -2408,12 +2488,14 @@ class StateValidator:
                         raise ValidationTimeoutError(
                             f"Validation timeout ({self.config.validation_timeout}s) exceeded"
                         )
+                    chaos_killed_shards = self.get_chaos_killed_shards()
                     slot_coverage_result = self._run_validation_check(
                         check_name="slot_coverage",
                         validator_func=lambda: self.slot_validator.validate(
                             cluster_connection,
                             self.config.slot_coverage_config,
-                            killed_nodes=self.killed_nodes
+                            killed_nodes=self.killed_nodes,
+                            chaos_killed_shards=chaos_killed_shards
                         ),
                         failed_checks=failed_checks,
                         error_messages=error_messages,
@@ -2424,6 +2506,7 @@ class StateValidator:
                 if self.config.check_topology and expected_topology:
                     if time.time() >= timeout_deadline:
                         raise ValidationTimeoutError(f"Validation timeout ({self.config.validation_timeout}s) exceeded")
+                    chaos_killed_shards = self.get_chaos_killed_shards()
                     topology_result = self._run_validation_check(
                         check_name="topology",
                         validator_func=lambda: self.topology_validator.validate(
@@ -2431,7 +2514,8 @@ class StateValidator:
                             expected_topology,
                             self.config.topology_config,
                             self.killed_nodes,
-                            self.killed_node_roles
+                            self.killed_node_roles,
+                            chaos_killed_shards=chaos_killed_shards
                         ),
                         failed_checks=failed_checks,
                         error_messages=error_messages
