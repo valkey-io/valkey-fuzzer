@@ -62,8 +62,9 @@ class ScenarioGenerator(ITestCaseGenerator):
         )
     
     def _generate_random_operations(self, cluster_config: ClusterConfig) -> List[Operation]:
-        """Generate random failover operations"""
-        num_operations = random.randint(1, 5)
+        """Generate random failover operations."""
+        max_safe_operations = cluster_config.replicas_per_shard * cluster_config.num_shards
+        num_operations = random.randint(1, min(5, max_safe_operations))
         operations = []
         num_primaries = cluster_config.num_shards
         
