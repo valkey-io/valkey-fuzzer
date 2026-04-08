@@ -55,6 +55,8 @@ class ChaosCoordinator:
         """Coordinate chaos injection with a cluster operation based on timing configuration."""
         chaos_results = []
         log = log_buffer if log_buffer else logger
+        target_node = None
+        live_nodes_dict = []
         
         log.info(f"Coordinating chaos with operation {operation.type.value} on {operation.target_node}")
         
@@ -80,6 +82,12 @@ class ChaosCoordinator:
             target_node = self.chaos_engine.target_selector.select_target(cluster_id, chaos_config.target_selection, log_buffer=log)
             
             if not target_node:
+                if chaos_config.target_selection.strategy != "specific" and live_nodes_dict:
+                    log.warning(
+                        f"Skipping chaos injection for {operation.type.value} on {operation.target_node}: "
+                        "no eligible shard-safe target is currently available"
+                    )
+                    return chaos_results
                 error_message = (
                     f"No suitable chaos target found for operation "
                     f"{operation.type.value} on {operation.target_node}"
@@ -111,7 +119,7 @@ class ChaosCoordinator:
                 log.info(f"Injecting chaos before operation (delay: {delay_before:.2f}s)")
                 time.sleep(delay_before)
                 
-                result = self._inject_chaos(target_node, chaos_config, should_randomize, log, cluster_connection)
+                result = self._inject_chaos(target_node, chaos_config, should_randomize, log, cluster_connection, cluster_id)
                 result.chaos_phase = "before"
                 chaos_results.append(result)
                 
@@ -122,7 +130,7 @@ class ChaosCoordinator:
             if coordination.chaos_during_operation:
                 log.info("Injecting chaos during operation execution")
                 
-                result = self._inject_chaos(target_node, chaos_config, should_randomize, log, cluster_connection)
+                result = self._inject_chaos(target_node, chaos_config, should_randomize, log, cluster_connection, cluster_id)
                 result.chaos_phase = "during"
                 chaos_results.append(result)
                 
@@ -139,12 +147,20 @@ class ChaosCoordinator:
                     'delay': delay_after,
                     'chaos_config': chaos_config,
                     'should_randomize': should_randomize,
-                    'cluster_connection': cluster_connection
+                    'cluster_connection': cluster_connection,
+                    'cluster_id': cluster_id
                 })
             
             # Store only actual chaos results (not deferred placeholders) for this scenario
             actual_results = [r for r in chaos_results if isinstance(r, ChaosResult)]
             self.chaos_history.extend(actual_results)
+
+            # If no chaos was actually injected or deferred, release the eager
+            # reservation made by select_target (e.g. all coordination flags False).
+            any_chaos_fired = any(isinstance(r, ChaosResult) for r in chaos_results)
+            any_deferred = any(isinstance(r, dict) and r.get('deferred') for r in chaos_results)
+            if not any_chaos_fired and not any_deferred and target_node:
+                self.chaos_engine.target_selector.unrecord_kill(cluster_id, target_node.node_id)
             
         except Exception as e:
             error_message = (
@@ -160,6 +176,9 @@ class ChaosCoordinator:
             chaos_results.append(failure_result)
             actual_results = [r for r in chaos_results if isinstance(r, ChaosResult)]
             self.chaos_history.extend(actual_results)
+            # Release eager reservation on exception
+            if target_node:
+                self.chaos_engine.target_selector.unrecord_kill(cluster_id, target_node.node_id)
         
         return chaos_results
 
@@ -186,9 +205,18 @@ class ChaosCoordinator:
         node_info_list = []
         for node_dict in live_nodes_dict:
             # Find matching initial node to get full info
-            # Note: node_dict['node_id'] contains the Valkey cluster ID (40-char hex),
-            # which matches NodeInfo.cluster_node_id (40-char hex), not NodeInfo.node_id (logical name: node-1)
-            matching_node = next((n for n in initial_nodes if n.cluster_node_id == node_dict['node_id']), None)
+            # Primary match: node_dict['node_id'] is the Valkey cluster ID (40-char hex)
+            # which matches NodeInfo.cluster_node_id.
+            # Fallback match: by logical node_id (for test environments).
+            matching_node = next(
+                (n for n in initial_nodes if n.cluster_node_id == node_dict['node_id']),
+                None
+            )
+            if not matching_node:
+                matching_node = next(
+                    (n for n in initial_nodes if n.node_id == node_dict['node_id']),
+                    None
+                )
 
             if matching_node:
                 matching_node.role = node_dict.get('role', matching_node.role)
@@ -255,8 +283,13 @@ class ChaosCoordinator:
 
         return randomized_config
 
-    def _inject_chaos(self, target_node: NodeInfo, chaos_config: ChaosConfig, randomize: bool = False, log=None, cluster_connection=None) -> ChaosResult:
-        """Inject chaos on the target node based on configuration."""
+    def _inject_chaos(self, target_node: NodeInfo, chaos_config: ChaosConfig, randomize: bool = False, log=None, cluster_connection=None, cluster_id=None) -> ChaosResult:
+        """Inject chaos on the target node based on configuration.
+
+        The caller (``select_target``) has already eagerly recorded this node
+        as killed.  If the kill fails we call ``unrecord_kill`` to release the
+        reservation.
+        """
 
         if log is None:
             log = logger
@@ -292,6 +325,10 @@ class ChaosCoordinator:
             
             # Capture role at time of kill for topology validation
             result.target_role = target_node.role
+
+            # If the kill failed, release the eager reservation made by select_target
+            if not result.success and cluster_id:
+                self.chaos_engine.target_selector.unrecord_kill(cluster_id, target_node.node_id)
 
             return result
         else:

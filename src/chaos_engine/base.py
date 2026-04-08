@@ -5,6 +5,7 @@ import time
 import uuid
 import random
 import logging
+import threading
 from abc import ABC
 from typing import Dict, List, Optional
 from ..interfaces import IChaosEngine
@@ -185,83 +186,175 @@ class ProcessChaosEngine(BaseChaosEngine):
 
 
 class ChaosTargetSelector:
-    """Utility class for selecting chaos targets based on cluster topology"""
+    """Utility class for selecting chaos targets based on cluster topology.
+
+    Thread-safety: ``select_target`` eagerly records the selected node as
+    killed (under ``_lock``) before returning, so concurrent threads in the
+    same wave cannot both pick the last surviving member of a shard.  If the
+    actual kill later fails, the caller must invoke ``unrecord_kill`` to
+    release the reservation.
+    """
     
     def __init__(self, rng: Optional[random.Random] = None):
         self.cluster_nodes: Dict[str, List[NodeInfo]] = {}
         self.rng = rng if rng is not None else random.Random()
+        self._lock = threading.Lock()
+        # Track killed (or reserved-to-kill) node_ids per cluster
+        self._killed_node_ids: Dict[str, set] = {}
+        # Initial full topology per cluster for shard membership lookup
+        self._initial_topology: Dict[str, List[NodeInfo]] = {}
     
     def update_cluster_topology(self, cluster_id: str, nodes: List[NodeInfo]) -> None:
-        """Update cluster topology information"""
-        self.cluster_nodes[cluster_id] = nodes
+        """Update cluster topology information.
+
+        Does NOT reconcile ``_killed_node_ids`` against the live topology
+        because ``select_target`` eagerly reserves nodes before the actual
+        kill.  A reserved-but-not-yet-killed node would still appear in the
+        live list, and clearing it here would re-introduce the TOCTOU race
+        this class is designed to prevent.  Failed kills are handled by
+        ``unrecord_kill`` instead.
+        """
+        with self._lock:
+            self.cluster_nodes[cluster_id] = nodes
+            if cluster_id not in self._initial_topology:
+                # First registration — snapshot the full topology
+                self._initial_topology[cluster_id] = list(nodes)
+                self._killed_node_ids[cluster_id] = set()
         logger.debug(f"Updated topology for cluster {cluster_id} with {len(nodes)} nodes")
-    
+
+    def record_kill(self, cluster_id: str, node_id: str) -> None:
+        """Record that a node was killed by chaos in a specific cluster."""
+        with self._lock:
+            self._killed_node_ids.setdefault(cluster_id, set()).add(node_id)
+
+    def unrecord_kill(self, cluster_id: str, node_id: str) -> None:
+        """Remove a kill reservation (e.g. when the actual kill failed)."""
+        with self._lock:
+            killed = self._killed_node_ids.get(cluster_id)
+            if killed:
+                killed.discard(node_id)
+
+    def _get_shard_safe_candidates(self, candidates: List[NodeInfo], cluster_id: str, log) -> List[NodeInfo]:
+        """Filter candidates to avoid killing the last surviving member of any shard.
+
+        Also excludes nodes already reserved/killed (they may still appear in
+        the candidate list due to topology refresh lag in concurrent scenarios).
+
+        Caller must hold ``_lock``.
+        """
+        initial_nodes = self._initial_topology.get(cluster_id, [])
+        if not initial_nodes:
+            return candidates  # No topology info — can't filter
+
+        killed = self._killed_node_ids.get(cluster_id, set())
+
+        # Build shard -> set of initial node_ids
+        shard_members: Dict[int, set] = {}
+        for node in initial_nodes:
+            shard_members.setdefault(node.shard_id, set()).add(node.node_id)
+
+        safe = []
+        for candidate in candidates:
+            # Skip nodes already reserved/killed
+            if candidate.node_id in killed:
+                continue
+
+            members = shard_members.get(candidate.shard_id, set())
+            surviving_others = members - killed - {candidate.node_id}
+            if surviving_others:
+                safe.append(candidate)
+            else:
+                log.info(
+                    f"Skipping {candidate.node_id} (shard {candidate.shard_id}) — "
+                    f"killing it would leave zero live members in the shard"
+                )
+
+        return safe
+
     def select_target(self, cluster_id: str, target_selection: TargetSelection, log_buffer=None) -> Optional[NodeInfo]:
-        """Select target node based on selection strategy"""
+        """Select a chaos target and eagerly reserve it as killed.
+
+        The reservation prevents concurrent threads from selecting the last
+        member of the same shard.  If the caller later fails to actually kill
+        the node, it must call ``unrecord_kill`` to release the reservation.
+        """
         log = log_buffer if log_buffer else logger
 
-        # Get nodes for this cluster
-        if cluster_id not in self.cluster_nodes:
-            log.warning(f"No topology information for cluster {cluster_id}")
-            return None
-        
-        nodes = self.cluster_nodes[cluster_id]
-        if not nodes:
-            log.warning(f"No nodes available in cluster {cluster_id}")
-            return None
-        
-        # Sort nodes by node_id for deterministic ordering
-        nodes = sorted(nodes, key=lambda n: n.node_id)
-        
+        with self._lock:
+            if cluster_id not in self.cluster_nodes:
+                log.warning(f"No topology information for cluster {cluster_id}")
+                return None
+            
+            nodes = self.cluster_nodes[cluster_id]
+            if not nodes:
+                log.warning(f"No nodes available in cluster {cluster_id}")
+                return None
+            
+            # Sort nodes by node_id for deterministic ordering
+            nodes = sorted(nodes, key=lambda n: n.node_id)
+            
+            selected = self._select_by_strategy(nodes, cluster_id, target_selection, log)
+
+            # Eagerly reserve the selected node so concurrent threads see it
+            if selected:
+                self._killed_node_ids.setdefault(cluster_id, set()).add(selected.node_id)
+
+        return selected
+
+    def _select_by_strategy(self, nodes: List[NodeInfo], cluster_id: str,
+                            target_selection: TargetSelection, log) -> Optional[NodeInfo]:
+        """Pick a node according to the strategy.  Caller must hold ``_lock``."""
         strategy = target_selection.strategy
-        
-        if target_selection.strategy == "specific" and target_selection.specific_nodes:
-            # Find all matching nodes from the specific list
+
+        if strategy == "specific" and target_selection.specific_nodes:
             matching_nodes = []
             for node_id in target_selection.specific_nodes:
                 for node in nodes:
                     if node.node_id == node_id:
                         matching_nodes.append(node)
-                        break  # Found this node, move to next node_id
-            
+                        break
             if not matching_nodes:
                 log.warning(f"None of the specified nodes found: {target_selection.specific_nodes}")
                 return None
-            
-            # Randomly select from matching nodes (consistent with other strategies)
             selected = self.rng.choice(matching_nodes)
             log.info(f"Selected specific node: {selected.node_id} (from {len(matching_nodes)} specified)")
             return selected
-        
-        elif target_selection.strategy == "random":
-            selected = self.rng.choice(nodes)
+
+        elif strategy == "random":
+            safe_nodes = self._get_shard_safe_candidates(nodes, cluster_id, log)
+            if not safe_nodes:
+                log.warning("No shard-safe random targets available")
+                return None
+            selected = self.rng.choice(safe_nodes)
             log.info(f"Selected random node: {selected.node_id} (shard {selected.shard_id})")
             return selected
-        
-        elif target_selection.strategy == "primary_only":
+
+        elif strategy == "primary_only":
             primaries = [n for n in nodes if n.role == 'primary']
-            
             if not primaries:
                 log.warning("No primary nodes available")
                 return None
-            
-            # Randomly select from primaries
-            selected = self.rng.choice(primaries)
+            safe_primaries = self._get_shard_safe_candidates(primaries, cluster_id, log)
+            if not safe_primaries:
+                log.warning("No shard-safe primary targets available")
+                return None
+            selected = self.rng.choice(safe_primaries)
             log.info(f"Selected random primary: {selected.node_id} (shard {selected.shard_id})")
             return selected
-        
-        elif target_selection.strategy == "replica_only":
+
+        elif strategy == "replica_only":
             replicas = [n for n in nodes if n.role == 'replica']
-            
             if not replicas:
                 log.warning("No replica nodes available")
                 return None
-            
-            # Randomly select from replicas
-            selected = self.rng.choice(replicas)
+            safe_replicas = self._get_shard_safe_candidates(replicas, cluster_id, log)
+            if not safe_replicas:
+                log.warning("No shard-safe replica targets available")
+                return None
+            selected = self.rng.choice(safe_replicas)
             log.info(f"Selected random replica: {selected.node_id} (shard {selected.shard_id})")
             return selected
-        
+
         else:
             log.error(f"Unknown target selection strategy: {strategy}")
             return None
