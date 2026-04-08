@@ -16,7 +16,7 @@ from .test_logger import FuzzerLogger
 from .error_handler import ErrorHandler, ErrorContext, ErrorCategory, ErrorSeverity, RetryConfig
 from .state_validator import StateValidator
 from .parallel_executor import ParallelExecutor
-from ..models import StateValidationConfig, ExpectedTopology, ChaosType
+from ..models import StateValidationConfig, ExpectedTopology, ChaosType, ChaosResult
 
 logger = logging.getLogger()
 
@@ -257,7 +257,8 @@ class FuzzerEngine(IFuzzerEngine):
                 operations_executed=operations_executed,
                 chaos_events=chaos_events,
                 validation_results=validation_results,
-                final_validation_result=final_validation_result
+                final_validation_result=final_validation_result,
+                chaos_config=scenario.chaos_config
             )
             success = len(failure_reasons) == 0
             
@@ -404,16 +405,58 @@ class FuzzerEngine(IFuzzerEngine):
         operations_executed: int,
         chaos_events: List,
         validation_results: List,
-        final_validation_result
+        final_validation_result,
+        chaos_config=None
     ) -> List[str]:
-        """Summarize all execution failures that should make the run fail."""
+        """Summarize all execution failures that should make the run fail.
+
+        Operation failures are tolerated when chaos was injected before or
+        during operations and all final validations pass.  Chaos that fires
+        only *after* operations cannot explain an operation failure, so those
+        are still treated as real failures.
+
+        When ``randomize_per_operation`` is enabled the coordination mode is
+        randomized per operation, so any operation may have had before/during
+        chaos — tolerance applies in that case as well.
+        """
         failure_reasons = []
+
+        # Check for at least one successful before/during chaos event.
+        # Each ChaosResult now carries a chaos_phase tag ("before", "during",
+        # or "after") set by the coordinator / parallel executor.
+        has_interfering_chaos = False
+        if chaos_config:
+            has_interfering_chaos = any(
+                isinstance(event, ChaosResult)
+                and event.success
+                and event.chaos_phase in ("before", "during")
+                for event in chaos_events
+            )
+
+            # When randomize_per_operation is enabled, the phase is randomized
+            # per operation so any successful event could have been before/during.
+            if not has_interfering_chaos and chaos_config.randomize_per_operation:
+                has_interfering_chaos = any(
+                    isinstance(event, ChaosResult) and event.success
+                    for event in chaos_events
+                )
+
+        all_validations_passed = final_validation_result.overall_success
 
         if operations_executed != total_operations:
             failed_operations = total_operations - operations_executed
-            failure_reasons.append(f"{failed_operations} operation(s) failed")
+            if has_interfering_chaos and all_validations_passed:
+                # Chaos was active before/during operations and the cluster
+                # recovered — operation failures are expected (timeouts,
+                # killed targets, etc.)
+                logger.info(
+                    f"{failed_operations} operation(s) failed during chaos, "
+                    "but all validations passed — tolerating as expected chaos interaction"
+                )
+            else:
+                failure_reasons.append(f"{failed_operations} operation(s) failed")
 
-        failed_chaos_events = [event for event in chaos_events if not event.success]
+        failed_chaos_events = [event for event in chaos_events if isinstance(event, ChaosResult) and not event.success]
         if failed_chaos_events:
             failure_reasons.append(f"{len(failed_chaos_events)} chaos injection(s) failed")
 

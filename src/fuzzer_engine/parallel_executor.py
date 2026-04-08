@@ -101,6 +101,7 @@ class ParallelExecutor:
                         buffer,
                         cluster_connection,
                     )
+                    result.chaos_phase = "after"
                     immediate_chaos.append(result)
                     if isinstance(result, ChaosResult):
                         self.chaos_coordinator.chaos_history.append(result)

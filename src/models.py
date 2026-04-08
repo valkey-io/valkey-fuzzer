@@ -197,6 +197,7 @@ class ChaosResult:
     end_time: Optional[float] = None
     error_message: Optional[str] = None
     target_role: Optional[str] = None
+    chaos_phase: Optional[str] = None  # "before", "during", or "after"
 
 
 @dataclass
