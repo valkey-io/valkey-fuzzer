@@ -112,6 +112,7 @@ class ChaosCoordinator:
                 time.sleep(delay_before)
                 
                 result = self._inject_chaos(target_node, chaos_config, should_randomize, log, cluster_connection)
+                result.chaos_phase = "before"
                 chaos_results.append(result)
                 
                 if result.success:
@@ -122,6 +123,7 @@ class ChaosCoordinator:
                 log.info("Injecting chaos during operation execution")
                 
                 result = self._inject_chaos(target_node, chaos_config, should_randomize, log, cluster_connection)
+                result.chaos_phase = "during"
                 chaos_results.append(result)
                 
                 if result.success:
