@@ -243,6 +243,13 @@ class ChaosTargetSelector:
         with self._lock:
             self._killed_node_ids.setdefault(cluster_id, set()).add(node_id)
 
+    def record_recovery(self, cluster_id: str, node_id: str) -> None:
+        """Clear killed state after a node is explicitly restarted/re-registered."""
+        with self._lock:
+            killed = self._killed_node_ids.get(cluster_id)
+            if killed:
+                killed.discard(node_id)
+
     def unrecord_kill(self, cluster_id: str, node_id: str) -> None:
         """Remove a kill reservation (e.g. when the actual kill failed)."""
         with self._lock:

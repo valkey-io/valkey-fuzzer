@@ -554,6 +554,97 @@ def test_parallel_executor_preserves_reservation_after_immediate_chaos_success()
     assert killed == {"n0"}, f"Expected immediate chaos reservation to remain, got {killed}"
 
 
+def test_update_node_registration_clears_recovered_kill_state():
+    """Restarted nodes should become eligible targets again after re-registration."""
+    from src.fuzzer_engine.chaos_coordinator import ChaosCoordinator
+
+    coordinator = ChaosCoordinator(seed=1)
+    nodes = [
+        _node("n0", 0, "primary", 7000),
+        _node("n1", 0, "replica", 7001),
+    ]
+    coordinator.register_cluster_nodes("c1", nodes)
+    coordinator.chaos_engine.target_selector.record_kill("c1", "n0")
+
+    recovered = _node("n0", 0, "primary", 7000)
+    recovered.pid = 9999
+    coordinator.update_node_registration("c1", recovered)
+
+    killed = coordinator.chaos_engine.target_selector._killed_node_ids.get("c1", set())
+    assert "n0" not in killed
+    assert coordinator.chaos_engine.node_processes["n0"] == 9999
+
+
+def test_successful_chaos_reservation_survives_later_coordination_error():
+    """A later exception must not clear a reservation after a real kill succeeded."""
+    from unittest.mock import patch
+    from src.fuzzer_engine.chaos_coordinator import ChaosCoordinator
+    from src.models import (
+        ChaosConfig, ChaosCoordination, ChaosResult, ChaosType, ChaosTiming,
+        ProcessChaosType, TargetSelection, Operation, OperationType,
+        OperationTiming,
+    )
+
+    coordinator = ChaosCoordinator(seed=1)
+    nodes = [
+        _node("n0", 0, "primary", 7000),
+        _node("n1", 0, "replica", 7001),
+        _node("n2", 1, "primary", 7002),
+        _node("n3", 1, "replica", 7003),
+    ]
+    coordinator.register_cluster_nodes("c1", nodes)
+
+    mock_conn = Mock()
+    mock_conn.get_live_nodes.return_value = [
+        {"node_id": n.node_id, "host": "127.0.0.1", "port": n.port, "role": n.role, "shard_id": n.shard_id}
+        for n in nodes
+    ]
+    mock_conn.initial_nodes = nodes
+
+    config = ChaosConfig(
+        chaos_type=ChaosType.PROCESS_KILL,
+        target_selection=TargetSelection(strategy="specific", specific_nodes=["n0"]),
+        timing=ChaosTiming(delay_before_operation=0.0),
+        coordination=ChaosCoordination(
+            chaos_before_operation=True,
+            chaos_during_operation=True,
+        ),
+        process_chaos_type=ProcessChaosType.SIGKILL,
+    )
+    op = Operation(
+        type=OperationType.FAILOVER,
+        target_node="shard-0-primary",
+        parameters={},
+        timing=OperationTiming(),
+    )
+
+    call_count = {"value": 0}
+
+    def inject_side_effect(*_args, **_kwargs):
+        if call_count["value"] == 0:
+            call_count["value"] += 1
+            return ChaosResult(
+                chaos_id="before-success",
+                chaos_type=ChaosType.PROCESS_KILL,
+                target_node="n0",
+                success=True,
+                start_time=0.0,
+                end_time=0.0,
+            )
+        raise RuntimeError("boom")
+
+    with patch.object(coordinator, "_inject_chaos", side_effect=inject_side_effect):
+        coordinator.coordinate_chaos_with_operation(
+            operation=op,
+            chaos_config=config,
+            cluster_connection=mock_conn,
+            cluster_id="c1",
+        )
+
+    killed = coordinator.chaos_engine.target_selector._killed_node_ids.get("c1", set())
+    assert killed == {"n0"}, f"Expected successful kill reservation to remain, got {killed}"
+
+
 def test_reset_cluster_topology_replaces_stale_snapshot_for_reused_cluster_id():
     """Fresh cluster registration under the same ID should replace stale shard members."""
     selector = ChaosTargetSelector()

@@ -194,7 +194,7 @@ class ClusterCoordinator:
             
             # Update chaos engine registration with new PID if chaos_coordinator provided
             if chaos_coordinator:
-                chaos_coordinator.update_node_registration(node)
+                chaos_coordinator.update_node_registration(cluster_id, node)
                 logger.info(f"Updated chaos registration for restarted node {node_id}")
             
             return True

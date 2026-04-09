@@ -34,13 +34,14 @@ class ChaosCoordinator:
         
         logger.info(f"Successfully registered {len(nodes)} nodes for chaos injection")
     
-    def update_node_registration(self, node: NodeInfo) -> None:
+    def update_node_registration(self, cluster_id: str, node: NodeInfo) -> None:
         """
         Update the chaos engine registration for a restarted node with its new PID.
         This should be called after a node restart to ensure chaos injections target the correct process.
         """
         logger.info(f"Updating chaos registration for {node.node_id} with new PID {node.pid}")
         self.chaos_engine.register_node_process(node.node_id, node.pid)
+        self.chaos_engine.target_selector.record_recovery(cluster_id, node.node_id)
         logger.debug(f"Node {node.node_id} chaos registration updated")
     
     def coordinate_chaos_with_operation(
@@ -57,6 +58,7 @@ class ChaosCoordinator:
         log = log_buffer if log_buffer else logger
         target_node = None
         live_nodes_dict = []
+        successful_chaos = False
         
         log.info(f"Coordinating chaos with operation {operation.type.value} on {operation.target_node}")
         
@@ -127,6 +129,7 @@ class ChaosCoordinator:
                 chaos_results.append(result)
                 
                 if result.success:
+                    successful_chaos = True
                     log.debug(f"Pre-operation chaos injected on {target_node.node_id}")
             
             # Chaos during operation (most common for failover testing)
@@ -138,6 +141,7 @@ class ChaosCoordinator:
                 chaos_results.append(result)
                 
                 if result.success:
+                    successful_chaos = True
                     log.debug(f"During-operation chaos injected on {target_node.node_id}")
             
             # Chaos after operation
@@ -180,7 +184,7 @@ class ChaosCoordinator:
             actual_results = [r for r in chaos_results if isinstance(r, ChaosResult)]
             self.chaos_history.extend(actual_results)
             # Release eager reservation on exception
-            if target_node:
+            if target_node and not successful_chaos:
                 self.chaos_engine.target_selector.unrecord_kill(cluster_id, target_node.node_id)
         
         return chaos_results
