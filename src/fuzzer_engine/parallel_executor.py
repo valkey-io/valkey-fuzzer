@@ -55,6 +55,9 @@ class ParallelExecutor:
             """Execute one operation with chaos coordination and buffered logging."""
             op_id = f"{op_index + 1}: {operation.type.value} on {operation.target_node}"
             buffer = OperationLogBuffer(op_id)
+            deferred_chaos = []
+            pending_deferred_chaos = []
+            successful_chaos_targets = set()
 
             try:
                 buffer.info(f"Starting {operation.type.value}")
@@ -71,10 +74,16 @@ class ParallelExecutor:
                     chaos for chaos in chaos_results
                     if not isinstance(chaos, dict) or not chaos.get("deferred")
                 ]
+                successful_chaos_targets = {
+                    chaos.target_node
+                    for chaos in immediate_chaos
+                    if isinstance(chaos, ChaosResult) and chaos.success
+                }
                 deferred_chaos = [
                     chaos for chaos in chaos_results
                     if isinstance(chaos, dict) and chaos.get("deferred")
                 ]
+                pending_deferred_chaos = list(deferred_chaos)
 
                 success = self.operation_orchestrator.execute_operation(
                     operation, log_buffer=buffer,
@@ -100,11 +109,15 @@ class ParallelExecutor:
                         deferred["should_randomize"],
                         buffer,
                         cluster_connection,
+                        deferred.get("cluster_id"),
                     )
                     result.chaos_phase = "after"
                     immediate_chaos.append(result)
+                    if result.success:
+                        successful_chaos_targets.add(result.target_node)
                     if isinstance(result, ChaosResult):
                         self.chaos_coordinator.chaos_history.append(result)
+                    pending_deferred_chaos.remove(deferred)
 
                 chaos_events = immediate_chaos
 
@@ -122,6 +135,16 @@ class ParallelExecutor:
                 return op_index, 1 if success else 0, chaos_events, buffer
 
             except Exception as exc:
+                for deferred in pending_deferred_chaos:
+                    target_node = deferred.get("target_node")
+                    if target_node is None:
+                        continue
+                    if target_node.node_id in successful_chaos_targets:
+                        continue
+                    self.chaos_coordinator.chaos_engine.target_selector.unrecord_kill(
+                        deferred.get("cluster_id", cluster_id),
+                        target_node.node_id,
+                    )
                 buffer.error(f"Operation failed with exception: {exc}")
                 return op_index, 0, [], buffer
 

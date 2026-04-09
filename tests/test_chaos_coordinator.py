@@ -441,5 +441,55 @@ def test_coordinate_chaos_with_operation_returns_failure_result_on_exception(moc
     assert coordinator.chaos_history == results
 
 
+@patch('src.fuzzer_engine.chaos_coordinator.time.sleep')
+def test_coordinate_chaos_with_operation_preserves_failure_for_non_safety_target_miss(mock_sleep):
+    """Missing primaries/replicas should still report a failed chaos result."""
+    coordinator = ChaosCoordinator()
+
+    operation = Operation(
+        type=OperationType.FAILOVER,
+        target_node="node-0",
+        parameters={},
+        timing=OperationTiming()
+    )
+
+    chaos_config = ChaosConfig(
+        chaos_type=ChaosType.PROCESS_KILL,
+        target_selection=TargetSelection(strategy="primary_only"),
+        timing=ChaosTiming(),
+        coordination=ChaosCoordination(chaos_during_operation=True),
+        process_chaos_type=ProcessChaosType.SIGKILL
+    )
+
+    mock_connection = MagicMock()
+    mock_connection.get_live_nodes.return_value = [
+        {
+            'node_id': 'replica-1',
+            'host': '127.0.0.1',
+            'port': 7001,
+            'role': 'replica',
+            'shard_id': 0,
+            'status': 'connected',
+        }
+    ]
+    mock_connection.initial_nodes = [
+        NodeInfo(
+            node_id="replica-1", role="replica", shard_id=0, port=7001, bus_port=17001,
+            pid=1001, process=Mock(), data_dir="/tmp/replica-1", log_file="/tmp/replica-1.log"
+        )
+    ]
+
+    results = coordinator.coordinate_chaos_with_operation(
+        operation,
+        chaos_config,
+        mock_connection,
+        "test_cluster"
+    )
+
+    assert len(results) == 1
+    assert results[0].success is False
+    assert "No suitable chaos target found" in results[0].error_message
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
