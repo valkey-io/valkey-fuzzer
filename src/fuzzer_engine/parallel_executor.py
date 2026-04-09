@@ -57,6 +57,7 @@ class ParallelExecutor:
             buffer = OperationLogBuffer(op_id)
             deferred_chaos = []
             pending_deferred_chaos = []
+            successful_chaos_targets = set()
 
             try:
                 buffer.info(f"Starting {operation.type.value}")
@@ -73,6 +74,11 @@ class ParallelExecutor:
                     chaos for chaos in chaos_results
                     if not isinstance(chaos, dict) or not chaos.get("deferred")
                 ]
+                successful_chaos_targets = {
+                    chaos.target_node
+                    for chaos in immediate_chaos
+                    if isinstance(chaos, ChaosResult) and chaos.success
+                }
                 deferred_chaos = [
                     chaos for chaos in chaos_results
                     if isinstance(chaos, dict) and chaos.get("deferred")
@@ -107,6 +113,8 @@ class ParallelExecutor:
                     )
                     result.chaos_phase = "after"
                     immediate_chaos.append(result)
+                    if result.success:
+                        successful_chaos_targets.add(result.target_node)
                     if isinstance(result, ChaosResult):
                         self.chaos_coordinator.chaos_history.append(result)
                     pending_deferred_chaos.remove(deferred)
@@ -130,6 +138,8 @@ class ParallelExecutor:
                 for deferred in pending_deferred_chaos:
                     target_node = deferred.get("target_node")
                     if target_node is None:
+                        continue
+                    if target_node.node_id in successful_chaos_targets:
                         continue
                     self.chaos_coordinator.chaos_engine.target_selector.unrecord_kill(
                         deferred.get("cluster_id", cluster_id),

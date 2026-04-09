@@ -263,6 +263,9 @@ class ChaosTargetSelector:
             return candidates  # No topology info — can't filter
 
         killed = self._killed_node_ids.get(cluster_id, set())
+        live_node_ids = {
+            node.node_id for node in self.cluster_nodes.get(cluster_id, [])
+        }
 
         # Build shard -> set of initial node_ids
         shard_members: Dict[int, set] = {}
@@ -276,7 +279,8 @@ class ChaosTargetSelector:
                 continue
 
             members = shard_members.get(candidate.shard_id, set())
-            surviving_others = members - killed - {candidate.node_id}
+            live_members = members & live_node_ids
+            surviving_others = live_members - killed - {candidate.node_id}
             if surviving_others:
                 safe.append(candidate)
             elif log is not None:

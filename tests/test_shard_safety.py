@@ -83,6 +83,22 @@ def test_returns_none_when_all_candidates_unsafe():
     assert result is None
 
 
+def test_offline_members_do_not_count_as_shard_survivors():
+    """Nodes already missing from the live topology must not keep a shard "safe"."""
+    selector = ChaosTargetSelector()
+    nodes = [
+        _node("n0", 0, "primary", 7000),
+        _node("n1", 0, "replica", 7001),
+    ]
+    selector.update_cluster_topology(CLUSTER, nodes)
+
+    # Replica is already offline for non-chaos reasons, so n0 is the only live member left.
+    selector.update_cluster_topology(CLUSTER, [_node("n0", 0, "primary", 7000)])
+
+    result = selector.select_target(CLUSTER, TargetSelection(strategy="random"))
+    assert result is None
+
+
 # ── Thread-safety: concurrent selection ────────────────────────────────
 
 def test_concurrent_threads_cannot_kill_entire_shard():
@@ -465,6 +481,77 @@ def test_parallel_executor_releases_deferred_reservation_on_operation_exception(
 
     killed = coordinator.chaos_engine.target_selector._killed_node_ids.get("c1", set())
     assert killed == set(), f"Expected deferred reservation to be released, got {killed}"
+
+
+def test_parallel_executor_preserves_reservation_after_immediate_chaos_success():
+    """Operation exceptions must not clear a target already killed before the deferred phase."""
+    from unittest.mock import patch
+    from src.fuzzer_engine.chaos_coordinator import ChaosCoordinator
+    from src.fuzzer_engine.parallel_executor import ParallelExecutor
+    from src.models import (
+        ChaosConfig, ChaosCoordination, ChaosResult, ChaosType, ChaosTiming,
+        ProcessChaosType, TargetSelection, Operation, OperationType,
+        OperationTiming,
+    )
+
+    coordinator = ChaosCoordinator(seed=1)
+    nodes = [
+        _node("n0", 0, "primary", 7000),
+        _node("n1", 0, "replica", 7001),
+        _node("n2", 1, "primary", 7002),
+        _node("n3", 1, "replica", 7003),
+    ]
+    coordinator.register_cluster_nodes("c1", nodes)
+
+    mock_conn = Mock()
+    mock_conn.get_live_nodes.return_value = [
+        {"node_id": n.node_id, "host": "127.0.0.1", "port": n.port, "role": n.role, "shard_id": n.shard_id}
+        for n in nodes
+    ]
+    mock_conn.initial_nodes = nodes
+
+    operation_orchestrator = Mock()
+    operation_orchestrator.execute_operation.side_effect = RuntimeError("boom")
+    fuzzer_logger = Mock()
+    executor = ParallelExecutor(operation_orchestrator, coordinator, fuzzer_logger)
+
+    config = ChaosConfig(
+        chaos_type=ChaosType.PROCESS_KILL,
+        target_selection=TargetSelection(strategy="specific", specific_nodes=["n0"]),
+        timing=ChaosTiming(delay_before_operation=0.0, delay_after_operation=0.0),
+        coordination=ChaosCoordination(
+            chaos_before_operation=True,
+            chaos_during_operation=False,
+            chaos_after_operation=True,
+        ),
+        process_chaos_type=ProcessChaosType.SIGKILL,
+    )
+    op = Operation(
+        type=OperationType.FAILOVER,
+        target_node="shard-0-primary",
+        parameters={},
+        timing=OperationTiming(),
+    )
+
+    success_result = ChaosResult(
+        chaos_id="before-success",
+        chaos_type=ChaosType.PROCESS_KILL,
+        target_node="n0",
+        success=True,
+        start_time=0.0,
+        end_time=0.0,
+    )
+
+    with patch.object(coordinator, "_inject_chaos", return_value=success_result):
+        executor.execute_operations_parallel(
+            operations=[op],
+            chaos_config=config,
+            cluster_connection=mock_conn,
+            cluster_id="c1",
+        )
+
+    killed = coordinator.chaos_engine.target_selector._killed_node_ids.get("c1", set())
+    assert killed == {"n0"}, f"Expected immediate chaos reservation to remain, got {killed}"
 
 
 def test_reset_cluster_topology_replaces_stale_snapshot_for_reused_cluster_id():
