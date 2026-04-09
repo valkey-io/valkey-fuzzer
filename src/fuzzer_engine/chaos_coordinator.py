@@ -29,8 +29,8 @@ class ChaosCoordinator:
             # Register node process with chaos engine
             self.chaos_engine.register_node_process(node.node_id, node.pid)
         
-        # Update cluster topology for target selection so that it only contains live nodes
-        self.chaos_engine.target_selector.update_cluster_topology(cluster_id, nodes)
+        # Fresh registration resets any stale selector state for reused cluster IDs.
+        self.chaos_engine.target_selector.reset_cluster_topology(cluster_id, nodes)
         
         logger.info(f"Successfully registered {len(nodes)} nodes for chaos injection")
     
@@ -82,7 +82,10 @@ class ChaosCoordinator:
             target_node = self.chaos_engine.target_selector.select_target(cluster_id, chaos_config.target_selection, log_buffer=log)
             
             if not target_node:
-                if chaos_config.target_selection.strategy != "specific" and live_nodes_dict:
+                if self.chaos_engine.target_selector.is_shard_safety_exhausted(
+                    cluster_id,
+                    chaos_config.target_selection,
+                ):
                     log.warning(
                         f"Skipping chaos injection for {operation.type.value} on {operation.target_node}: "
                         "no eligible shard-safe target is currently available"
@@ -354,6 +357,7 @@ class ChaosCoordinator:
         
         try:
             success = self.chaos_engine.cleanup_chaos(cluster_id)
+            self.chaos_engine.target_selector.clear_cluster_state(cluster_id)
             
             if cluster_id in self.active_chaos_scenarios:
                 del self.active_chaos_scenarios[cluster_id]

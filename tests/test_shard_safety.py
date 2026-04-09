@@ -465,3 +465,44 @@ def test_parallel_executor_releases_deferred_reservation_on_operation_exception(
 
     killed = coordinator.chaos_engine.target_selector._killed_node_ids.get("c1", set())
     assert killed == set(), f"Expected deferred reservation to be released, got {killed}"
+
+
+def test_reset_cluster_topology_replaces_stale_snapshot_for_reused_cluster_id():
+    """Fresh cluster registration under the same ID should replace stale shard members."""
+    selector = ChaosTargetSelector()
+    old_nodes = [
+        _node("old-0", 0, "primary", 7000),
+        _node("old-1", 0, "replica", 7001),
+        _node("old-2", 0, "replica", 7002),
+    ]
+    selector.update_cluster_topology(CLUSTER, old_nodes)
+
+    new_nodes = [
+        _node("new-0", 0, "primary", 7100),
+        _node("new-1", 0, "replica", 7101),
+    ]
+    selector.reset_cluster_topology(CLUSTER, new_nodes)
+    selector.record_kill(CLUSTER, "new-0")
+    selector.update_cluster_topology(CLUSTER, [new_nodes[1]])
+
+    result = selector.select_target(CLUSTER, TargetSelection(strategy="random"))
+    assert result is None, "Expected last live member to remain protected after cluster reset"
+
+
+def test_cleanup_chaos_clears_selector_state():
+    """Cluster cleanup should drop cached topology and reservations for that cluster."""
+    from src.fuzzer_engine.chaos_coordinator import ChaosCoordinator
+
+    coordinator = ChaosCoordinator()
+    nodes = [
+        _node("n0", 0, "primary", 7000),
+        _node("n1", 0, "replica", 7001),
+    ]
+    coordinator.register_cluster_nodes("c1", nodes)
+    coordinator.chaos_engine.target_selector.record_kill("c1", "n0")
+
+    coordinator.cleanup_chaos("c1")
+
+    assert "c1" not in coordinator.chaos_engine.target_selector.cluster_nodes
+    assert "c1" not in coordinator.chaos_engine.target_selector._initial_topology
+    assert "c1" not in coordinator.chaos_engine.target_selector._killed_node_ids

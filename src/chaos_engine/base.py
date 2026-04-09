@@ -203,6 +203,22 @@ class ChaosTargetSelector:
         self._killed_node_ids: Dict[str, set] = {}
         # Initial full topology per cluster for shard membership lookup
         self._initial_topology: Dict[str, List[NodeInfo]] = {}
+
+    def reset_cluster_topology(self, cluster_id: str, nodes: List[NodeInfo]) -> None:
+        """Replace all selector state for a cluster with a fresh topology snapshot."""
+        with self._lock:
+            self.cluster_nodes[cluster_id] = list(nodes)
+            self._initial_topology[cluster_id] = list(nodes)
+            self._killed_node_ids[cluster_id] = set()
+        logger.debug(f"Reset selector state for cluster {cluster_id} with {len(nodes)} nodes")
+
+    def clear_cluster_state(self, cluster_id: str) -> None:
+        """Drop any cached selector state for a cluster."""
+        with self._lock:
+            self.cluster_nodes.pop(cluster_id, None)
+            self._initial_topology.pop(cluster_id, None)
+            self._killed_node_ids.pop(cluster_id, None)
+        logger.debug(f"Cleared selector state for cluster {cluster_id}")
     
     def update_cluster_topology(self, cluster_id: str, nodes: List[NodeInfo]) -> None:
         """Update cluster topology information.
@@ -234,7 +250,7 @@ class ChaosTargetSelector:
             if killed:
                 killed.discard(node_id)
 
-    def _get_shard_safe_candidates(self, candidates: List[NodeInfo], cluster_id: str, log) -> List[NodeInfo]:
+    def _get_shard_safe_candidates(self, candidates: List[NodeInfo], cluster_id: str, log=None) -> List[NodeInfo]:
         """Filter candidates to avoid killing the last surviving member of any shard.
 
         Also excludes nodes already reserved/killed (they may still appear in
@@ -263,13 +279,36 @@ class ChaosTargetSelector:
             surviving_others = members - killed - {candidate.node_id}
             if surviving_others:
                 safe.append(candidate)
-            else:
+            elif log is not None:
                 log.info(
                     f"Skipping {candidate.node_id} (shard {candidate.shard_id}) — "
                     f"killing it would leave zero live members in the shard"
                 )
 
         return safe
+
+    def is_shard_safety_exhausted(self, cluster_id: str, target_selection: TargetSelection) -> bool:
+        """Return True only when shard safety is the reason no target can be selected."""
+        with self._lock:
+            nodes = self.cluster_nodes.get(cluster_id, [])
+            if not nodes:
+                return False
+
+            strategy = target_selection.strategy
+            if strategy == "random":
+                candidates = nodes
+            elif strategy == "primary_only":
+                candidates = [n for n in nodes if n.role == 'primary']
+            elif strategy == "replica_only":
+                candidates = [n for n in nodes if n.role == 'replica']
+            else:
+                return False
+
+            if not candidates:
+                return False
+
+            safe_candidates = self._get_shard_safe_candidates(candidates, cluster_id)
+            return len(safe_candidates) == 0
 
     def select_target(self, cluster_id: str, target_selection: TargetSelection, log_buffer=None) -> Optional[NodeInfo]:
         """Select a chaos target and eagerly reserve it as killed.
@@ -358,4 +397,3 @@ class ChaosTargetSelector:
         else:
             log.error(f"Unknown target selection strategy: {strategy}")
             return None
-    
