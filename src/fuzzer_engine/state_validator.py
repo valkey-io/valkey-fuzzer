@@ -160,6 +160,9 @@ class ReplicationValidator:
 
             lagging_replicas: List[ReplicaLagInfo] = []
             disconnected_replicas: List[str] = []
+            # Track replicas that are reachable (process alive) but have
+            # master_link_status=down. Distinguished from truly unreachable replicas.
+            repl_link_down_replicas: set[str] = set()
             max_lag = 0.0
             all_replicas_synced = True
 
@@ -191,9 +194,10 @@ class ReplicationValidator:
                     else:
                         primary_address = "unknown"
 
-                    # Check if replica is disconnected
+                    # Check if replica's replication link is down
                     if master_link_status != 'up':
                         disconnected_replicas.append(replica_address)
+                        repl_link_down_replicas.add(replica_address)
                         all_replicas_synced = False
                         logger.warning(
                             f"Replica {replica_address} disconnected from primary "
@@ -268,12 +272,61 @@ class ReplicationValidator:
             if killed_nodes is None:
                 killed_nodes = set()
 
+            # Build set of replicas whose primary was killed by chaos.
+            # These replicas are expected to have master_link_status=down, but only
+            # if they are still reachable (process alive). If a replica is truly
+            # unreachable (connection refused/timeout), that's still unexpected.
+            replicas_with_expected_link_down = set()
+            if killed_nodes:
+                killed_primary_shard_ids = set()
+                live_primary_shard_ids = set()
+                for node in all_nodes:
+                    node_addr = format_node_address(node)
+                    if node_addr in killed_nodes and node['role'] == 'primary':
+                        shard_id = node.get('shard_id')
+                        if shard_id is not None:
+                            killed_primary_shard_ids.add(shard_id)
+                    if (
+                        node['role'] == 'primary'
+                        and node.get('shard_id') is not None
+                        and node_addr not in killed_nodes
+                        and node.get('status') != 'failed'
+                    ):
+                        live_primary_shard_ids.add(node['shard_id'])
+
+                shards_without_live_primary = killed_primary_shard_ids - live_primary_shard_ids
+
+                # Only exclude replicas that are reachable (in repl_link_down_replicas)
+                # AND belong to a shard whose killed primary is still absent.
+                # Replicas that are truly unreachable (not in repl_link_down_replicas)
+                # are still flagged as unexpected even if their primary was killed.
+                for replica in replica_nodes:
+                    replica_addr = format_node_address(replica)
+                    if (
+                        replica.get('shard_id') in shards_without_live_primary
+                        and replica_addr in repl_link_down_replicas
+                    ):
+                        replicas_with_expected_link_down.add(replica_addr)
+
+                if replicas_with_expected_link_down:
+                    logger.info(
+                        f"Replicas with expected replication link down "
+                        f"(primary killed, replica alive): "
+                        f"{replicas_with_expected_link_down}"
+                    )
+
             # Validate that disconnected replicas match killed nodes (if tracking)
             if killed_nodes and disconnected_replicas:
                 disconnected_set = set(disconnected_replicas)
                 
-                # Check for unexpected disconnections (replicas that died but weren't killed)
-                unexpected_disconnections = disconnected_set - killed_nodes
+                # Check for unexpected disconnections (replicas that died but weren't killed).
+                # Exclude replicas that are alive but have replication link down because
+                # their primary was killed -- that's expected, not a failure.
+                # Replicas that are truly unreachable (connection refused, marked failed
+                # in topology) are NOT excluded, even if their primary was killed.
+                unexpected_disconnections = (
+                    disconnected_set - killed_nodes - replicas_with_expected_link_down
+                )
                 if unexpected_disconnections:
                     success = False
                     error_message = (
@@ -300,10 +353,15 @@ class ReplicationValidator:
 
             # CRITICAL: Check per-shard redundancy using helper function
             if success and config.min_replicas_per_shard > 0:
+                redundancy_disconnected_replicas = [
+                    replica
+                    for replica in disconnected_replicas
+                    if replica not in replicas_with_expected_link_down
+                ]
                 redundancy_success, redundancy_error = check_per_shard_redundancy(
                     all_nodes=all_nodes,
                     replica_nodes=replica_nodes,
-                    disconnected_replicas=disconnected_replicas,
+                    disconnected_replicas=redundancy_disconnected_replicas,
                     killed_nodes=killed_nodes,
                     min_replicas_per_shard=config.min_replicas_per_shard,
                     context="replication"
@@ -332,7 +390,9 @@ class ReplicationValidator:
                 elif len(disconnected_replicas) == len(replica_nodes) and replica_nodes:
                     # Only fail if there are unexpected disconnections (not killed by chaos)
                     disconnected_set = set(disconnected_replicas)
-                    unexpected_disconnections = disconnected_set - killed_nodes
+                    unexpected_disconnections = (
+                        disconnected_set - killed_nodes - replicas_with_expected_link_down
+                    )
                     if unexpected_disconnections:
                         success = False
                         error_message = "All replicas are disconnected"
