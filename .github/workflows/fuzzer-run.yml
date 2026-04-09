@@ -139,4 +139,4 @@ jobs:
         name: fuzzer-run-artifacts-${{ github.run_id }}
         path: ${{ env.FUZZER_ARTIFACT_DIR }}
         if-no-files-found: warn
-        retention-days: 14
+        retention-days: 60
