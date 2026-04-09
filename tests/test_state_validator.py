@@ -282,7 +282,7 @@ def test_replication_validator_ignores_expected_link_down_when_primary_killed():
     validator = ReplicationValidator()
     cluster_connection = Mock()
     cluster_connection.get_current_nodes.return_value = [
-        {'node_id': 'primary-1', 'host': '127.0.0.1', 'port': 7000, 'role': 'primary', 'shard_id': 0, 'status': 'ok'},
+        {'node_id': 'primary-1', 'host': '127.0.0.1', 'port': 7000, 'role': 'primary', 'shard_id': 0, 'status': 'failed'},
         {'node_id': 'replica-1', 'host': '127.0.0.1', 'port': 7001, 'role': 'replica', 'shard_id': 0, 'status': 'ok'},
     ]
 
@@ -308,6 +308,41 @@ def test_replication_validator_ignores_expected_link_down_when_primary_killed():
     assert result.error_message is None
     assert result.all_replicas_synced is False
     assert result.disconnected_replicas == ['127.0.0.1:7001']
+
+
+def test_replication_validator_stops_suppressing_once_new_primary_is_live():
+    """Historical primary kills should not mask later replica link-down regressions."""
+    from src.fuzzer_engine.state_validator import ReplicationValidator
+    from src.models import ReplicationValidationConfig
+
+    validator = ReplicationValidator()
+    cluster_connection = Mock()
+    cluster_connection.get_current_nodes.return_value = [
+        {'node_id': 'old-primary', 'host': '127.0.0.1', 'port': 7000, 'role': 'primary', 'shard_id': 0, 'status': 'failed'},
+        {'node_id': 'new-primary', 'host': '127.0.0.1', 'port': 7002, 'role': 'primary', 'shard_id': 0, 'status': 'ok'},
+        {'node_id': 'replica-1', 'host': '127.0.0.1', 'port': 7001, 'role': 'replica', 'shard_id': 0, 'status': 'ok'},
+    ]
+
+    replica_client = Mock()
+    replica_client.info.return_value = {
+        'master_link_status': 'down',
+        'master_last_io_seconds_ago': '-1',
+    }
+    client_cm = Mock()
+    client_cm.__enter__ = Mock(return_value=replica_client)
+    client_cm.__exit__ = Mock(return_value=False)
+
+    with patch('src.fuzzer_engine.state_validator.valkey_client', return_value=client_cm), \
+         patch.object(ReplicationValidator, '_get_master_node_id', return_value='new-primary'), \
+         patch('src.fuzzer_engine.state_validator.safe_query_node', return_value={'connected_slaves': '0'}):
+        result = validator.validate(
+            cluster_connection,
+            ReplicationValidationConfig(require_all_replicas_synced=False),
+            killed_nodes={'127.0.0.1:7000'},
+        )
+
+    assert result.success is False
+    assert "Unexpected replica disconnections detected" in result.error_message
 
 
 def test_replication_validator_respects_offset_guard_for_lag_detection():

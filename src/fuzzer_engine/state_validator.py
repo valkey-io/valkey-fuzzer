@@ -279,21 +279,31 @@ class ReplicationValidator:
             replicas_with_expected_link_down = set()
             if killed_nodes:
                 killed_primary_shard_ids = set()
+                live_primary_shard_ids = set()
                 for node in all_nodes:
                     node_addr = format_node_address(node)
                     if node_addr in killed_nodes and node['role'] == 'primary':
                         shard_id = node.get('shard_id')
                         if shard_id is not None:
                             killed_primary_shard_ids.add(shard_id)
+                    if (
+                        node['role'] == 'primary'
+                        and node.get('shard_id') is not None
+                        and node_addr not in killed_nodes
+                        and node.get('status') != 'failed'
+                    ):
+                        live_primary_shard_ids.add(node['shard_id'])
+
+                shards_without_live_primary = killed_primary_shard_ids - live_primary_shard_ids
 
                 # Only exclude replicas that are reachable (in repl_link_down_replicas)
-                # AND belong to a shard whose primary was killed.
+                # AND belong to a shard whose killed primary is still absent.
                 # Replicas that are truly unreachable (not in repl_link_down_replicas)
                 # are still flagged as unexpected even if their primary was killed.
                 for replica in replica_nodes:
                     replica_addr = format_node_address(replica)
                     if (
-                        replica.get('shard_id') in killed_primary_shard_ids
+                        replica.get('shard_id') in shards_without_live_primary
                         and replica_addr in repl_link_down_replicas
                     ):
                         replicas_with_expected_link_down.add(replica_addr)
