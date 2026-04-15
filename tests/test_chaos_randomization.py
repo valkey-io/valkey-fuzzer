@@ -489,8 +489,11 @@ def test_chaos_without_randomization_is_consistent(mock_sleep, mock_cluster_conn
             cluster_id="test_cluster"
         )
     
-    # Verify chaos was injected (limited by shard-safety: 3 shards × 1 primary each)
-    assert len(chaos_injections) == 3, f"Should have 3 chaos injections (one per shard primary), got {len(chaos_injections)}"
+    # Verify chaos was injected only once: in a 3-shard cluster, a second
+    # primary kill would drop the cluster below failover quorum.
+    assert len(chaos_injections) == 1, (
+        f"Should have 1 chaos injection before quorum safety blocks more, got {len(chaos_injections)}"
+    )
     
     # Verify only SIGKILL was used (no randomization)
     chaos_types = [inj['chaos_type'] for inj in chaos_injections]
