@@ -1,8 +1,8 @@
 """
-Unit tests for ChaosTargetSelector shard-safety logic.
+Unit tests for ChaosTargetSelector safety logic.
 
-Covers: shard protection, thread-safety (TOCTOU race), cluster scoping,
-topology reconciliation on restart, and unrecord_kill on failed kills.
+Covers: shard protection, primary quorum protection, thread-safety (TOCTOU race),
+cluster scoping, topology reconciliation on restart, and unrecord_kill on failed kills.
 """
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -96,6 +96,103 @@ def test_offline_members_do_not_count_as_shard_survivors():
     selector.update_cluster_topology(CLUSTER, [_node("n0", 0, "primary", 7000)])
 
     result = selector.select_target(CLUSTER, TargetSelection(strategy="random"))
+    assert result is None
+
+
+def test_primary_quorum_blocks_second_primary_kill_across_shards():
+    """After one primary is down in a 3-shard cluster, no second primary kill is safe."""
+    selector = ChaosTargetSelector()
+    nodes = [
+        _node("n0", 0, "primary", 7000),
+        _node("n1", 0, "replica", 7001),
+        _node("n2", 1, "primary", 7002),
+        _node("n3", 1, "replica", 7003),
+        _node("n4", 2, "primary", 7004),
+        _node("n5", 2, "replica", 7005),
+    ]
+    selector.update_cluster_topology(CLUSTER, nodes)
+
+    selector._killed_node_ids[CLUSTER] = {"n0"}
+    selector.update_cluster_topology(
+        CLUSTER,
+        [
+            _node("n1", 0, "replica", 7001),
+            _node("n2", 1, "primary", 7002),
+            _node("n3", 1, "replica", 7003),
+            _node("n4", 2, "primary", 7004),
+            _node("n5", 2, "replica", 7005),
+        ],
+    )
+
+    result = selector.select_target(CLUSTER, TargetSelection(strategy="primary_only"))
+    assert result is None
+
+
+def test_random_strategy_avoids_primary_quorum_loss_by_picking_replica():
+    """Random selection should keep working by choosing safe replicas instead of primaries."""
+    selector = ChaosTargetSelector()
+    nodes = [
+        _node("n0", 0, "primary", 7000),
+        _node("n1", 0, "replica", 7001),
+        _node("n2", 1, "primary", 7002),
+        _node("n3", 1, "replica", 7003),
+        _node("n4", 2, "primary", 7004),
+        _node("n5", 2, "replica", 7005),
+    ]
+    selector.update_cluster_topology(CLUSTER, nodes)
+
+    selector._killed_node_ids[CLUSTER] = {"n0"}
+    selector.update_cluster_topology(
+        CLUSTER,
+        [
+            _node("n1", 0, "replica", 7001),
+            _node("n2", 1, "primary", 7002),
+            _node("n3", 1, "replica", 7003),
+            _node("n4", 2, "primary", 7004),
+            _node("n5", 2, "replica", 7005),
+        ],
+    )
+
+    for _ in range(20):
+        selected = selector.select_target(CLUSTER, TargetSelection(strategy="random"))
+        assert selected is not None
+        assert selected.node_id in {"n3", "n5"}
+        selector.unrecord_kill(CLUSTER, selected.node_id)
+
+
+def test_primary_quorum_uses_total_shard_count_not_live_primary_count():
+    """The quorum threshold must stay tied to the original shard count."""
+    selector = ChaosTargetSelector()
+    nodes = [
+        _node("n0", 0, "primary", 7000),
+        _node("n1", 0, "replica", 7001),
+        _node("n2", 1, "primary", 7002),
+        _node("n3", 1, "replica", 7003),
+        _node("n4", 2, "primary", 7004),
+        _node("n5", 2, "replica", 7005),
+        _node("n6", 3, "primary", 7006),
+        _node("n7", 3, "replica", 7007),
+        _node("n8", 4, "primary", 7008),
+        _node("n9", 4, "replica", 7009),
+    ]
+    selector.update_cluster_topology(CLUSTER, nodes)
+
+    selector._killed_node_ids[CLUSTER] = {"n0", "n2"}
+    selector.update_cluster_topology(
+        CLUSTER,
+        [
+            _node("n1", 0, "replica", 7001),
+            _node("n3", 1, "replica", 7003),
+            _node("n4", 2, "primary", 7004),
+            _node("n5", 2, "replica", 7005),
+            _node("n6", 3, "primary", 7006),
+            _node("n7", 3, "replica", 7007),
+            _node("n8", 4, "primary", 7008),
+            _node("n9", 4, "replica", 7009),
+        ],
+    )
+
+    result = selector.select_target(CLUSTER, TargetSelection(strategy="primary_only"))
     assert result is None
 
 
@@ -408,6 +505,62 @@ def test_no_safe_target_is_skipped_without_failed_chaos_result():
     op = Operation(
         type=OperationType.FAILOVER,
         target_node="shard-0-primary",
+        parameters={},
+        timing=OperationTiming(),
+    )
+
+    results = coordinator.coordinate_chaos_with_operation(
+        operation=op,
+        chaos_config=config,
+        cluster_connection=mock_conn,
+        cluster_id="c1",
+    )
+
+    assert results == []
+    assert coordinator.get_chaos_history() == []
+
+
+def test_no_quorum_safe_primary_target_is_skipped_without_failed_chaos_result():
+    """Quorum-safety exhaustion should also skip chaos without recording a failure."""
+    from src.fuzzer_engine.chaos_coordinator import ChaosCoordinator
+    from src.models import (
+        ChaosConfig, ChaosCoordination, ChaosType, ChaosTiming,
+        ProcessChaosType, TargetSelection, Operation, OperationType,
+        OperationTiming,
+    )
+
+    coordinator = ChaosCoordinator(seed=1)
+    nodes = [
+        _node("n0", 0, "primary", 7000),
+        _node("n1", 0, "replica", 7001),
+        _node("n2", 1, "primary", 7002),
+        _node("n3", 1, "replica", 7003),
+        _node("n4", 2, "primary", 7004),
+        _node("n5", 2, "replica", 7005),
+    ]
+    coordinator.register_cluster_nodes("c1", nodes)
+    coordinator.chaos_engine.target_selector._killed_node_ids["c1"] = {"n0"}
+
+    mock_conn = Mock()
+    mock_conn.get_live_nodes.return_value = [
+        {"node_id": "n1", "host": "127.0.0.1", "port": 7001, "role": "replica", "shard_id": 0},
+        {"node_id": "n2", "host": "127.0.0.1", "port": 7002, "role": "primary", "shard_id": 1},
+        {"node_id": "n3", "host": "127.0.0.1", "port": 7003, "role": "replica", "shard_id": 1},
+        {"node_id": "n4", "host": "127.0.0.1", "port": 7004, "role": "primary", "shard_id": 2},
+        {"node_id": "n5", "host": "127.0.0.1", "port": 7005, "role": "replica", "shard_id": 2},
+    ]
+    mock_conn.initial_nodes = nodes
+
+    config = ChaosConfig(
+        chaos_type=ChaosType.PROCESS_KILL,
+        target_selection=TargetSelection(strategy="primary_only"),
+        timing=ChaosTiming(),
+        coordination=ChaosCoordination(chaos_during_operation=True),
+        process_chaos_type=ProcessChaosType.SIGKILL,
+    )
+    op = Operation(
+        type=OperationType.FAILOVER,
+        target_node="shard-1-primary",
         parameters={},
         timing=OperationTiming(),
     )

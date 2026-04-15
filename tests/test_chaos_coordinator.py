@@ -108,7 +108,7 @@ def test_select_chaos_target_random(mock_live_process):
 
 def test_select_chaos_target_primary_only(mock_live_process):
     """Test selecting chaos target with primary_only strategy"""
-    coordinator = ChaosCoordinator()
+    coordinator = ChaosCoordinator(seed=1)
     cluster_id = "test-cluster"
 
     nodes = [
@@ -133,6 +133,50 @@ def test_select_chaos_target_primary_only(mock_live_process):
             process=mock_live_process,
             data_dir="/tmp/test",
             log_file="/tmp/test.log"
+        ),
+        NodeInfo(
+            node_id="node-2",
+            role="primary",
+            shard_id=1,
+            port=7002,
+            bus_port=17002,
+            pid=12347,
+            process=mock_live_process,
+            data_dir="/tmp/test",
+            log_file="/tmp/test.log"
+        ),
+        NodeInfo(
+            node_id="node-3",
+            role="replica",
+            shard_id=1,
+            port=7003,
+            bus_port=17003,
+            pid=12348,
+            process=mock_live_process,
+            data_dir="/tmp/test",
+            log_file="/tmp/test.log"
+        ),
+        NodeInfo(
+            node_id="node-4",
+            role="primary",
+            shard_id=2,
+            port=7004,
+            bus_port=17004,
+            pid=12349,
+            process=mock_live_process,
+            data_dir="/tmp/test",
+            log_file="/tmp/test.log"
+        ),
+        NodeInfo(
+            node_id="node-5",
+            role="replica",
+            shard_id=2,
+            port=7005,
+            bus_port=17005,
+            pid=12350,
+            process=mock_live_process,
+            data_dir="/tmp/test",
+            log_file="/tmp/test.log"
         )
     ]
     
@@ -142,7 +186,7 @@ def test_select_chaos_target_primary_only(mock_live_process):
     target = coordinator.chaos_engine.target_selector.select_target(cluster_id, target_selection)
     
     assert target is not None
-    assert target.node_id == "node-0"
+    assert target.node_id in {"node-0", "node-2", "node-4"}
     assert target.role == "primary"
 
 
