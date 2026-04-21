@@ -298,28 +298,94 @@ class ChaosTargetSelector:
 
         return safe
 
-    def is_shard_safety_exhausted(self, cluster_id: str, target_selection: TargetSelection) -> bool:
-        """Return True only when shard safety is the reason no target can be selected."""
+    def _get_quorum_safe_candidates(self, candidates: List[NodeInfo], cluster_id: str, log=None) -> List[NodeInfo]:
+        """Filter candidates to avoid killing primaries that would break cluster quorum.
+
+        The required quorum is based on the original shard count, because dead
+        primaries still count toward the failover majority until a replacement
+        takes over the shard.
+
+        Caller must hold ``_lock``.
+        """
+        initial_nodes = self._initial_topology.get(cluster_id, [])
+        if not initial_nodes:
+            return candidates
+
+        total_primaries = len({node.shard_id for node in initial_nodes})
+        if total_primaries == 0:
+            return candidates
+
+        quorum = (total_primaries // 2) + 1
+        killed = self._killed_node_ids.get(cluster_id, set())
+        live_primaries = {
+            node.node_id
+            for node in self.cluster_nodes.get(cluster_id, [])
+            if node.role == 'primary'
+        }
+
+        safe = []
+        for candidate in candidates:
+            if candidate.role != 'primary':
+                safe.append(candidate)
+                continue
+
+            surviving_primaries = live_primaries - killed - {candidate.node_id}
+            if len(surviving_primaries) >= quorum:
+                safe.append(candidate)
+            elif log is not None:
+                log.info(
+                    f"Skipping {candidate.node_id} (shard {candidate.shard_id}) — "
+                    f"killing it would leave {len(surviving_primaries)} live primaries, "
+                    f"below quorum {quorum}"
+                )
+
+        return safe
+
+    def _get_safe_candidates(self, candidates: List[NodeInfo], cluster_id: str, log=None) -> List[NodeInfo]:
+        """Apply shard and quorum safety checks to a candidate list.
+
+        Caller must hold ``_lock``.
+        """
+        shard_safe = self._get_shard_safe_candidates(candidates, cluster_id, log)
+        if not shard_safe:
+            return []
+        return self._get_quorum_safe_candidates(shard_safe, cluster_id, log)
+
+    def get_safety_block_reason(self, cluster_id: str, target_selection: TargetSelection) -> Optional[str]:
+        """Return the safety rule blocking target selection, if any."""
         with self._lock:
             nodes = self.cluster_nodes.get(cluster_id, [])
             if not nodes:
-                return False
+                return None
 
-            strategy = target_selection.strategy
-            if strategy == "random":
-                candidates = nodes
-            elif strategy == "primary_only":
-                candidates = [n for n in nodes if n.role == 'primary']
-            elif strategy == "replica_only":
-                candidates = [n for n in nodes if n.role == 'replica']
-            else:
-                return False
-
+            candidates = self._get_strategy_candidates(nodes, target_selection)
             if not candidates:
-                return False
+                return None
 
-            safe_candidates = self._get_shard_safe_candidates(candidates, cluster_id)
-            return len(safe_candidates) == 0
+            shard_safe = self._get_shard_safe_candidates(candidates, cluster_id)
+            if not shard_safe:
+                return "shard-safe"
+
+            quorum_safe = self._get_quorum_safe_candidates(shard_safe, cluster_id)
+            if not quorum_safe:
+                return "quorum-safe"
+
+            return None
+
+    def _get_strategy_candidates(
+        self,
+        nodes: List[NodeInfo],
+        target_selection: TargetSelection,
+    ) -> List[NodeInfo]:
+        """Return the nodes eligible for a selection strategy before safety filters."""
+        strategy = target_selection.strategy
+        if strategy == "random":
+            return nodes
+        if strategy == "primary_only":
+            return [node for node in nodes if node.role == 'primary']
+        if strategy == "replica_only":
+            return [node for node in nodes if node.role == 'replica']
+        return []
 
     def select_target(self, cluster_id: str, target_selection: TargetSelection, log_buffer=None) -> Optional[NodeInfo]:
         """Select a chaos target and eagerly reserve it as killed.
@@ -371,35 +437,35 @@ class ChaosTargetSelector:
             return selected
 
         elif strategy == "random":
-            safe_nodes = self._get_shard_safe_candidates(nodes, cluster_id, log)
+            safe_nodes = self._get_safe_candidates(nodes, cluster_id, log)
             if not safe_nodes:
-                log.warning("No shard-safe random targets available")
+                log.warning("No safe random targets available")
                 return None
             selected = self.rng.choice(safe_nodes)
             log.info(f"Selected random node: {selected.node_id} (shard {selected.shard_id})")
             return selected
 
         elif strategy == "primary_only":
-            primaries = [n for n in nodes if n.role == 'primary']
+            primaries = self._get_strategy_candidates(nodes, target_selection)
             if not primaries:
                 log.warning("No primary nodes available")
                 return None
-            safe_primaries = self._get_shard_safe_candidates(primaries, cluster_id, log)
+            safe_primaries = self._get_safe_candidates(primaries, cluster_id, log)
             if not safe_primaries:
-                log.warning("No shard-safe primary targets available")
+                log.warning("No safe primary targets available")
                 return None
             selected = self.rng.choice(safe_primaries)
             log.info(f"Selected random primary: {selected.node_id} (shard {selected.shard_id})")
             return selected
 
         elif strategy == "replica_only":
-            replicas = [n for n in nodes if n.role == 'replica']
+            replicas = self._get_strategy_candidates(nodes, target_selection)
             if not replicas:
                 log.warning("No replica nodes available")
                 return None
-            safe_replicas = self._get_shard_safe_candidates(replicas, cluster_id, log)
+            safe_replicas = self._get_safe_candidates(replicas, cluster_id, log)
             if not safe_replicas:
-                log.warning("No shard-safe replica targets available")
+                log.warning("No safe replica targets available")
                 return None
             selected = self.rng.choice(safe_replicas)
             log.info(f"Selected random replica: {selected.node_id} (shard {selected.shard_id})")

@@ -84,13 +84,14 @@ class ChaosCoordinator:
             target_node = self.chaos_engine.target_selector.select_target(cluster_id, chaos_config.target_selection, log_buffer=log)
             
             if not target_node:
-                if self.chaos_engine.target_selector.is_shard_safety_exhausted(
+                safety_block_reason = self.chaos_engine.target_selector.get_safety_block_reason(
                     cluster_id,
                     chaos_config.target_selection,
-                ):
+                )
+                if safety_block_reason:
                     log.warning(
                         f"Skipping chaos injection for {operation.type.value} on {operation.target_node}: "
-                        "no eligible shard-safe target is currently available"
+                        f"no eligible {safety_block_reason} target is currently available"
                     )
                     return chaos_results
                 error_message = (
