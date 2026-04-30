@@ -3,6 +3,7 @@ Unit tests for _collect_failure_reasons — specifically the chaos-tolerance log
 
 Each test targets a concrete edge case raised during code review.
 """
+
 import time
 from unittest.mock import Mock
 
@@ -57,6 +58,7 @@ engine = FuzzerEngine()
 
 # ── Basic: no chaos config at all ──────────────────────────────────────
 
+
 def test_no_chaos_config_operation_failure_is_real():
     """Without any chaos config, operation failures must always be reported."""
     reasons = engine._collect_failure_reasons(
@@ -71,6 +73,7 @@ def test_no_chaos_config_operation_failure_is_real():
 
 
 # ── During-chaos: the common case ──────────────────────────────────────
+
 
 def test_during_chaos_all_validations_pass_tolerates():
     """During-chaos + all validations pass → tolerate operation failures."""
@@ -100,6 +103,7 @@ def test_during_chaos_validation_fails_not_tolerated():
 
 # ── After-only chaos: must NOT tolerate ────────────────────────────────
 
+
 def test_after_only_chaos_not_tolerated():
     """chaos_after_operation only — operation ran before chaos, failure is real."""
     reasons = engine._collect_failure_reasons(
@@ -115,6 +119,7 @@ def test_after_only_chaos_not_tolerated():
 
 # ── Mixed before/during + after: the tricky edge case ─────────────────
 
+
 def test_mixed_before_and_after_all_before_failed():
     """before + after enabled, but only after-events succeeded.
 
@@ -126,9 +131,9 @@ def test_mixed_before_and_after_all_before_failed():
         operations_executed=1,
         chaos_events=[
             _chaos_event(False, phase="before"),  # before op-1 failed
-            _chaos_event(True, phase="after"),     # after op-1 succeeded
+            _chaos_event(True, phase="after"),  # after op-1 succeeded
             _chaos_event(False, phase="before"),  # before op-2 failed
-            _chaos_event(True, phase="after"),     # after op-2 succeeded
+            _chaos_event(True, phase="after"),  # after op-2 succeeded
         ],
         validation_results=[],
         final_validation_result=_validation(True),
@@ -145,10 +150,10 @@ def test_mixed_during_and_after_some_during_succeeded():
         total_operations=2,
         operations_executed=1,
         chaos_events=[
-            _chaos_event(True, phase="during"),   # during op-1
-            _chaos_event(True, phase="after"),    # after op-1
-            _chaos_event(True, phase="during"),   # during op-2
-            _chaos_event(False, phase="after"),   # after op-2 failed
+            _chaos_event(True, phase="during"),  # during op-1
+            _chaos_event(True, phase="after"),  # after op-1
+            _chaos_event(True, phase="during"),  # during op-2
+            _chaos_event(False, phase="after"),  # after op-2 failed
         ],
         validation_results=[],
         final_validation_result=_validation(True),
@@ -158,6 +163,7 @@ def test_mixed_during_and_after_some_during_succeeded():
 
 
 # ── randomize_per_operation ────────────────────────────────────────────
+
 
 def test_randomize_per_operation_tolerates():
     """When randomize_per_operation is enabled, any operation may have had
@@ -175,6 +181,7 @@ def test_randomize_per_operation_tolerates():
 
 # ── No successful chaos events at all ──────────────────────────────────
 
+
 def test_during_chaos_all_events_failed_not_tolerated():
     """Chaos was configured during but every injection failed — no
     actual interference, so operation failure is real."""
@@ -190,6 +197,7 @@ def test_during_chaos_all_events_failed_not_tolerated():
 
 
 # ── Chaos injection failures are always reported ───────────────────────
+
 
 def test_failed_chaos_injections_always_reported():
     """Failed chaos injections are reported regardless of tolerance."""

@@ -1,6 +1,7 @@
 """
 Unit tests for strict run success criteria and wave validation behavior.
 """
+
 import time
 from unittest.mock import Mock, patch
 
@@ -14,7 +15,6 @@ from src.models import (
     ChaosType,
     ClusterConfig,
     ClusterStatusValidation,
-    ExecutionResult,
     Operation,
     OperationTiming,
     OperationType,
@@ -322,10 +322,12 @@ def test_parallel_executor_runs_validation_after_each_wave():
         ),
     ]
 
-    validation_runner = Mock(side_effect=[
-        build_validation_result(True),
-        build_validation_result(True),
-    ])
+    validation_runner = Mock(
+        side_effect=[
+            build_validation_result(True),
+            build_validation_result(True),
+        ]
+    )
 
     operations_executed, chaos_events, validation_results = executor.execute_operations_parallel(
         operations,

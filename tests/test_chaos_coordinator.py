@@ -1,13 +1,24 @@
 """
 Tests for Chaos Coordinator
 """
+
+from unittest.mock import MagicMock, Mock, patch
+
 import pytest
-from unittest.mock import Mock, MagicMock, patch
+
 from src.fuzzer_engine.chaos_coordinator import ChaosCoordinator
 from src.models import (
-    Operation, OperationType, OperationTiming, ChaosConfig, ChaosType,
-    ProcessChaosType, TargetSelection, ChaosTiming, ChaosCoordination,
-    NodeInfo, ChaosResult
+    ChaosConfig,
+    ChaosCoordination,
+    ChaosResult,
+    ChaosTiming,
+    ChaosType,
+    NodeInfo,
+    Operation,
+    OperationTiming,
+    OperationType,
+    ProcessChaosType,
+    TargetSelection,
 )
 
 
@@ -22,7 +33,7 @@ def mock_live_process():
 def test_chaos_coordinator_initialization():
     """Test chaos coordinator initialization"""
     coordinator = ChaosCoordinator()
-    
+
     assert coordinator.chaos_engine is not None
     assert coordinator.active_chaos_scenarios == {}
     assert coordinator.chaos_history == []
@@ -31,7 +42,7 @@ def test_chaos_coordinator_initialization():
 def test_register_cluster_nodes():
     """Test registering cluster nodes"""
     coordinator = ChaosCoordinator()
-    
+
     nodes = [
         NodeInfo(
             node_id="node-0",
@@ -42,7 +53,7 @@ def test_register_cluster_nodes():
             pid=12345,
             process=Mock(),
             data_dir="/tmp/test",
-            log_file="/tmp/test.log"
+            log_file="/tmp/test.log",
         ),
         NodeInfo(
             node_id="node-1",
@@ -53,12 +64,12 @@ def test_register_cluster_nodes():
             pid=12346,
             process=Mock(),
             data_dir="/tmp/test",
-            log_file="/tmp/test.log"
-        )
+            log_file="/tmp/test.log",
+        ),
     ]
-    
+
     coordinator.register_cluster_nodes("test-cluster", nodes)
-    
+
     # Verify nodes are registered in chaos engine
     assert "node-0" in coordinator.chaos_engine.node_processes
     assert "node-1" in coordinator.chaos_engine.node_processes
@@ -81,7 +92,7 @@ def test_select_chaos_target_random(mock_live_process):
             pid=12345,
             process=mock_live_process,
             data_dir="/tmp/test",
-            log_file="/tmp/test.log"
+            log_file="/tmp/test.log",
         ),
         NodeInfo(
             node_id="node-1",
@@ -92,16 +103,16 @@ def test_select_chaos_target_random(mock_live_process):
             pid=12346,
             process=mock_live_process,
             data_dir="/tmp/test",
-            log_file="/tmp/test.log"
-        )
+            log_file="/tmp/test.log",
+        ),
     ]
-    
+
     # Register nodes with the target selector
     coordinator.chaos_engine.target_selector.update_cluster_topology(cluster_id, nodes)
 
     target_selection = TargetSelection(strategy="random")
     target = coordinator.chaos_engine.target_selector.select_target(cluster_id, target_selection)
-    
+
     assert target is not None
     assert target.node_id in ["node-0", "node-1"]
 
@@ -121,7 +132,7 @@ def test_select_chaos_target_primary_only(mock_live_process):
             pid=12345,
             process=mock_live_process,
             data_dir="/tmp/test",
-            log_file="/tmp/test.log"
+            log_file="/tmp/test.log",
         ),
         NodeInfo(
             node_id="node-1",
@@ -132,7 +143,7 @@ def test_select_chaos_target_primary_only(mock_live_process):
             pid=12346,
             process=mock_live_process,
             data_dir="/tmp/test",
-            log_file="/tmp/test.log"
+            log_file="/tmp/test.log",
         ),
         NodeInfo(
             node_id="node-2",
@@ -143,7 +154,7 @@ def test_select_chaos_target_primary_only(mock_live_process):
             pid=12347,
             process=mock_live_process,
             data_dir="/tmp/test",
-            log_file="/tmp/test.log"
+            log_file="/tmp/test.log",
         ),
         NodeInfo(
             node_id="node-3",
@@ -154,7 +165,7 @@ def test_select_chaos_target_primary_only(mock_live_process):
             pid=12348,
             process=mock_live_process,
             data_dir="/tmp/test",
-            log_file="/tmp/test.log"
+            log_file="/tmp/test.log",
         ),
         NodeInfo(
             node_id="node-4",
@@ -165,7 +176,7 @@ def test_select_chaos_target_primary_only(mock_live_process):
             pid=12349,
             process=mock_live_process,
             data_dir="/tmp/test",
-            log_file="/tmp/test.log"
+            log_file="/tmp/test.log",
         ),
         NodeInfo(
             node_id="node-5",
@@ -176,15 +187,15 @@ def test_select_chaos_target_primary_only(mock_live_process):
             pid=12350,
             process=mock_live_process,
             data_dir="/tmp/test",
-            log_file="/tmp/test.log"
-        )
+            log_file="/tmp/test.log",
+        ),
     ]
-    
+
     coordinator.chaos_engine.target_selector.update_cluster_topology(cluster_id, nodes)
 
     target_selection = TargetSelection(strategy="primary_only")
     target = coordinator.chaos_engine.target_selector.select_target(cluster_id, target_selection)
-    
+
     assert target is not None
     assert target.node_id in {"node-0", "node-2", "node-4"}
     assert target.role == "primary"
@@ -205,7 +216,7 @@ def test_select_chaos_target_replica_only(mock_live_process):
             pid=12345,
             process=mock_live_process,
             data_dir="/tmp/test",
-            log_file="/tmp/test.log"
+            log_file="/tmp/test.log",
         ),
         NodeInfo(
             node_id="node-1",
@@ -216,15 +227,15 @@ def test_select_chaos_target_replica_only(mock_live_process):
             pid=12346,
             process=mock_live_process,
             data_dir="/tmp/test",
-            log_file="/tmp/test.log"
-        )
+            log_file="/tmp/test.log",
+        ),
     ]
-    
+
     coordinator.chaos_engine.target_selector.update_cluster_topology(cluster_id, nodes)
 
     target_selection = TargetSelection(strategy="replica_only")
     target = coordinator.chaos_engine.target_selector.select_target(cluster_id, target_selection)
-    
+
     assert target is not None
     assert target.node_id == "node-1"
     assert target.role == "replica"
@@ -245,7 +256,7 @@ def test_select_chaos_target_specific(mock_live_process):
             pid=12345,
             process=mock_live_process,
             data_dir="/tmp/test",
-            log_file="/tmp/test.log"
+            log_file="/tmp/test.log",
         ),
         NodeInfo(
             node_id="node-1",
@@ -256,7 +267,7 @@ def test_select_chaos_target_specific(mock_live_process):
             pid=12346,
             process=mock_live_process,
             data_dir="/tmp/test",
-            log_file="/tmp/test.log"
+            log_file="/tmp/test.log",
         ),
         NodeInfo(
             node_id="node-2",
@@ -267,16 +278,16 @@ def test_select_chaos_target_specific(mock_live_process):
             pid=12347,
             process=Mock(),
             data_dir="/tmp/test",
-            log_file="/tmp/test.log"
-        )
+            log_file="/tmp/test.log",
+        ),
     ]
-    
+
     coordinator.chaos_engine.target_selector.update_cluster_topology(cluster_id, nodes)
 
     # Test single specific node
     target_selection = TargetSelection(strategy="specific", specific_nodes=["node-1"])
     target = coordinator.chaos_engine.target_selector.select_target(cluster_id, target_selection)
-    
+
     assert target is not None
     assert target.node_id == "node-1"
 
@@ -305,7 +316,7 @@ def test_select_chaos_target_empty_nodes():
 
     target_selection = TargetSelection(strategy="random")
     target = coordinator.chaos_engine.target_selector.select_target(cluster_id, target_selection)
-    
+
     assert target is None
 
 
@@ -324,22 +335,22 @@ def test_select_chaos_target_no_primary():
             pid=12345,
             process=Mock(),
             data_dir="/tmp/test",
-            log_file="/tmp/test.log"
+            log_file="/tmp/test.log",
         )
     ]
-    
+
     coordinator.chaos_engine.target_selector.update_cluster_topology(cluster_id, nodes)
 
     target_selection = TargetSelection(strategy="primary_only")
     target = coordinator.chaos_engine.target_selector.select_target(cluster_id, target_selection)
-    
+
     assert target is None
 
 
 def test_get_chaos_history():
     """Test getting chaos history"""
     coordinator = ChaosCoordinator()
-    
+
     # Add some chaos results to history
     result1 = ChaosResult(
         chaos_id="chaos-1",
@@ -347,7 +358,7 @@ def test_get_chaos_history():
         target_node="node-0",
         success=True,
         start_time=0.0,
-        end_time=1.0
+        end_time=1.0,
     )
     result2 = ChaosResult(
         chaos_id="chaos-2",
@@ -355,11 +366,11 @@ def test_get_chaos_history():
         target_node="node-1",
         success=True,
         start_time=2.0,
-        end_time=3.0
+        end_time=3.0,
     )
-    
+
     coordinator.chaos_history = [result1, result2]
-    
+
     history = coordinator.get_chaos_history()
     assert len(history) == 2
     assert history[0].chaos_id == "chaos-1"
@@ -369,12 +380,12 @@ def test_get_chaos_history():
 def test_cleanup_chaos():
     """Test cleaning up chaos for a cluster"""
     coordinator = ChaosCoordinator()
-    
+
     # Add active chaos scenario
     coordinator.active_chaos_scenarios["test-cluster"] = []
-    
+
     result = coordinator.cleanup_chaos("test-cluster")
-    
+
     assert result is True
     assert "test-cluster" not in coordinator.active_chaos_scenarios
 
@@ -382,58 +393,53 @@ def test_cleanup_chaos():
 def test_get_active_chaos_count():
     """Test getting active chaos count"""
     coordinator = ChaosCoordinator()
-    
+
     # Initially should be 0
     assert coordinator.get_active_chaos_count() == 0
-    
+
     # Add some active chaos
     coordinator.chaos_engine.active_chaos["chaos-1"] = Mock()
     coordinator.chaos_engine.active_chaos["chaos-2"] = Mock()
-    
+
     assert coordinator.get_active_chaos_count() == 2
 
 
 def test_stop_all_chaos():
     """Test stopping all active chaos"""
     coordinator = ChaosCoordinator()
-    
+
     # Add some active chaos
     coordinator.chaos_engine.active_chaos["chaos-1"] = Mock()
     coordinator.chaos_engine.active_chaos["chaos-2"] = Mock()
-    
+
     coordinator.stop_all_chaos()
-    
+
     assert len(coordinator.chaos_engine.active_chaos) == 0
 
 
-@patch('src.fuzzer_engine.chaos_coordinator.time.sleep')
+@patch("src.fuzzer_engine.chaos_coordinator.time.sleep")
 def test_coordinate_chaos_with_operation_no_target(mock_sleep):
     """Test coordinating chaos when no suitable target found"""
     coordinator = ChaosCoordinator()
-    
-    operation = Operation(
-        type=OperationType.FAILOVER,
-        target_node="node-0",
-        parameters={},
-        timing=OperationTiming()
-    )
-    
+
+    operation = Operation(type=OperationType.FAILOVER, target_node="node-0", parameters={}, timing=OperationTiming())
+
     chaos_config = ChaosConfig(
         chaos_type=ChaosType.PROCESS_KILL,
         target_selection=TargetSelection(strategy="primary_only"),
         timing=ChaosTiming(),
         coordination=ChaosCoordination(chaos_during_operation=True),
-        process_chaos_type=ProcessChaosType.SIGKILL
+        process_chaos_type=ProcessChaosType.SIGKILL,
     )
-    
+
     # Mock cluster connection that returns empty node list
     mock_connection = MagicMock()
     mock_connection.get_live_nodes.return_value = []
     mock_connection.initial_nodes = []
-    
+
     # Empty node list - no target will be found
     results = coordinator.coordinate_chaos_with_operation(operation, chaos_config, mock_connection, "test_cluster")
-    
+
     assert len(results) == 1
     assert results[0].success is False
     assert results[0].chaos_type == ChaosType.PROCESS_KILL
@@ -442,24 +448,19 @@ def test_coordinate_chaos_with_operation_no_target(mock_sleep):
     assert coordinator.chaos_history == results
 
 
-@patch('src.fuzzer_engine.chaos_coordinator.time.sleep')
+@patch("src.fuzzer_engine.chaos_coordinator.time.sleep")
 def test_coordinate_chaos_with_operation_returns_failure_result_on_exception(mock_sleep):
     """Test that unexpected coordination exceptions become explicit failed chaos results"""
     coordinator = ChaosCoordinator()
 
-    operation = Operation(
-        type=OperationType.FAILOVER,
-        target_node="node-0",
-        parameters={},
-        timing=OperationTiming()
-    )
+    operation = Operation(type=OperationType.FAILOVER, target_node="node-0", parameters={}, timing=OperationTiming())
 
     chaos_config = ChaosConfig(
         chaos_type=ChaosType.PROCESS_KILL,
         target_selection=TargetSelection(strategy="random"),
         timing=ChaosTiming(),
         coordination=ChaosCoordination(chaos_during_operation=True),
-        process_chaos_type=ProcessChaosType.SIGKILL
+        process_chaos_type=ProcessChaosType.SIGKILL,
     )
 
     mock_connection = MagicMock()
@@ -467,16 +468,9 @@ def test_coordinate_chaos_with_operation_returns_failure_result_on_exception(moc
     mock_connection.initial_nodes = []
 
     with patch.object(
-        coordinator.chaos_engine.target_selector,
-        'select_target',
-        side_effect=RuntimeError("selector exploded")
+        coordinator.chaos_engine.target_selector, "select_target", side_effect=RuntimeError("selector exploded")
     ):
-        results = coordinator.coordinate_chaos_with_operation(
-            operation,
-            chaos_config,
-            mock_connection,
-            "test_cluster"
-        )
+        results = coordinator.coordinate_chaos_with_operation(operation, chaos_config, mock_connection, "test_cluster")
 
     assert len(results) == 1
     assert results[0].success is False
@@ -485,50 +479,47 @@ def test_coordinate_chaos_with_operation_returns_failure_result_on_exception(moc
     assert coordinator.chaos_history == results
 
 
-@patch('src.fuzzer_engine.chaos_coordinator.time.sleep')
+@patch("src.fuzzer_engine.chaos_coordinator.time.sleep")
 def test_coordinate_chaos_with_operation_preserves_failure_for_non_safety_target_miss(mock_sleep):
     """Missing primaries/replicas should still report a failed chaos result."""
     coordinator = ChaosCoordinator()
 
-    operation = Operation(
-        type=OperationType.FAILOVER,
-        target_node="node-0",
-        parameters={},
-        timing=OperationTiming()
-    )
+    operation = Operation(type=OperationType.FAILOVER, target_node="node-0", parameters={}, timing=OperationTiming())
 
     chaos_config = ChaosConfig(
         chaos_type=ChaosType.PROCESS_KILL,
         target_selection=TargetSelection(strategy="primary_only"),
         timing=ChaosTiming(),
         coordination=ChaosCoordination(chaos_during_operation=True),
-        process_chaos_type=ProcessChaosType.SIGKILL
+        process_chaos_type=ProcessChaosType.SIGKILL,
     )
 
     mock_connection = MagicMock()
     mock_connection.get_live_nodes.return_value = [
         {
-            'node_id': 'replica-1',
-            'host': '127.0.0.1',
-            'port': 7001,
-            'role': 'replica',
-            'shard_id': 0,
-            'status': 'connected',
+            "node_id": "replica-1",
+            "host": "127.0.0.1",
+            "port": 7001,
+            "role": "replica",
+            "shard_id": 0,
+            "status": "connected",
         }
     ]
     mock_connection.initial_nodes = [
         NodeInfo(
-            node_id="replica-1", role="replica", shard_id=0, port=7001, bus_port=17001,
-            pid=1001, process=Mock(), data_dir="/tmp/replica-1", log_file="/tmp/replica-1.log"
+            node_id="replica-1",
+            role="replica",
+            shard_id=0,
+            port=7001,
+            bus_port=17001,
+            pid=1001,
+            process=Mock(),
+            data_dir="/tmp/replica-1",
+            log_file="/tmp/replica-1.log",
         )
     ]
 
-    results = coordinator.coordinate_chaos_with_operation(
-        operation,
-        chaos_config,
-        mock_connection,
-        "test_cluster"
-    )
+    results = coordinator.coordinate_chaos_with_operation(operation, chaos_config, mock_connection, "test_cluster")
 
     assert len(results) == 1
     assert results[0].success is False

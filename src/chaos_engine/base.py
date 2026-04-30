@@ -1,92 +1,94 @@
 """Base classes for Chaos Engine components"""
+
+import logging
 import os
+import random
 import signal
+import threading
 import time
 import uuid
-import random
-import logging
-import threading
 from abc import ABC
-from typing import Dict, List, Optional
-from ..interfaces import IChaosEngine
-from ..models import NodeInfo, ChaosResult, ChaosType, ProcessChaosType, Operation, TargetSelection
+from typing import Optional
 
+from ..interfaces import IChaosEngine
+from ..models import ChaosResult, ChaosType, NodeInfo, Operation, ProcessChaosType, TargetSelection
 
 logger = logging.getLogger()
 
+
 class BaseChaosEngine(IChaosEngine, ABC):
     """Base implementation for chaos injection with common functionality"""
-    
+
     def __init__(self):
-        self.active_chaos: Dict[str, ChaosResult] = {}
-        self.chaos_history: List[ChaosResult] = []
-        self.node_processes: Dict[str, int] = {}  # node_id -> process_id mapping
-    
+        self.active_chaos: dict[str, ChaosResult] = {}
+        self.chaos_history: list[ChaosResult] = []
+        self.node_processes: dict[str, int] = {}  # node_id -> process_id mapping
+
     def inject_process_chaos(self, target_node: NodeInfo, chaos_type: ProcessChaosType, log_buffer=None) -> ChaosResult:
         """Inject process-level chaos on target node"""
         log = log_buffer if log_buffer else logger
         chaos_id = str(uuid.uuid4())
         start_time = time.time()
-        
+
         chaos_result = ChaosResult(
             chaos_id=chaos_id,
             chaos_type=ChaosType.PROCESS_KILL,
             target_node=target_node.node_id,
             success=False,
-            start_time=start_time
+            start_time=start_time,
         )
-        
+
         try:
             # Validate target node
             if not self._validate_chaos_target(target_node, log_buffer):
                 chaos_result.error_message = f"Invalid chaos target: {target_node.node_id}"
                 self.chaos_history.append(chaos_result)
                 return chaos_result
-            
+
             # Get process ID for the target node
             process_id = self._get_node_process_id(target_node)
             if not process_id:
                 chaos_result.error_message = f"Could not find process for {target_node.node_id}"
                 self.chaos_history.append(chaos_result)
                 return chaos_result
-            
+
             # Execute process chaos
             success = self._execute_process_kill(process_id, chaos_type, log_buffer)
-            
+
             chaos_result.success = success
             chaos_result.end_time = time.time()
-            
+
             if success:
                 log.info(f"Successfully injected {chaos_type.value} chaos on {target_node.node_id} (PID: {process_id})")
                 self.active_chaos[chaos_id] = chaos_result
             else:
                 chaos_result.error_message = f"Failed to kill process {process_id} with {chaos_type.value}"
                 log.error(chaos_result.error_message)
-            
+
         except Exception as e:
-            chaos_result.error_message = f"Exception during chaos injection: {str(e)}"
+            chaos_result.error_message = f"Exception during chaos injection: {e!s}"
             chaos_result.end_time = time.time()
             log.error(f"Chaos injection failed: {e}")
-        
+
         self.chaos_history.append(chaos_result)
         return chaos_result
-    
+
     def stop_chaos(self, chaos_id: str) -> bool:
         """Stop active chaos injection"""
         if chaos_id not in self.active_chaos:
             logger.warning(f"Chaos {chaos_id} not found in active chaos")
             return False
-        
+
         chaos_result = self.active_chaos[chaos_id]
         chaos_result.end_time = time.time()
-        
+
         # For process chaos, there's nothing to actively stop since the process is already killed
         # Future chaos types (like network chaos) might need active cleanup
-        
+
         del self.active_chaos[chaos_id]
         logger.debug(f"Stopped chaos with chaos ID: {chaos_id}")
         return True
-    
+
     def cleanup_chaos(self, cluster_id: str) -> bool:
         """Clean up any remaining chaos effects"""
         try:
@@ -94,38 +96,38 @@ class BaseChaosEngine(IChaosEngine, ABC):
             active_chaos_ids = list(self.active_chaos.keys())
             for chaos_id in active_chaos_ids:
                 self.stop_chaos(chaos_id)
-            
+
             # Clear process tracking for this cluster
             self.node_processes.clear()
-            
+
             logger.info(f"Cleaned up chaos effects for cluster {cluster_id}")
             return True
         except Exception as e:
             logger.error(f"Failed to cleanup chaos for cluster {cluster_id}: {e}")
             return False
-    
+
     def _validate_chaos_target(self, target_node: NodeInfo, log_buffer=None) -> bool:
         """Validate that chaos can be injected on target node"""
         log = log_buffer if log_buffer else logger
-        
+
         if not target_node:
             return False
-        
+
         # Check if node has a valid process ID
         if target_node.node_id not in self.node_processes:
             log.warning(f"No process ID found for node {target_node.node_id}")
             return False
-        
+
         return True
-    
+
     def _get_node_process_id(self, target_node: NodeInfo) -> Optional[int]:
         """Get the process ID for a target node"""
         return self.node_processes.get(target_node.node_id)
-    
+
     def _execute_process_kill(self, process_id: int, chaos_type: ProcessChaosType, log_buffer=None) -> bool:
         """Execute process termination"""
         log = log_buffer if log_buffer else logger
-        
+
         try:
             if chaos_type == ProcessChaosType.SIGKILL:
                 os.kill(process_id, signal.SIGKILL)
@@ -134,7 +136,7 @@ class BaseChaosEngine(IChaosEngine, ABC):
             else:
                 log.error(f"Unsupported process chaos type: {chaos_type}")
                 return False
-            
+
             return True
         except ProcessLookupError:
             log.debug(f"Process {process_id} already dead (chaos goal achieved)")
@@ -145,27 +147,27 @@ class BaseChaosEngine(IChaosEngine, ABC):
         except Exception as e:
             log.error(f"Failed to kill process {process_id}: {e}")
             return False
-    
+
     def _select_chaos_target(self, operation: Operation, target_selection: TargetSelection) -> Optional[NodeInfo]:
         """Select target node for chaos injection based on cluster topology"""
         # This is a placeholder implementation
         # In a real implementation, this would query the cluster orchestrator
         # for current cluster topology and select appropriate targets
-        
+
         if target_selection.strategy == "specific" and target_selection.specific_nodes:
             # For specific node selection, we'd need cluster state
             # This is a simplified implementation
             return None
-        
+
         # For now, return None to indicate no target selected
         # This will be properly implemented when cluster orchestrator is available
         return None
-    
+
     def register_node_process(self, node_id: str, process_id: int) -> None:
         """Register a process ID for a node (for testing purposes)"""
         self.node_processes[node_id] = process_id
         logger.debug(f"Registered process {process_id} for node {node_id}")
-    
+
     def unregister_node_process(self, node_id: str) -> None:
         """Unregister a process ID for a node"""
         if node_id in self.node_processes:
@@ -175,11 +177,11 @@ class BaseChaosEngine(IChaosEngine, ABC):
 
 class ProcessChaosEngine(BaseChaosEngine):
     """Concrete implementation of process chaos injection"""
-    
+
     def __init__(self, rng: Optional[random.Random] = None):
         super().__init__()
         self.target_selector = ChaosTargetSelector(rng)
-    
+
     def _select_chaos_target(self, cluster_id: str, target_selection: TargetSelection) -> Optional[NodeInfo]:
         """Select target node for chaos injection based on cluster topology"""
         return self.target_selector.select_target(cluster_id, target_selection)
@@ -194,17 +196,17 @@ class ChaosTargetSelector:
     actual kill later fails, the caller must invoke ``unrecord_kill`` to
     release the reservation.
     """
-    
+
     def __init__(self, rng: Optional[random.Random] = None):
-        self.cluster_nodes: Dict[str, List[NodeInfo]] = {}
+        self.cluster_nodes: dict[str, list[NodeInfo]] = {}
         self.rng = rng if rng is not None else random.Random()
         self._lock = threading.Lock()
         # Track killed (or reserved-to-kill) node_ids per cluster
-        self._killed_node_ids: Dict[str, set] = {}
+        self._killed_node_ids: dict[str, set] = {}
         # Initial full topology per cluster for shard membership lookup
-        self._initial_topology: Dict[str, List[NodeInfo]] = {}
+        self._initial_topology: dict[str, list[NodeInfo]] = {}
 
-    def reset_cluster_topology(self, cluster_id: str, nodes: List[NodeInfo]) -> None:
+    def reset_cluster_topology(self, cluster_id: str, nodes: list[NodeInfo]) -> None:
         """Replace all selector state for a cluster with a fresh topology snapshot."""
         with self._lock:
             self.cluster_nodes[cluster_id] = list(nodes)
@@ -219,8 +221,8 @@ class ChaosTargetSelector:
             self._initial_topology.pop(cluster_id, None)
             self._killed_node_ids.pop(cluster_id, None)
         logger.debug(f"Cleared selector state for cluster {cluster_id}")
-    
-    def update_cluster_topology(self, cluster_id: str, nodes: List[NodeInfo]) -> None:
+
+    def update_cluster_topology(self, cluster_id: str, nodes: list[NodeInfo]) -> None:
         """Update cluster topology information.
 
         Does NOT reconcile ``_killed_node_ids`` against the live topology
@@ -257,7 +259,7 @@ class ChaosTargetSelector:
             if killed:
                 killed.discard(node_id)
 
-    def _get_shard_safe_candidates(self, candidates: List[NodeInfo], cluster_id: str, log=None) -> List[NodeInfo]:
+    def _get_shard_safe_candidates(self, candidates: list[NodeInfo], cluster_id: str, log=None) -> list[NodeInfo]:
         """Filter candidates to avoid killing the last surviving member of any shard.
 
         Also excludes nodes already reserved/killed (they may still appear in
@@ -270,12 +272,10 @@ class ChaosTargetSelector:
             return candidates  # No topology info — can't filter
 
         killed = self._killed_node_ids.get(cluster_id, set())
-        live_node_ids = {
-            node.node_id for node in self.cluster_nodes.get(cluster_id, [])
-        }
+        live_node_ids = {node.node_id for node in self.cluster_nodes.get(cluster_id, [])}
 
         # Build shard -> set of initial node_ids
-        shard_members: Dict[int, set] = {}
+        shard_members: dict[int, set] = {}
         for node in initial_nodes:
             shard_members.setdefault(node.shard_id, set()).add(node.node_id)
 
@@ -298,7 +298,7 @@ class ChaosTargetSelector:
 
         return safe
 
-    def _get_quorum_safe_candidates(self, candidates: List[NodeInfo], cluster_id: str, log=None) -> List[NodeInfo]:
+    def _get_quorum_safe_candidates(self, candidates: list[NodeInfo], cluster_id: str, log=None) -> list[NodeInfo]:
         """Filter candidates to avoid killing primaries that would break cluster quorum.
 
         The required quorum is based on the original shard count, because dead
@@ -317,15 +317,11 @@ class ChaosTargetSelector:
 
         quorum = (total_primaries // 2) + 1
         killed = self._killed_node_ids.get(cluster_id, set())
-        live_primaries = {
-            node.node_id
-            for node in self.cluster_nodes.get(cluster_id, [])
-            if node.role == 'primary'
-        }
+        live_primaries = {node.node_id for node in self.cluster_nodes.get(cluster_id, []) if node.role == "primary"}
 
         safe = []
         for candidate in candidates:
-            if candidate.role != 'primary':
+            if candidate.role != "primary":
                 safe.append(candidate)
                 continue
 
@@ -341,7 +337,7 @@ class ChaosTargetSelector:
 
         return safe
 
-    def _get_safe_candidates(self, candidates: List[NodeInfo], cluster_id: str, log=None) -> List[NodeInfo]:
+    def _get_safe_candidates(self, candidates: list[NodeInfo], cluster_id: str, log=None) -> list[NodeInfo]:
         """Apply shard and quorum safety checks to a candidate list.
 
         Caller must hold ``_lock``.
@@ -374,17 +370,17 @@ class ChaosTargetSelector:
 
     def _get_strategy_candidates(
         self,
-        nodes: List[NodeInfo],
+        nodes: list[NodeInfo],
         target_selection: TargetSelection,
-    ) -> List[NodeInfo]:
+    ) -> list[NodeInfo]:
         """Return the nodes eligible for a selection strategy before safety filters."""
         strategy = target_selection.strategy
         if strategy == "random":
             return nodes
         if strategy == "primary_only":
-            return [node for node in nodes if node.role == 'primary']
+            return [node for node in nodes if node.role == "primary"]
         if strategy == "replica_only":
-            return [node for node in nodes if node.role == 'replica']
+            return [node for node in nodes if node.role == "replica"]
         return []
 
     def select_target(self, cluster_id: str, target_selection: TargetSelection, log_buffer=None) -> Optional[NodeInfo]:
@@ -400,15 +396,15 @@ class ChaosTargetSelector:
             if cluster_id not in self.cluster_nodes:
                 log.warning(f"No topology information for cluster {cluster_id}")
                 return None
-            
+
             nodes = self.cluster_nodes[cluster_id]
             if not nodes:
                 log.warning(f"No nodes available in cluster {cluster_id}")
                 return None
-            
+
             # Sort nodes by node_id for deterministic ordering
             nodes = sorted(nodes, key=lambda n: n.node_id)
-            
+
             selected = self._select_by_strategy(nodes, cluster_id, target_selection, log)
 
             # Eagerly reserve the selected node so concurrent threads see it
@@ -417,8 +413,9 @@ class ChaosTargetSelector:
 
         return selected
 
-    def _select_by_strategy(self, nodes: List[NodeInfo], cluster_id: str,
-                            target_selection: TargetSelection, log) -> Optional[NodeInfo]:
+    def _select_by_strategy(
+        self, nodes: list[NodeInfo], cluster_id: str, target_selection: TargetSelection, log
+    ) -> Optional[NodeInfo]:
         """Pick a node according to the strategy.  Caller must hold ``_lock``."""
         strategy = target_selection.strategy
 

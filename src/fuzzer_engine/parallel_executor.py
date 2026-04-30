@@ -1,11 +1,12 @@
 """
 Parallel Executor - Executes multiple operations concurrently with buffered logging
 """
+
 import logging
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Optional
 
 from ..models import ChaosConfig, ChaosResult, Operation
 from .operation_log_buffer import OperationLogBuffer
@@ -23,15 +24,15 @@ class ParallelExecutor:
 
     def execute_operations_parallel(
         self,
-        operations: List[Operation],
+        operations: list[Operation],
         chaos_config: ChaosConfig,
         cluster_connection,
         cluster_id: str,
         validation_runner: Optional[
-            Callable[[int, List[Tuple[int, int, List[ChaosResult], OperationLogBuffer]]], object]
+            Callable[[int, list[tuple[int, int, list[ChaosResult], OperationLogBuffer]]], object]
         ] = None,
         halt_on_validation_failure: bool = False,
-    ) -> Tuple[int, List[ChaosResult], List]:
+    ) -> tuple[int, list[ChaosResult], list]:
         """Execute operations in parallel by shard, validating after each shard wave."""
         logger.info(f"Starting parallel execution of {len(operations)} operations")
 
@@ -40,7 +41,9 @@ class ParallelExecutor:
 
         shard_groups = defaultdict(list)
         for op_index, operation in enumerate(operations):
-            shard_id = operation.target_node.rsplit("-", 1)[0] if "-" in operation.target_node else operation.target_node
+            shard_id = (
+                operation.target_node.rsplit("-", 1)[0] if "-" in operation.target_node else operation.target_node
+            )
             shard_groups[shard_id].append((op_index, operation))
 
         logger.info(f"Grouped {len(operations)} operations into {len(shard_groups)} shard groups")
@@ -71,23 +74,16 @@ class ParallelExecutor:
                 )
 
                 immediate_chaos = [
-                    chaos for chaos in chaos_results
-                    if not isinstance(chaos, dict) or not chaos.get("deferred")
+                    chaos for chaos in chaos_results if not isinstance(chaos, dict) or not chaos.get("deferred")
                 ]
                 successful_chaos_targets = {
-                    chaos.target_node
-                    for chaos in immediate_chaos
-                    if isinstance(chaos, ChaosResult) and chaos.success
+                    chaos.target_node for chaos in immediate_chaos if isinstance(chaos, ChaosResult) and chaos.success
                 }
-                deferred_chaos = [
-                    chaos for chaos in chaos_results
-                    if isinstance(chaos, dict) and chaos.get("deferred")
-                ]
+                deferred_chaos = [chaos for chaos in chaos_results if isinstance(chaos, dict) and chaos.get("deferred")]
                 pending_deferred_chaos = list(deferred_chaos)
 
                 success = self.operation_orchestrator.execute_operation(
-                    operation, log_buffer=buffer,
-                    chaos_events=immediate_chaos
+                    operation, log_buffer=buffer, chaos_events=immediate_chaos
                 )
 
                 for deferred in deferred_chaos:
@@ -157,8 +153,7 @@ class ParallelExecutor:
 
             logger.info("")
             logger.info(
-                f"Starting operation wave {wave_index + 1}/{total_waves} "
-                f"with {len(wave_operations)} operation(s)"
+                f"Starting operation wave {wave_index + 1}/{total_waves} with {len(wave_operations)} operation(s)"
             )
 
             wave_results = []
@@ -191,9 +186,7 @@ class ParallelExecutor:
                     if not validation_result.overall_success and (
                         halt_on_validation_failure or validation_result.is_critical_failure()
                     ):
-                        logger.error(
-                            f"Stopping execution after validation failure in wave {wave_index + 1}"
-                        )
+                        logger.error(f"Stopping execution after validation failure in wave {wave_index + 1}")
                         break
 
         logger.info(f"Parallel execution complete: {operations_executed}/{len(operations)} succeeded")

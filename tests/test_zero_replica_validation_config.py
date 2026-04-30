@@ -1,8 +1,8 @@
 """
 Simple unit tests for zero-replica cluster validation configuration
 """
-import pytest
-from src.models import StateValidationConfig, ClusterConfig
+
+from src.models import ClusterConfig, StateValidationConfig
 
 
 def test_default_replication_config_has_min_replicas():
@@ -20,10 +20,10 @@ def test_zero_replica_cluster_config():
 def test_validation_config_can_be_adjusted_for_zero_replicas():
     """Test that validation config can be adjusted for zero-replica clusters"""
     config = StateValidationConfig()
-    
+
     # Initially has min_replicas_per_shard = 1
     assert config.replication_config.min_replicas_per_shard == 1
-    
+
     # Can be adjusted to 0 for zero-replica clusters
     config.replication_config.min_replicas_per_shard = 0
     assert config.replication_config.min_replicas_per_shard == 0
@@ -37,39 +37,39 @@ def test_validation_config_adjustment_logic():
     # Scenario 1: Zero-replica cluster
     cluster_config = ClusterConfig(num_shards=3, replicas_per_shard=0)
     validation_config = StateValidationConfig()
-    
+
     # Apply the adjustment logic
     expected_replicas_per_shard = cluster_config.replicas_per_shard
     if expected_replicas_per_shard == 0:
         validation_config.replication_config.min_replicas_per_shard = 0
     elif validation_config.replication_config.min_replicas_per_shard > expected_replicas_per_shard:
         validation_config.replication_config.min_replicas_per_shard = expected_replicas_per_shard
-    
+
     # Should be adjusted to 0
     assert validation_config.replication_config.min_replicas_per_shard == 0
-    
+
     # Scenario 2: Single-replica cluster
     cluster_config = ClusterConfig(num_shards=2, replicas_per_shard=1)
     validation_config = StateValidationConfig()
-    
+
     expected_replicas_per_shard = cluster_config.replicas_per_shard
     if expected_replicas_per_shard == 0:
         validation_config.replication_config.min_replicas_per_shard = 0
     elif validation_config.replication_config.min_replicas_per_shard > expected_replicas_per_shard:
         validation_config.replication_config.min_replicas_per_shard = expected_replicas_per_shard
-    
+
     # Should remain 1
     assert validation_config.replication_config.min_replicas_per_shard == 1
-    
+
     # Scenario 3: Multi-replica cluster (more than default)
     cluster_config = ClusterConfig(num_shards=2, replicas_per_shard=3)
     validation_config = StateValidationConfig()
-    
+
     expected_replicas_per_shard = cluster_config.replicas_per_shard
     if expected_replicas_per_shard == 0:
         validation_config.replication_config.min_replicas_per_shard = 0
     elif validation_config.replication_config.min_replicas_per_shard > expected_replicas_per_shard:
         validation_config.replication_config.min_replicas_per_shard = expected_replicas_per_shard
-    
+
     # Should remain 1 (not adjusted up, only down)
     assert validation_config.replication_config.min_replicas_per_shard == 1
