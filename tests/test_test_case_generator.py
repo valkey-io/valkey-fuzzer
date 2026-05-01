@@ -1,22 +1,21 @@
 """
 Tests for Scenario Generator
 """
+
 import pytest
-import yaml
+
 from src.fuzzer_engine.test_case_generator import ScenarioGenerator
-from src.models import (
-    Scenario, OperationType, ChaosType, ProcessChaosType
-)
+from src.models import ChaosType, OperationType, ProcessChaosType
 
 
 def test_generate_random_scenario_with_seed():
     """Test generating random scenario with seed produces consistent results"""
     generator = ScenarioGenerator()
-    
+
     # Generate two scenarios with same seed
     scenario1 = generator.generate_random_scenario(seed=12345)
     scenario2 = generator.generate_random_scenario(seed=12345)
-    
+
     # Should have same configuration
     assert scenario1.cluster_config.num_shards == scenario2.cluster_config.num_shards
     assert scenario1.cluster_config.replicas_per_shard == scenario2.cluster_config.replicas_per_shard
@@ -27,9 +26,9 @@ def test_generate_random_scenario_with_seed():
 def test_generate_random_scenario_without_seed():
     """Test generating random scenario without seed"""
     generator = ScenarioGenerator()
-    
+
     scenario = generator.generate_random_scenario()
-    
+
     # Should have valid configuration
     assert 3 <= scenario.cluster_config.num_shards <= 16
     # Ensure at least 1 replica for failover operations
@@ -41,7 +40,7 @@ def test_generate_random_scenario_without_seed():
 def test_random_cluster_config_ranges():
     """Test random cluster configuration stays within valid ranges"""
     generator = ScenarioGenerator(random_seed=42)
-    
+
     for _ in range(10):
         scenario = generator.generate_random_scenario()
         assert 3 <= scenario.cluster_config.num_shards <= 16
@@ -53,7 +52,7 @@ def test_random_operations_are_failover():
     """Test random operations are failover type"""
     generator = ScenarioGenerator(random_seed=42)
     scenario = generator.generate_random_scenario()
-    
+
     for operation in scenario.operations:
         assert operation.type == OperationType.FAILOVER
         assert operation.target_node is not None
@@ -64,7 +63,7 @@ def test_random_chaos_config():
     """Test random chaos configuration is valid"""
     generator = ScenarioGenerator(random_seed=42)
     scenario = generator.generate_random_scenario()
-    
+
     assert scenario.chaos_config.chaos_type == ChaosType.PROCESS_KILL
     assert scenario.chaos_config.process_chaos_type in [ProcessChaosType.SIGKILL, ProcessChaosType.SIGTERM]
     assert scenario.chaos_config.target_selection.strategy in ["random", "primary_only", "replica_only"]
@@ -102,10 +101,10 @@ state_validation:
   check_slot_coverage: true
   validation_timeout: 60.0
 """
-    
+
     generator = ScenarioGenerator()
     scenario = generator.parse_dsl_config(dsl_text)
-    
+
     assert scenario.scenario_id == "test-scenario-001"
     assert scenario.seed == 12345
     assert scenario.cluster_config.num_shards == 3
@@ -126,10 +125,10 @@ operations:
   - type: failover
     target_node: shard-0-primary
 """
-    
+
     generator = ScenarioGenerator()
     scenario = generator.parse_dsl_config(dsl_text)
-    
+
     assert scenario.scenario_id == "minimal-test"
     assert scenario.cluster_config.num_shards == 3
     assert len(scenario.operations) == 1
@@ -143,7 +142,7 @@ cluster:
   num_shards: 3
   invalid yaml here
 """
-    
+
     generator = ScenarioGenerator()
     with pytest.raises(ValueError, match="Invalid YAML syntax"):
         generator.parse_dsl_config(dsl_text)
@@ -156,7 +155,7 @@ scenario_id: test
 cluster:
   num_shards: 3
 """
-    
+
     generator = ScenarioGenerator()
     with pytest.raises(ValueError, match="Missing required field: operations"):
         generator.parse_dsl_config(dsl_text)
@@ -173,7 +172,7 @@ operations:
   - type: failover
     target_node: shard-0-primary
 """
-    
+
     generator = ScenarioGenerator()
     with pytest.raises(ValueError, match="num_shards must be between 3 and 16"):
         generator.parse_dsl_config(dsl_text)
@@ -183,7 +182,7 @@ def test_validate_scenario_valid():
     """Test validating valid scenario"""
     generator = ScenarioGenerator(random_seed=42)
     scenario = generator.generate_random_scenario()
-    
+
     assert generator.validate_scenario(scenario) is True
 
 
@@ -192,7 +191,7 @@ def test_validate_scenario_invalid_shards():
     generator = ScenarioGenerator()
     scenario = generator.generate_random_scenario(seed=42)
     scenario.cluster_config.num_shards = 20
-    
+
     with pytest.raises(ValueError, match="Invalid num_shards"):
         generator.validate_scenario(scenario)
 
@@ -202,7 +201,7 @@ def test_validate_scenario_no_operations():
     generator = ScenarioGenerator()
     scenario = generator.generate_random_scenario(seed=42)
     scenario.operations = []
-    
+
     with pytest.raises(ValueError, match="at least one operation"):
         generator.validate_scenario(scenario)
 
@@ -211,11 +210,11 @@ def test_validate_scenario_process_chaos_type_none_without_randomization():
     """Test that None process_chaos_type is rejected when randomization is disabled"""
     generator = ScenarioGenerator()
     scenario = generator.generate_random_scenario(seed=42)
-    
+
     # Set process_chaos_type to None without enabling randomization
     scenario.chaos_config.process_chaos_type = None
     scenario.chaos_config.randomize_per_operation = False
-    
+
     with pytest.raises(ValueError, match="process_chaos_type required"):
         generator.validate_scenario(scenario)
 
@@ -224,11 +223,11 @@ def test_validate_scenario_process_chaos_type_none_with_randomization():
     """Test that None process_chaos_type is allowed when randomization is enabled"""
     generator = ScenarioGenerator()
     scenario = generator.generate_random_scenario(seed=42)
-    
+
     # Set process_chaos_type to None WITH randomization enabled
     scenario.chaos_config.process_chaos_type = None
     scenario.chaos_config.randomize_per_operation = True
-    
+
     # Should not raise - randomization will handle it at runtime
     assert generator.validate_scenario(scenario) is True
 
@@ -252,10 +251,10 @@ chaos:
   coordination:
     chaos_during_operation: true
 """
-    
+
     generator = ScenarioGenerator()
     scenario = generator.parse_dsl_config(dsl_text)
-    
+
     # Should parse successfully with None process_chaos_type
     assert scenario.chaos_config.process_chaos_type is None
     assert scenario.chaos_config.randomize_per_operation is True
@@ -279,10 +278,10 @@ chaos:
   coordination:
     chaos_during_operation: true
 """
-    
+
     generator = ScenarioGenerator()
     scenario = generator.parse_dsl_config(dsl_text)
-    
+
     # Should default to SIGKILL when omitted
     assert scenario.chaos_config.process_chaos_type == ProcessChaosType.SIGKILL
     assert scenario.chaos_config.chaos_type == ChaosType.PROCESS_KILL
@@ -291,22 +290,22 @@ chaos:
 def test_dsl_roundtrip_with_none_process_chaos_type(tmp_path):
     """Test that scenarios with None process_chaos_type can round-trip through DSL"""
     from src.fuzzer_engine.dsl_utils import DSLLoader
-    
+
     generator = ScenarioGenerator()
-    
+
     # Create a scenario with None process_chaos_type and randomization enabled
     scenario = generator.generate_random_scenario(seed=42)
     scenario.chaos_config.process_chaos_type = None
     scenario.chaos_config.randomize_per_operation = True
-    
+
     # Save to DSL file
     dsl_file = tmp_path / "test_scenario.yaml"
     DSLLoader.save_scenario_as_dsl(scenario, dsl_file)
-    
+
     # Load back from DSL file
     dsl_config = DSLLoader.load_from_file(dsl_file)
     loaded_scenario = generator.parse_dsl_config(dsl_config.config_text)
-    
+
     # Verify the loaded scenario has None process_chaos_type
     assert loaded_scenario.chaos_config.process_chaos_type is None
     assert loaded_scenario.chaos_config.randomize_per_operation is True
@@ -328,10 +327,10 @@ state_validation:
   stabilization_wait: 0
   validation_timeout: 30.0
 """
-    
+
     generator = ScenarioGenerator()
     scenario = generator.parse_dsl_config(dsl_text)
-    
+
     # Should parse successfully with 0 stabilization_wait
     assert scenario.state_validation_config.stabilization_wait == 0
     assert scenario.state_validation_config.validation_timeout == 30.0
@@ -351,11 +350,11 @@ state_validation:
   stabilization_wait: -1.0
   validation_timeout: 30.0
 """
-    
+
     generator = ScenarioGenerator()
-    
+
     # Should raise validation error for negative value
-    with pytest.raises(ValueError, match="stabilization_wait.*non-negative"):
+    with pytest.raises(ValueError, match=r"stabilization_wait.*non-negative"):
         generator.parse_dsl_config(dsl_text)
 
 
@@ -373,11 +372,11 @@ state_validation:
   stabilization_wait: 5.0
   validation_timeout: 0
 """
-    
+
     generator = ScenarioGenerator()
-    
+
     # Should raise validation error for zero timeout
-    with pytest.raises(ValueError, match="validation_timeout.*positive"):
+    with pytest.raises(ValueError, match=r"validation_timeout.*positive"):
         generator.parse_dsl_config(dsl_text)
 
 

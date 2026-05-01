@@ -4,6 +4,7 @@ Unit tests for ChaosTargetSelector safety logic.
 Covers: shard protection, primary quorum protection, thread-safety (TOCTOU race),
 cluster scoping, topology reconciliation on restart, and unrecord_kill on failed kills.
 """
+
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock
@@ -31,6 +32,7 @@ CLUSTER = "test-cluster"
 
 
 # ── Basic shard protection ─────────────────────────────────────────────
+
 
 def test_blocks_last_member_of_shard():
     """Selecting the last surviving member of a shard must be prevented."""
@@ -198,6 +200,7 @@ def test_primary_quorum_uses_total_shard_count_not_live_primary_count():
 
 # ── Thread-safety: concurrent selection ────────────────────────────────
 
+
 def test_concurrent_threads_cannot_kill_entire_shard():
     """Two threads selecting simultaneously must not both pick from the
     same shard when it would leave zero survivors.
@@ -247,12 +250,11 @@ def test_concurrent_threads_cannot_kill_entire_shard():
             shard_selections.setdefault(r.shard_id, []).append(r.node_id)
 
         for shard_id, selected_nodes in shard_selections.items():
-            assert len(selected_nodes) <= 1, (
-                f"Shard {shard_id} had both members selected: {selected_nodes}"
-            )
+            assert len(selected_nodes) <= 1, f"Shard {shard_id} had both members selected: {selected_nodes}"
 
 
 # ── Cluster scoping ───────────────────────────────────────────────────
+
 
 def test_kills_scoped_per_cluster():
     """Kills in cluster A must not affect target selection in cluster B."""
@@ -275,6 +277,7 @@ def test_kills_scoped_per_cluster():
 
 
 # ── Topology update does NOT clear eager reservations ──────────────────
+
 
 def test_topology_update_preserves_eager_reservations():
     """update_cluster_topology must NOT clear killed entries, because
@@ -300,6 +303,7 @@ def test_topology_update_preserves_eager_reservations():
 
 # ── unrecord_kill on failed kill ───────────────────────────────────────
 
+
 def test_unrecord_kill_releases_reservation():
     """After select_target eagerly records a kill, unrecord_kill must
     release it so the node becomes selectable again."""
@@ -322,6 +326,7 @@ def test_unrecord_kill_releases_reservation():
 
 # ── Single-member shards (replicas_per_shard=0) ───────────────────────
 
+
 def test_single_member_shard_blocked_on_first_kill():
     """With replicas_per_shard=0, each shard has only 1 member.
     The very first selection must block it — killing it leaves zero survivors."""
@@ -340,16 +345,24 @@ def test_single_member_shard_blocked_on_first_kill():
 
 # ── Reservation release when no chaos fires ────────────────────────────
 
+
 def test_no_chaos_coordination_does_not_leak_reservations():
     """When all coordination flags are False, select_target is called but
     no chaos is injected.  The eager reservation must be released so
     subsequent operations can still select targets."""
-    from unittest.mock import Mock, patch
+    from unittest.mock import Mock
+
     from src.fuzzer_engine.chaos_coordinator import ChaosCoordinator
     from src.models import (
-        ChaosConfig, ChaosCoordination, ChaosType, ChaosTiming,
-        ProcessChaosType, TargetSelection, Operation, OperationType,
+        ChaosConfig,
+        ChaosCoordination,
+        ChaosTiming,
+        ChaosType,
+        Operation,
         OperationTiming,
+        OperationType,
+        ProcessChaosType,
+        TargetSelection,
     )
 
     coordinator = ChaosCoordinator(seed=1)
@@ -368,8 +381,7 @@ def test_no_chaos_coordination_does_not_leak_reservations():
     # Mock cluster connection
     mock_conn = Mock()
     mock_conn.get_live_nodes.return_value = [
-        {"node_id": n.node_id, "host": "127.0.0.1", "port": n.port,
-         "role": n.role, "shard_id": n.shard_id}
+        {"node_id": n.node_id, "host": "127.0.0.1", "port": n.port, "role": n.role, "shard_id": n.shard_id}
         for n in nodes
     ]
     mock_conn.initial_nodes = nodes
@@ -415,12 +427,18 @@ def test_no_chaos_coordination_does_not_leak_reservations():
 def test_exception_during_chaos_releases_reservation():
     """If an exception occurs after select_target but before chaos fires,
     the eager reservation must be released."""
-    from unittest.mock import Mock, patch, PropertyMock
+    from unittest.mock import Mock, PropertyMock
+
     from src.fuzzer_engine.chaos_coordinator import ChaosCoordinator
     from src.models import (
-        ChaosConfig, ChaosCoordination, ChaosType, ChaosTiming,
-        ProcessChaosType, TargetSelection, Operation, OperationType,
+        ChaosConfig,
+        ChaosCoordination,
+        ChaosType,
+        Operation,
         OperationTiming,
+        OperationType,
+        ProcessChaosType,
+        TargetSelection,
     )
 
     coordinator = ChaosCoordinator(seed=1)
@@ -437,8 +455,7 @@ def test_exception_during_chaos_releases_reservation():
     # an exception when we access coordination timing
     mock_conn = Mock()
     mock_conn.get_live_nodes.return_value = [
-        {"node_id": n.node_id, "host": "127.0.0.1", "port": n.port,
-         "role": n.role, "shard_id": n.shard_id}
+        {"node_id": n.node_id, "host": "127.0.0.1", "port": n.port, "role": n.role, "shard_id": n.shard_id}
         for n in nodes
     ]
     mock_conn.initial_nodes = nodes
@@ -462,9 +479,11 @@ def test_exception_during_chaos_releases_reservation():
     )
 
     # This should not raise — the coordinator catches exceptions
-    results = coordinator.coordinate_chaos_with_operation(
-        operation=op, chaos_config=config,
-        cluster_connection=mock_conn, cluster_id="c1",
+    coordinator.coordinate_chaos_with_operation(
+        operation=op,
+        chaos_config=config,
+        cluster_connection=mock_conn,
+        cluster_id="c1",
     )
 
     # The reservation should have been released despite the exception
@@ -476,9 +495,15 @@ def test_no_safe_target_is_skipped_without_failed_chaos_result():
     """Shard-safety exhaustion should skip chaos instead of recording a failure."""
     from src.fuzzer_engine.chaos_coordinator import ChaosCoordinator
     from src.models import (
-        ChaosConfig, ChaosCoordination, ChaosType, ChaosTiming,
-        ProcessChaosType, TargetSelection, Operation, OperationType,
+        ChaosConfig,
+        ChaosCoordination,
+        ChaosTiming,
+        ChaosType,
+        Operation,
         OperationTiming,
+        OperationType,
+        ProcessChaosType,
+        TargetSelection,
     )
 
     coordinator = ChaosCoordinator(seed=1)
@@ -524,9 +549,15 @@ def test_no_quorum_safe_primary_target_is_skipped_without_failed_chaos_result():
     """Quorum-safety exhaustion should also skip chaos without recording a failure."""
     from src.fuzzer_engine.chaos_coordinator import ChaosCoordinator
     from src.models import (
-        ChaosConfig, ChaosCoordination, ChaosType, ChaosTiming,
-        ProcessChaosType, TargetSelection, Operation, OperationType,
+        ChaosConfig,
+        ChaosCoordination,
+        ChaosTiming,
+        ChaosType,
+        Operation,
         OperationTiming,
+        OperationType,
+        ProcessChaosType,
+        TargetSelection,
     )
 
     coordinator = ChaosCoordinator(seed=1)
@@ -581,9 +612,15 @@ def test_parallel_executor_releases_deferred_reservation_on_operation_exception(
     from src.fuzzer_engine.chaos_coordinator import ChaosCoordinator
     from src.fuzzer_engine.parallel_executor import ParallelExecutor
     from src.models import (
-        ChaosConfig, ChaosCoordination, ChaosType, ChaosTiming,
-        ProcessChaosType, TargetSelection, Operation, OperationType,
+        ChaosConfig,
+        ChaosCoordination,
+        ChaosTiming,
+        ChaosType,
+        Operation,
         OperationTiming,
+        OperationType,
+        ProcessChaosType,
+        TargetSelection,
     )
 
     coordinator = ChaosCoordinator(seed=1)
@@ -639,12 +676,20 @@ def test_parallel_executor_releases_deferred_reservation_on_operation_exception(
 def test_parallel_executor_preserves_reservation_after_immediate_chaos_success():
     """Operation exceptions must not clear a target already killed before the deferred phase."""
     from unittest.mock import patch
+
     from src.fuzzer_engine.chaos_coordinator import ChaosCoordinator
     from src.fuzzer_engine.parallel_executor import ParallelExecutor
     from src.models import (
-        ChaosConfig, ChaosCoordination, ChaosResult, ChaosType, ChaosTiming,
-        ProcessChaosType, TargetSelection, Operation, OperationType,
+        ChaosConfig,
+        ChaosCoordination,
+        ChaosResult,
+        ChaosTiming,
+        ChaosType,
+        Operation,
         OperationTiming,
+        OperationType,
+        ProcessChaosType,
+        TargetSelection,
     )
 
     coordinator = ChaosCoordinator(seed=1)
@@ -731,11 +776,19 @@ def test_update_node_registration_clears_recovered_kill_state():
 def test_successful_chaos_reservation_survives_later_coordination_error():
     """A later exception must not clear a reservation after a real kill succeeded."""
     from unittest.mock import patch
+
     from src.fuzzer_engine.chaos_coordinator import ChaosCoordinator
     from src.models import (
-        ChaosConfig, ChaosCoordination, ChaosResult, ChaosType, ChaosTiming,
-        ProcessChaosType, TargetSelection, Operation, OperationType,
+        ChaosConfig,
+        ChaosCoordination,
+        ChaosResult,
+        ChaosTiming,
+        ChaosType,
+        Operation,
         OperationTiming,
+        OperationType,
+        ProcessChaosType,
+        TargetSelection,
     )
 
     coordinator = ChaosCoordinator(seed=1)
