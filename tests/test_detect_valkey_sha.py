@@ -7,8 +7,7 @@ from src.cluster_orchestrator.orchestrator import detect_valkey_sha
 
 
 def _ok(stdout: str) -> subprocess.CompletedProcess:
-    return subprocess.CompletedProcess(args=["valkey-server", "--version"],
-                                       returncode=0, stdout=stdout, stderr="")
+    return subprocess.CompletedProcess(args=["valkey-server", "--version"], returncode=0, stdout=stdout, stderr="")
 
 
 def test_parses_full_sha_from_version_output():
@@ -52,8 +51,7 @@ def test_returns_none_when_binary_invocation_fails():
 
 
 def test_returns_none_on_subprocess_timeout():
-    with patch("subprocess.run",
-               side_effect=subprocess.TimeoutExpired(cmd="x", timeout=5)):
+    with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="x", timeout=5)):
         assert detect_valkey_sha("/usr/bin/valkey-server") is None
 
 

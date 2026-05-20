@@ -65,7 +65,10 @@ class ClusterCoordinator:
 
             # Create cluster instance
             cluster_instance = ClusterInstance(
-                cluster_id=cluster_connection.cluster_id, config=config, nodes=nodes, is_ready=True,
+                cluster_id=cluster_connection.cluster_id,
+                config=config,
+                nodes=nodes,
+                is_ready=True,
                 valkey_sha=valkey_sha,
             )
 

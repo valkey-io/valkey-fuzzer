@@ -31,7 +31,10 @@ def detect_valkey_sha(binary: str) -> Optional[str]:
     try:
         out = subprocess.run(
             [binary, "--version"],
-            capture_output=True, text=True, timeout=5, check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
         ).stdout
     except (OSError, subprocess.SubprocessError) as exc:
         logger.debug("Could not run %s --version: %s", binary, exc)
