@@ -401,6 +401,7 @@ class FuzzerCLI:
             "chaos_events": len(result.chaos_events),
             "seed": result.seed,
             "error_message": result.error_message,
+            "valkey_sha": result.valkey_sha,
         }
 
         # Add final validation results if available

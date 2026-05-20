@@ -88,7 +88,7 @@ jobs:
                 result = results[0]
 
         manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
             "results_path": "results.json" if results_path.exists() else None,
             "scenario_path": "scenario.yaml" if scenario_path.exists() else None,
             "log_files": sorted(
@@ -99,6 +99,7 @@ jobs:
             "scenario_id": result.get("scenario_id") if isinstance(result, dict) else None,
             "seed": result.get("seed") if isinstance(result, dict) else None,
             "success": result.get("success") if isinstance(result, dict) else None,
+            "valkey_sha": result.get("valkey_sha") if isinstance(result, dict) else None,
         }
         (artifact_dir / "manifest.json").write_text(
             json.dumps(manifest, indent=2),
