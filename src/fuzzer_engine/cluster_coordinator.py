@@ -5,7 +5,12 @@ Cluster Coordinator - Manages cluster lifecycle and interfaces with Cluster Orch
 import logging
 from typing import Optional
 
-from ..cluster_orchestrator.orchestrator import ClusterManager, ConfigurationManager, PortManager
+from ..cluster_orchestrator.orchestrator import (
+    ClusterManager,
+    ConfigurationManager,
+    PortManager,
+    detect_valkey_sha,
+)
 from ..models import ClusterConfig, ClusterInstance, ClusterStatus, NodeInfo
 
 logger = logging.getLogger()
@@ -40,6 +45,12 @@ class ClusterCoordinator:
             config.valkey_binary = valkey_binary
             logger.debug(f"Using Valkey binary: {valkey_binary}")
 
+            valkey_sha = detect_valkey_sha(valkey_binary)
+            if valkey_sha:
+                logger.info(f"Valkey binary built from commit: {valkey_sha}")
+            else:
+                logger.debug("Could not determine valkey-server build SHA")
+
             # Plan topology
             node_plans = config_manager.plan_topology()
 
@@ -54,7 +65,8 @@ class ClusterCoordinator:
 
             # Create cluster instance
             cluster_instance = ClusterInstance(
-                cluster_id=cluster_connection.cluster_id, config=config, nodes=nodes, is_ready=True
+                cluster_id=cluster_connection.cluster_id, config=config, nodes=nodes, is_ready=True,
+                valkey_sha=valkey_sha,
             )
 
             # Store cluster instance and config manager for later cleanup

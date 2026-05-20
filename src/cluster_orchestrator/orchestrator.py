@@ -1,6 +1,7 @@
 import contextlib
 import logging
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -14,6 +15,34 @@ from ..models import ClusterConfig, ClusterConnection, NodeInfo, NodePlan
 from ..utils.valkey_utils import valkey_client
 
 logger = logging.getLogger()
+
+# Matches the `sha=<hex>:<dirty>` field from `valkey-server --version`.
+# Example output: "Valkey server v=8.1.0 sha=abc1234:0 malloc=jemalloc-5.3.0 ..."
+_VERSION_SHA_RE = re.compile(r"sha=([0-9a-f]{7,40}):", re.IGNORECASE)
+
+
+def detect_valkey_sha(binary: str) -> Optional[str]:
+    """Return the git SHA the binary was built from, or None if unavailable.
+
+    Runs ``<binary> --version`` and parses the ``sha=<hex>:<dirty>`` field.
+    Release builds without git context emit ``sha=00000000:0`` — those return
+    None so callers don't try to clone an all-zero commit.
+    """
+    try:
+        out = subprocess.run(
+            [binary, "--version"],
+            capture_output=True, text=True, timeout=5, check=True,
+        ).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.debug("Could not run %s --version: %s", binary, exc)
+        return None
+    m = _VERSION_SHA_RE.search(out)
+    if not m:
+        return None
+    sha = m.group(1).lower()
+    if set(sha) == {"0"}:
+        return None
+    return sha
 
 
 class PortManager:

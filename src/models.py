@@ -175,6 +175,7 @@ class ClusterInstance:
     config: ClusterConfig
     nodes: list[NodeInfo]
     is_ready: bool = False
+    valkey_sha: Optional[str] = None  # Git SHA the cluster's valkey-server was built from
 
 
 @dataclass
@@ -239,6 +240,7 @@ class ExecutionResult:
     seed: Optional[int] = None
     validation_results: Optional[list["StateValidationResult"]] = None  # Per-operation validation results
     final_validation: Optional["StateValidationResult"] = None  # Final validation result
+    valkey_sha: Optional[str] = None  # Git SHA of the valkey binary under test, if known
 
 
 @dataclass

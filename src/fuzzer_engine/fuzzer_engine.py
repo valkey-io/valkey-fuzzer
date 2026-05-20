@@ -282,6 +282,7 @@ class FuzzerEngine(IFuzzerEngine):
                 seed=scenario.seed,
                 validation_results=validation_results,
                 final_validation=final_validation,
+                valkey_sha=cluster_instance.valkey_sha if cluster_instance else None,
             )
 
             # Log test completion
@@ -307,6 +308,7 @@ class FuzzerEngine(IFuzzerEngine):
                 chaos_events=chaos_events,
                 error_message=str(e),
                 seed=scenario.seed,
+                valkey_sha=cluster_instance.valkey_sha if cluster_instance else None,
             )
 
             # Log test completion
