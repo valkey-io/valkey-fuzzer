@@ -1,0 +1,14 @@
+scenario_id: standalone-deployment-smoke
+seed: 101
+
+experiment:
+  id: example.deployment-smoke
+  inputs: {}
+
+deployment:
+  mode: standalone
+  base_port: 7400
+  enable_cleanup: true
+
+# This intentionally runs a deployment-only example experiment. It proves
+# lifecycle wiring, not a Valkey feature or data-safety property.

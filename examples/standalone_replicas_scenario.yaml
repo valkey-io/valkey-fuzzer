@@ -1,0 +1,15 @@
+scenario_id: standalone-replicas-deployment-smoke
+seed: 202
+
+experiment:
+  id: example.deployment-smoke
+  inputs: {}
+
+deployment:
+  mode: standalone
+  replicas_per_primary: 1
+  base_port: 7500
+  enable_cleanup: true
+
+# A real replication-compression experiment would add capability probes, actions,
+# negotiated-codec evidence, continuous traffic, and convergence oracles.

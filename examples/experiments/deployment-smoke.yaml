@@ -1,0 +1,17 @@
+id: example.deployment-smoke
+mode: smoke
+deployment:
+  modes:
+    - standalone
+    - cluster
+
+inputs:
+  type: object
+  additionalProperties: false
+  properties: {}
+
+components: []
+
+metadata:
+  purpose: framework-example
+  coverage_claim: deployment-lifecycle-only

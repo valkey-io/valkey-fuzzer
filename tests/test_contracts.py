@@ -6,7 +6,8 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from tests.support import deployment_identity
+from tests.support import component_registration, deployment_identity
+from valkey_fuzzer.catalog import Catalog
 from valkey_fuzzer.documents import ABSENT, get_path
 from valkey_fuzzer.environment import EnvironmentSpec, PolicySpec
 from valkey_fuzzer.events import EventBus, EventBusQuiescedError, EventDispatchAbortedError, EventDispatchError
@@ -21,6 +22,8 @@ from valkey_fuzzer.plan import (
 )
 from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.references import EnvironmentKind
+from valkey_fuzzer.registrations import DeploymentProviderRegistration
+from valkey_fuzzer.registry import DuplicateRegistrationError, FrozenRegistryError, RegistrationError
 
 
 def _component(component_id="activate", *, use="example.action.fake", role=ComponentRole.ACTION, **fields):
@@ -101,6 +104,8 @@ def test_plans_take_deep_immutable_snapshots_and_round_trip_through_json():
         (lambda: InstanceSelector.parse(["valkey-9"]).resolve(["valkey-0"], {}), ValueError, r"unknown instance IDs \['valkey-9'\]"),
         (lambda: InstanceSelector.parse([1]), ValueError, "an instance selector is one of"),
         (lambda: StartupOverlay("o", server_config={"appendonly": "no"}, conflict_policy="merge"), ValueError, "'merge' is not a valid ConflictPolicy"),
+        # Entries are checked when the catalog registers them.
+        (lambda: Catalog().register(deployment_providers=(_deployment(),) * 2), DuplicateRegistrationError, "standalone"),
     ],
 )  # fmt: skip
 def test_a_malformed_spec_or_plan_is_rejected(build, error, message):
@@ -136,6 +141,41 @@ def test_the_event_bus_orders_subscribers_snapshots_payloads_and_commits_only_di
         bus.publish("late.event", source="late")
     with pytest.raises(EventBusQuiescedError):
         bus.subscribe("late.event", calls.append)
+
+
+def _deployment(provider_id="example.deployment.fake"):
+    return DeploymentProviderRegistration(deployment_mode="standalone", provider_id=provider_id, factory=object)
+
+
+@pytest.mark.parametrize(
+    ("existing", "entries", "error"),
+    [
+        (None, {"components": (component_registration("example.oracle_check", role=ComponentRole.ORACLE),)}, RegistrationError),
+        ("frozen", {"components": (component_registration(),), "fragments": {"x.base": {}}}, FrozenRegistryError),
+        ("action", {"components": (component_registration("new.oracle.fake"), component_registration())}, DuplicateRegistrationError),
+        ("frozen-providers", {"components": (component_registration(),), "deployment_providers": (_deployment(),)}, FrozenRegistryError),
+        (None, {"components": (component_registration(),), "fragments": {"base": {}}}, ValueError),
+        ("fragment", {"components": (component_registration(),), "fragments": {"x.base": {}}}, RegistrationError),
+        (None, {"components": (component_registration(),), "deployment_providers": (_deployment(),) * 2}, DuplicateRegistrationError),
+    ],
+    ids=["misnamed-component", "frozen-catalog", "duplicate-component", "frozen-provider-registry", "misnamed-fragment", "duplicate-fragment", "duplicate-provider"],
+)  # fmt: skip
+def test_a_rejected_registration_registers_nothing(existing, entries, error):
+    catalog = Catalog()
+    if existing == "frozen":
+        catalog.freeze()
+    elif existing == "frozen-providers":
+        catalog.deployment_providers.freeze()
+    elif existing == "action":
+        catalog.components.register_many((component_registration(),))
+    elif existing == "fragment":
+        catalog.register(fragments={"x.base": {}})
+
+    with pytest.raises(error):
+        catalog.register(**entries)
+
+    assert len(catalog.components) == (existing == "action")
+    assert list(catalog.fragments) == (["x.base"] if existing == "fragment" else [])
 
 
 @pytest.mark.parametrize(
