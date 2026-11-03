@@ -2,8 +2,8 @@
 
 :class:`Catalog` owns everything one run service registers. Data-only
 experiment documents are parsed here (fragments merged in through
-``extends``); :func:`build_catalog` registers the experiments of any experiment
-directories.
+``extends``); :func:`build_catalog` registers the Valkey components and the
+experiments of any experiment directories.
 """
 
 import re
@@ -495,20 +495,38 @@ class Catalog:
         self._frozen = True
 
 
+def register_valkey_components(catalog: Catalog) -> None:
+    """Register the Valkey components, environment providers, experiment fragments, and experiments."""
+
+    # The components import the engine, so they are imported only once it is loaded.
+    from . import components
+
+    fragments = components.experiment_fragments()
+    catalog.register(
+        components=components.component_registrations(),
+        experiments=components.experiments(fragments),
+        environment_providers=components.ENVIRONMENT_PROVIDERS,
+        fragments=fragments,
+    )
+
+
 def build_catalog(
     experiment_directories: Sequence[ExperimentDirectory] = (),
     *,
     deployment_providers: Optional[Iterable[DeploymentProviderRegistration]] = None,
 ) -> Catalog:
-    """A frozen catalog: the deployment providers, then ``experiment_directories``.
+    """A frozen catalog: the deployment providers, the Valkey components, then ``experiment_directories``.
 
-    ``deployment_providers`` default to the local deployment's.
+    ``deployment_providers`` default to the local deployment's. The
+    experiment directories load last, since data-only experiments may extend
+    the Valkey experiment fragments.
     """
 
     catalog = Catalog()
     if deployment_providers is None:
         deployment_providers = local_deployment_provider_registrations().values()
     catalog.deployment_providers.register_many(deployment_providers)
+    register_valkey_components(catalog)
     catalog.load_experiment_directories(experiment_directories)
     catalog.freeze()
     return catalog
