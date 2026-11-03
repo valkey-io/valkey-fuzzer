@@ -1,0 +1,59 @@
+# Implementation evidence for the toy register, from a run of its own
+# experiment (experiments/toy.register.yaml) on a real valkey-server: the
+# register is the number of keys written.
+evidence:
+  wrote:
+    # Valkey acknowledged every write, so it applied them.
+    event: writes.seeded
+    component: writes
+    fields: {keys: int}
+    action: Write
+    updates:
+      - {set: mem, value: $keys}
+  acked:
+    event: writes.seeded
+    component: writes
+    fields: {keys: int}
+    action: Ack
+    updates:
+      - {set: acked, value: $keys}
+  crash:
+    event: crash.injected
+    component: crash
+    where: {signal: SIGKILL, applied: true}
+    fields: {}
+    action: Crash
+    updates:
+      - {incr: crashes}
+  loaded:
+    # DEBUG RELOAD saves the dataset and loads it back: what the restarted
+    # primary holds, now also on disk.
+    event: register.loaded
+    log: 'Done loading RDB, keys loaded: (?P<keys>\d+)'
+    component: reload-log
+    fields: {keys: int}
+    updates:
+      - {set: mem, value: $keys}
+      - {set: disk, value: $keys}
+unobservable:
+  Save: Valkey does not log its appendfsync writes; the reload shows what was saved.
+state:
+  mem: {init: 0}
+  disk: {init: 0}
+  acked: {init: 0}
+  crashes: {init: 0}
+constants:
+  SyncBeforeAck: {input: appendonly, equals: "yes"}
+  MaxValue: {max_of: [mem, acked, disk], at_least: 1}
+  MaxCrashes: {max_of: [crashes], at_least: 1}
+scenario:
+  experiment: toy.register
+  deployment: {mode: standalone, base_port: 7940}
+  inputs:
+    appendonly: {constant: SyncBeforeAck, map: {"TRUE": "yes", "FALSE": "no"}}
+  faults:
+    # crash fires on the first writes.seeded, so it needs no occurrence input.
+    - {action: Crash, after: acked, component: crash}
+  variants:
+    inputs:
+      crash_delay_s: [0, 0.01]

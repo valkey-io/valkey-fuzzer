@@ -44,6 +44,10 @@ dev = [
 Repository = "https://github.com/valkey-io/valkey-fuzzer"
 Issues = "https://github.com/valkey-io/valkey-fuzzer/issues"
 
+# The packages are listed (tests/test_packaging.py keeps the list complete)
+# because the spec bundles under formal/ ship as valkey_fuzzer/formal: a
+# shipped experiment that names a bundle (spec: cluster-election) must find
+# it in any install, not only in a checkout.
 [tool.setuptools]
 packages = [
     "valkey_fuzzer",
@@ -51,13 +55,19 @@ packages = [
     "valkey_fuzzer.deployment.local",
     "valkey_fuzzer.deployment.local.validation",
     "valkey_fuzzer.environment",
+    "valkey_fuzzer.formal",
+    "valkey_fuzzer.spec",
 ]
 
 [tool.setuptools.dynamic]
 version = {attr = "valkey_fuzzer.__version__"}
 
+[tool.setuptools.package-dir]
+"valkey_fuzzer.formal" = "formal"
+
 [tool.setuptools.package-data]
 valkey_fuzzer = ["py.typed"]
+"valkey_fuzzer.formal" = ["*/*", "*/*/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
