@@ -1,0 +1,99 @@
+name: Valkey Experiments Live
+
+# Every Valkey experiment against real servers, once a day. Only the Linux
+# fault experiments that need root (tmpfs disk-full, iptables partitions) run
+# as root, so they run instead of reporting SKIP_UNSUPPORTED; a second, older
+# build enables the mixed-version, rolling-upgrade, and baseline-vs-candidate
+# tests.
+
+on:
+  schedule:
+    - cron: '30 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # The tla2tools.jar that tla-model-check.yml pins: the spec bridge's live test
+  # and the conform half of the election test need it.
+  TLA_TOOLS_VERSION: v1.7.4
+  TLA_TOOLS_SHA256: 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
+
+jobs:
+  valkey-experiments-live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.11'
+
+      - name: Build Valkey unstable and 8.1
+        run: |
+          git clone --depth 1 https://github.com/valkey-io/valkey.git /tmp/valkey-unstable
+          git clone --depth 1 --branch 8.1 https://github.com/valkey-io/valkey.git /tmp/valkey-8.1
+          make -C /tmp/valkey-unstable -j"$(nproc)"
+          make -C /tmp/valkey-8.1 -j"$(nproc)"
+
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+
+      - name: Set up Java
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Download tla2tools.jar
+        shell: bash
+        run: |
+          curl -fsSL --retry 3 -o "${RUNNER_TEMP}/tla2tools.jar" \
+            "https://github.com/tlaplus/tlaplus/releases/download/${TLA_TOOLS_VERSION}/tla2tools.jar"
+          echo "${TLA_TOOLS_SHA256}  ${RUNNER_TEMP}/tla2tools.jar" | sha256sum -c -
+
+      - name: Run Valkey experiments live
+        env:
+          TLA2TOOLS_JAR: ${{ runner.temp }}/tla2tools.jar
+        run: |
+          set -o pipefail
+          VALKEY_FUZZER_BINARY=/tmp/valkey-unstable/src/valkey-server \
+            VALKEY_FUZZER_OLD_BINARY=/tmp/valkey-8.1/src/valkey-server \
+            python -m pytest -q -rs -m live tests/test_live_spec_register.py tests/test_live_valkey_experiments.py \
+            -k "not (test_disk_full_degrades_gracefully_and_recovers or test_cluster_partition_fails_over_heals_and_bounds_loss)" \
+            2>&1 | tee valkey-experiments-live.log
+
+      # Only the tests that need root (a tmpfs mount, iptables partitions) run
+      # as root, after everything else, so nothing root creates is in the way.
+      - name: Run the root-only Valkey experiments live
+        if: success() || failure()
+        run: |
+          set -o pipefail
+          sudo -E env "PATH=$PATH" \
+            VALKEY_FUZZER_BINARY=/tmp/valkey-unstable/src/valkey-server \
+            VALKEY_FUZZER_OLD_BINARY=/tmp/valkey-8.1/src/valkey-server \
+            "$(command -v python)" -m pytest -q -rs -p no:cacheprovider -m live tests/test_live_valkey_experiments.py \
+            -k "test_disk_full_degrades_gracefully_and_recovers or test_cluster_partition_fails_over_heals_and_bounds_loss" \
+            2>&1 | tee valkey-experiments-live-root.log
+          if grep -q '^SKIPPED' valkey-experiments-live-root.log; then
+            echo "::error::a root-only experiment skipped although it ran as root"
+            exit 1
+          fi
+
+      - name: Upload live experiment log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: valkey-experiments-live-${{ github.run_id }}
+          path: valkey-experiments-live*.log
+          if-no-files-found: warn
+          retention-days: 30

@@ -6,22 +6,28 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: read
+
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        persist-credentials: false
 
     - name: Set up Python
-      uses: actions/setup-python@v6
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
       with:
         python-version: '3.12'
 
+    # The same version as the dev extra in pyproject.toml, so a new ruff release cannot fail an unchanged tree.
     - name: Install ruff
-      run: pip install ruff>=0.4.0
+      run: pip install 'ruff==0.14.3'
 
     - name: Ruff lint check
-      run: ruff check src/ tests/ examples/
+      run: ruff check valkey_fuzzer/ tests/ examples/ .github/scripts/
 
     - name: Ruff format check
-      run: ruff format --check src/ tests/ examples/
+      run: ruff format --check valkey_fuzzer/ tests/ examples/ .github/scripts/

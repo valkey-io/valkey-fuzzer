@@ -1,0 +1,93 @@
+name: TLA+ Model Check
+
+# Runs `valkey-fuzzer spec check` on every spec bundle under formal/: SANY,
+# TLC on each expected-safe config (must find no error), TLC on each negative
+# control (must find its named violation, or the claim is vacuous), model
+# coverage, and mapping completeness. Each bundle's assurance report is
+# uploaded. The spec bridge's own TLC tests (a toy bundle built from
+# fixtures, and the cluster-election claims on canned traces) run here too,
+# since they need java and tla2tools.jar. It runs on every change: the
+# experiment gate compiles the Valkey experiments with the core compiler, so a
+# change almost anywhere can break the translated scenarios.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # tla2tools.jar from https://github.com/tlaplus/tlaplus/releases (TLC 2.19).
+  # Update the version and the SHA-256 of the release asset together, here and
+  # in test.yml and valkey-experiments-live.yml.
+  TLA_TOOLS_VERSION: v1.7.4
+  TLA_TOOLS_SHA256: 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
+
+jobs:
+  tlc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Java
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
+
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+
+      - name: Download tla2tools.jar
+        shell: bash
+        run: |
+          curl -fsSL --retry 3 -o "${RUNNER_TEMP}/tla2tools.jar" \
+            "https://github.com/tlaplus/tlaplus/releases/download/${TLA_TOOLS_VERSION}/tla2tools.jar"
+          echo "${TLA_TOOLS_SHA256}  ${RUNNER_TEMP}/tla2tools.jar" | sha256sum -c -
+
+      - name: spec check every bundle
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p "${RUNNER_TEMP}/assurance"
+          status=0
+          for claims in formal/*/claims.yaml; do
+            bundle="$(dirname "${claims}")"
+            name="$(basename "${bundle}")"
+            echo "::group::spec check ${bundle}"
+            valkey-fuzzer spec check "${bundle}" --tla2tools "${RUNNER_TEMP}/tla2tools.jar" \
+              --output "${RUNNER_TEMP}/assurance/${name}.json" || status=1
+            echo "::endgroup::"
+          done
+          exit "${status}"
+
+      - name: Spec bridge tests
+        env:
+          TLA2TOOLS_JAR: ${{ runner.temp }}/tla2tools.jar
+        run: |
+          python -m pytest -q -m "" tests/test_spec_bridge.py \
+            tests/test_cluster_election.py::test_conform_checks_the_election_claims_with_tlc
+
+      - name: Upload assurance reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: spec-assurance
+          path: ${{ runner.temp }}/assurance
+          if-no-files-found: warn

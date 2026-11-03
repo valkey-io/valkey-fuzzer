@@ -1,0 +1,137 @@
+name: Valkey Fuzzer PR Batch
+
+# Runs given scenarios (valkey-ci-agent's AI proposals and spec-translated
+# scenarios for a pull request) against one Valkey commit, through the batch
+# runner with the candidate profile, and uploads the batch folder. The
+# scenarios arrive as a JSON object mapping a name to scenario YAML; they run
+# as written, on the build of valkey_sha (a full, lowercase 40-hex SHA).
+# Scenarios translated from a spec bundle that brings its own data-only
+# experiments come with the bundle in spec_bundles: the batch finds the bundle
+# through VALKEY_FUZZER_SPEC_PATH and loads its experiments/ with --experiment-dir.
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenarios:
+        description: 'JSON object mapping a scenario name to its YAML (at most 60,000 characters)'
+        required: true
+        type: string
+      spec_bundles:
+        description: >-
+          JSON object mapping a spec bundle name to {path in the bundle: file text}, for bundles the
+          scenarios need (claims.yaml, model.tla, mapping.yaml, *.cfg, negative-controls/, experiments/;
+          at most 60,000 characters)
+        required: false
+        type: string
+        default: ""
+      valkey_repository:
+        description: Repository holding the Valkey commit to test
+        required: false
+        type: string
+        default: valkey-io/valkey
+      valkey_ref:
+        description: The ref the commit came from (for example refs/pull/123/head); recorded in the summary
+        required: false
+        type: string
+        default: ""
+      valkey_sha:
+        description: Full SHA of the Valkey commit to build and test (40 lowercase hex characters)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  batch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CANDIDATES_DIR: /tmp/fuzzer-pr-batch/candidates
+      # The spec bundles, one directory each: the batch looks them up here by name.
+      SPEC_DIR: /tmp/fuzzer-pr-batch/spec
+      # The uploaded batch folder: summary.json lists every run and runs[].report its run report.
+      BATCH_DIR: /tmp/fuzzer-pr-batch/batch
+    steps:
+      - name: Checkout valkey-fuzzer
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.11'
+
+      - name: Install valkey-fuzzer
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+
+      # Inputs reach the scripts only through the environment, never the shell.
+      - name: Check the inputs and write the scenarios and bundles
+        env:
+          INPUT_SCENARIOS: ${{ inputs.scenarios }}
+          INPUT_SPEC_BUNDLES: ${{ inputs.spec_bundles }}
+          INPUT_VALKEY_REPOSITORY: ${{ inputs.valkey_repository }}
+          INPUT_VALKEY_SHA: ${{ inputs.valkey_sha }}
+        run: python .github/scripts/ci.py check-inputs
+
+      - name: Checkout Valkey
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ inputs.valkey_repository }}
+          ref: ${{ inputs.valkey_sha }}
+          fetch-depth: 1
+          path: valkey-src
+          persist-credentials: false
+
+      - name: Build Valkey
+        working-directory: valkey-src
+        env:
+          INPUT_VALKEY_SHA: ${{ inputs.valkey_sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "${INPUT_VALKEY_SHA}"
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev tcl
+          make -j"$(nproc)"
+          src/valkey-server --version
+
+      - name: Run the scenarios through batch
+        id: batch
+        continue-on-error: true
+        env:
+          VALKEY_FUZZER_SPEC_PATH: ${{ env.SPEC_DIR }}
+        run: |
+          # Each bundle's own data-only experiments, for the scenarios translated from it.
+          experiment_dirs=()
+          for directory in "${SPEC_DIR}"/*/experiments; do
+            if [ -d "${directory}" ]; then
+              experiment_dirs+=(--experiment-dir "${directory}")
+            fi
+          done
+          valkey-fuzzer batch --scenarios "${CANDIDATES_DIR}" --profile candidate --workers 2 \
+            --valkey-binary "${GITHUB_WORKSPACE}/valkey-src/src/valkey-server" --batch-id fuzzer-pr-batch \
+            --out "${BATCH_DIR}" "${experiment_dirs[@]}"
+
+      - name: Summarize the batch
+        if: always()
+        env:
+          SUMMARY_TITLE: Valkey Fuzzer PR Batch
+          VALKEY_REPOSITORY: ${{ inputs.valkey_repository }}
+          VALKEY_REF: ${{ inputs.valkey_ref }}
+          VALKEY_SHA: ${{ inputs.valkey_sha }}
+        run: python .github/scripts/ci.py summary
+
+      - name: Upload the batch folder
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzzer-batch-${{ github.run_id }}
+          path: ${{ env.BATCH_DIR }}
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Fail when the batch did not pass
+        if: steps.batch.outcome != 'success'
+        run: exit 1
