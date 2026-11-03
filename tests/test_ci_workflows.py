@@ -469,6 +469,31 @@ def test_the_batch_workflows_summarize_through_the_ci_script():
     assert names | {"CANDIDATES_DIR", "SPEC_DIR"} <= set(env)
 
 
+def test_the_pr_batch_drops_the_write_ledgers_of_the_runs_that_passed(tmp_path):
+    batch = tmp_path / "batch"
+    runs = []
+    for run_id, status in (("passed", "PASS"), ("failed", "FAIL")):
+        writes = batch / "runs" / run_id / "components" / "writes"
+        writes.mkdir(parents=True)
+        for name in ("ledger.jsonl", "preload.jsonl", "result.json"):
+            (writes / name).write_text("{}")
+        (batch / "runs" / run_id / "report.json").write_text("{}")
+        runs.append({"id": run_id, "status": status, "summary": "x", "report": f"runs/{run_id}/report.json"})
+    runs.append({"id": "lost", "status": "PASS", "summary": "x", "report": None})
+    (batch / "summary.json").write_text(json.dumps({"runs": runs}))
+    (env,) = _step_env("fuzzer-pr-batch.yml", "drop-ledgers")
+    assert "BATCH_DIR" in env
+
+    with patch.dict(os.environ, {"BATCH_DIR": str(batch)}):
+        CI.main("drop-ledgers")
+
+    kept = {path.relative_to(batch).as_posix() for path in batch.rglob("*.*")}
+    assert "runs/passed/components/writes/ledger.jsonl" not in kept
+    assert "runs/passed/components/writes/preload.jsonl" not in kept
+    assert "runs/passed/components/writes/result.json" in kept
+    assert {"runs/failed/components/writes/ledger.jsonl", "runs/failed/components/writes/preload.jsonl"} <= kept
+
+
 def test_the_pr_comment_is_found_by_the_marker_the_summary_writes():
     text = (WORKFLOWS / "valkey-pr-fuzzer.yml").read_text()
     assert CI.COMMENT_MARKER not in text and "const marker = body.split('\\n', 1)[0];" in text

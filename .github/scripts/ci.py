@@ -9,6 +9,7 @@ summarize     the job summary, the PR comment (its first line the marker the com
 
 fuzzer-pr-batch.yml:
 check-inputs  check the dispatch inputs, and write the scenarios and spec bundles they carry
+drop-ledgers  remove the write ledgers of a batch folder's runs that passed
 
 fuzzer-pr-batch.yml and fuzzer-run.yml:
 summary       a batch folder's runs and failure signatures, appended to the job summary
@@ -302,6 +303,24 @@ def batch_summary(title, batch_dir, valkey=""):
     return "\n".join(lines) + "\n"
 
 
+def drop_passing_ledgers(batch_dir):
+    """Remove the workloads' write ledgers (``ledger.jsonl``, ``preload.jsonl``) of the runs that passed.
+
+    A ledger holds every write a workload made, often tens of megabytes, and
+    only the data oracle reads it: once a run passed, nothing needs it, and a
+    batch folder that keeps them all grows too large to triage.
+    """
+
+    _, runs = batch_runs(batch_dir)
+    for run, _ in runs:
+        if run["status"] != "PASS" or not run["report"]:
+            continue
+        run_dir = os.path.join(batch_dir, os.path.dirname(run["report"]))
+        for name in ("ledger.jsonl", "preload.jsonl"):
+            for path in glob.glob(os.path.join(run_dir, "components", "*", name)):
+                os.remove(path)
+
+
 # The paths a spec bundle in spec_bundles may hold.
 _FILE_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}"
 _BUNDLE_PATHS = (
@@ -441,6 +460,8 @@ def main(command):
             handle.write(f"overall_failed={'true' if overall_failed else 'false'}\n")
     elif command == "check-inputs":
         check_inputs(env)
+    elif command == "drop-ledgers":
+        drop_passing_ledgers(env["BATCH_DIR"])
     elif command == "summary":
         valkey = ""
         if env.get("VALKEY_SHA"):
@@ -449,7 +470,8 @@ def main(command):
             handle.write(batch_summary(env["SUMMARY_TITLE"], env["BATCH_DIR"], valkey))
     else:
         raise SystemExit(
-            f"unknown command {command!r}; expected resolve, matrix, metadata, summarize, check-inputs, or summary"
+            f"unknown command {command!r}; expected resolve, matrix, metadata, summarize, check-inputs, drop-ledgers, "
+            "or summary"
         )
 
 

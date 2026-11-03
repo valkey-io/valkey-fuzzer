@@ -11,6 +11,8 @@ name: Valkey Fuzzer PR Batch
 # With random_seeds, the batch also draws that many seeds of every experiment
 # that needs one build, so the given scenarios run beside a random baseline.
 # The batch runs as root, so the tmpfs and iptables experiments run too.
+# The upload leaves out the write ledgers of the runs that passed, which only
+# the data oracle reads and which can make the folder too large to triage.
 
 run-name: Valkey Fuzzer PR Batch ${{ inputs.request_id }}
 
@@ -144,6 +146,8 @@ jobs:
             --out "${BATCH_DIR}" "${experiment_dirs[@]}" || status=$?
           # Root wrote the folder: give it back, so the summary and the upload can read it.
           sudo chown -R "$(id -u):$(id -g)" "${BATCH_DIR}"
+          # The passing runs' write ledgers would make the folder too large to triage.
+          python .github/scripts/ci.py drop-ledgers
           exit "${status}"
 
       - name: Summarize the batch
