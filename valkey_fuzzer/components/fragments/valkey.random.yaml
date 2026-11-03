@@ -1,0 +1,29 @@
+# valkey.random: server config pools for random scenarios; no experiment
+# extends it. An experiment's metadata.generator lists the pools it draws from
+# (server_config: [valkey.pool.replication]); the generator draws each key's value uniformly, skipping keys a startup overlay of
+# the experiment sets. With scope: [deployment, role] it also draws whether every
+# instance shares one value or the primary and the replicas each draw their own.
+# `save` is left out: a background save it schedules would collide with an
+# experiment's own BGSAVE. repl-backlog-size is left out: a small backlog turns
+# the partial resyncs the replication experiments expect into full ones.
+metadata:
+  generator:
+    pools:
+      valkey.pool.persistence:
+        appendonly: ["yes", "no"]
+        appendfsync: [always, everysec, "no"]
+        aof-use-rdb-preamble: ["yes", "no"]
+      valkey.pool.replication:
+        repl-diskless-sync: ["yes", "no"]
+        repl-diskless-load: [disabled, on-empty-db, swapdb]
+        dual-channel-replication-enabled: ["no", "yes"]
+        repl-diskless-sync-delay: ["0", "1", "5"]
+      # The same codecs the valkey.compression and valkey.repl-compression
+      # inputs take. zstd needs a build with BUILD_ZSTD=yes: an experiment that
+      # draws from this pool probes its builds with deployment_config naming
+      # both settings, so zstd on another build is SKIP_UNSUPPORTED (or
+      # --exclude it).
+      valkey.pool.compression:
+        rdbcompression: ["no", "yes", lzf, lz4, zstd]
+        repl-compression: ["no", "yes", lz4, zstd]
+        scope: [deployment, role]

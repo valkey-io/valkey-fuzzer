@@ -1,0 +1,28 @@
+# valkey.writes drained: the `writes` workload performs exactly `operations`
+# operations and publishes writes.drained, and the `drained` action waits for
+# it, so what follows sees a quiesced dataset. Random scenarios draw up to 3000
+# operations at 500 to 5000 per second: the workload drains in a few seconds,
+# and the AOF stays under auto-aof-rewrite-min-size (64 MB), whose rewrite
+# child would refuse a BGSAVE. Experiments name what `drained` follows in its
+# depends_on.
+extends: [valkey.writes]
+metadata:
+  generator:
+    inputs:
+      operations: {minimum: 1, maximum: 3000}
+      mutation_rate: {minimum: 500, maximum: 5000}
+inputs:
+  properties:
+    operations: {type: integer, minimum: 1, maximum: 1000000, default: 2000}
+components:
+  - use: valkey.workload.key-value
+    id: writes
+    config:
+      max_ops: {$ref: inputs.operations}
+      drain_on_stop: true
+
+  - use: valkey.action.wait-event
+    id: drained
+    depends_on: [writes]
+    config: {event: writes.drained, timeout_s: 600}
+required_events: [writes.drained]

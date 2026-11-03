@@ -1,0 +1,68 @@
+# Save an RDB in one rdbcompression codec and load it with another binary:
+# an older release (which must refuse a VCS envelope and exit cleanly, or,
+# with rdb-version-check relaxed, load a plain RDB), a build without zstd
+# (which must refuse a zstd RDB with "Invalid or unsupported RDB stream
+# envelope"), or the same build.
+#
+# The scenario names the loading binary as an artifact
+# (`load_binary: {$ref: artifacts.<id>.binary}`), what it must do
+# (`load_expect: loads|refused`), optionally the refusal's log line
+# (`refused_log`, a regex) and the loading server's configuration
+# (`load_config`). A refusal must exit with status 1 and "Fatal error loading
+# the DB", never a crash; a load must hold the workload's data. The saved RDB
+# must be in the codec rdbcompression names either way.
+extends: [valkey.drained-writes, valkey.compression]
+id: valkey.rdb-compression-compat
+deployment:
+  modes: [standalone]
+metadata:
+  description: Load an RDB saved in each rdbcompression codec with an older or differently built binary
+  generator:
+    # The deployment's own build loads the RDB (load_expect: loads) unless a
+    # base names load_binary, and then load_expect too.
+    hook: valkey.generator.rdb-loader
+    inputs:
+      load_expect: fixed
+      stable_keys: {minimum: 1, maximum: 2000}
+inputs:
+  required: [load_binary]
+  properties:
+    load_binary:
+      type: environment_reference
+      reference_kinds: [artifacts]
+      description: "Binary that loads the RDB, e.g. {$ref: artifacts.old.binary}"
+    load_expect: {type: string, enum: [loads, refused], default: refused}
+    refused_log: {type: [string, "null"], default: null, description: "regex the refusal must log, or null"}
+    load_config: {type: object, default: {}, description: "server config of the loading server, e.g. {rdb-version-check: relaxed}"}
+    stable_keys: {minimum: 1, default: 1000}
+    value_size: {maximum: 1048576, default: 256}
+    operations: {default: 1000}
+    compressible: {type: boolean, default: true}
+components:
+  - use: valkey.capability.build-probe
+    id: build
+    config:
+      binaries: [{$ref: inputs.load_binary}]
+
+  - use: valkey.workload.key-value
+    id: writes
+    config:
+      compressible: {$ref: inputs.compressible}
+
+  - use: valkey.action.bgsave
+    id: bgsave
+    depends_on: [drained]
+    config: {instances: primaries, expect: ok}
+
+  - use: valkey.oracle.rdb-snapshot
+    id: snapshot
+    config:
+      bgsave: bgsave
+      workload: writes
+      expect_codec: {$ref: inputs.rdbcompression}
+      load_binary: {$ref: inputs.load_binary}
+      load_config: {$ref: inputs.load_config}
+      expect: {$ref: inputs.load_expect}
+      refused_log: {$ref: inputs.refused_log}
+required_evidence:
+  - {evidence_id: valkey.rdb.reload-verified, source: snapshot}

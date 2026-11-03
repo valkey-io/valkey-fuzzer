@@ -1,0 +1,18 @@
+# Whole-stream RDB compression on every instance: the `rdbcompression` input
+# (no, yes, lzf, lz4, zstd; yes and lzf compress strings inside a plain RDB,
+# lz4 and zstd frame the whole RDB in a VCS envelope). The build probe starts
+# each binary with the configuration the deployment gives it, so a codec the
+# build lacks (zstd without BUILD_ZSTD) in either compression setting makes
+# the run SKIP_UNSUPPORTED instead of failing to start; any other setting the
+# build rejects is ERROR. The default, yes, is what every Valkey build accepts.
+inputs:
+  properties:
+    rdbcompression: {type: string, enum: ["no", "yes", lzf, lz4, zstd], default: "yes"}
+startup_overlays:
+  - overlay_id: rdb-compression
+    server_config:
+      rdbcompression: {$ref: inputs.rdbcompression}
+components:
+  - use: valkey.capability.build-probe
+    id: build
+    config: {deployment_config: [rdbcompression, repl-compression]}

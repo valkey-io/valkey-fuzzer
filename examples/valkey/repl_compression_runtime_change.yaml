@@ -1,0 +1,11 @@
+# Change repl-compression under writes: primaries lz4 -> zstd, replicas
+# zstd -> lz4, primaries -> no. Every change renegotiates with a partial
+# resync. Needs a BUILD_ZSTD=yes build (otherwise SKIP_UNSUPPORTED).
+scenario_id: repl-compression-runtime-change
+seed: 86
+experiment:
+  id: valkey.repl-compression-runtime-change
+deployment:
+  mode: standalone
+  replicas_per_primary: 1
+  base_port: 7850

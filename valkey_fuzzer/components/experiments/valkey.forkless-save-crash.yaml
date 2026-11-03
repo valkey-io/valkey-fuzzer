@@ -1,0 +1,120 @@
+# SIGKILL a primary while a forkless BGSAVE is in progress, restart it, and
+# require that it recovers: every acknowledged write survives except those the
+# killed primary acknowledged within the fsync loss window, a follow-up
+# forkless save succeeds, and the deployment converges. The save starts only
+# once the preload is older than the loss window, so the preloaded data must
+# survive the crash.
+#
+# Path evidence: INFO reports a forkless save in progress, the primary logs
+# its start, and the kill fired. The `save-after-restart` oracle requires the
+# follow-up forkless save to log its completion.
+#
+# In cluster mode a replica would fail the killed primary over once it is
+# marked failed, which can happen after the restart: the restarted primary
+# then acknowledges writes until it learns it was replaced, and loses them.
+# The instances run with cluster-replica-no-failover, so the restarted
+# primary keeps its slots and the loss window ends at its exit.
+extends: [valkey.base, valkey.forkless, valkey.compression]
+id: valkey.forkless-save-crash
+deployment:
+  modes: [standalone, cluster]
+metadata:
+  description: Kill a primary mid forkless save, restart it, and verify recovery
+  generator:
+    deployment:
+      standalone: {replicas_per_primary: {minimum: 0, maximum: 2}}
+      cluster: {replicas_per_primary: {minimum: 0, maximum: 1}}
+    inputs:
+      # At least 1000 keys per primary at 600 us each: the kill always lands mid-save.
+      stable_keys: {minimum: 3000, maximum: 8000}
+      key_save_delay_us: {minimum: 600, maximum: 1500}
+      kill_delay_s: {minimum: 0, maximum: 0.3}
+      loss_window_s: fixed
+      mutable_keys: {minimum: 1, maximum: 500}
+startup_overlays:
+  # On every instance: a primary ignores it, and a deployment without replicas has none to select.
+  - overlay_id: no-automatic-failover
+    server_config: {cluster-replica-no-failover: "yes"}
+inputs:
+  properties:
+    stable_keys: {minimum: 1, default: 3000}
+    key_save_delay_us: {minimum: 100}
+    kill_delay_s: {type: number, minimum: 0, maximum: 30, default: 0.2}
+    loss_window_s:
+      type: number
+      minimum: 0
+      maximum: 60
+      default: 2.5
+      description: writes the killed primary acknowledged this close to the kill may be lost (appendfsync everysec, the deployment's default, may postpone its AOF write for 2 s / async replication)
+components:
+  - use: valkey.observer.info
+    id: info
+    config:
+      instances: primary
+      sections: [persistence]
+      interval_s: 0.02
+      on_events: [bgsave.save-started]
+      expectations:
+        - {evidence_id: valkey.forkless.in-progress, field: rdb_current_bgsave_type, equals: forkless, when: during, required: true}
+
+  - use: valkey.observer.log
+    id: logs
+    config:
+      instances: primary
+      expect:
+        - {evidence_id: valkey.forkless.log-started, pattern: "Beginning forklessSaveToDisk", required: true}
+        - {evidence_id: valkey.forkless.log-completed, pattern: "forkless-save: forkless save complete"}
+
+  - use: valkey.fault.process-signal
+    id: kill-during-save
+    config:
+      when_event: bgsave.save-started
+      instance: primary
+      signal: SIGKILL
+      delay_s: {$ref: inputs.kill_delay_s}
+      restart: true
+      restart_mode: immediate
+
+  # Every preloaded key was acknowledged before the loss window opens.
+  - use: valkey.action.sleep
+    id: age-preload
+    depends_on: [writes]
+    config: {seconds: 3}
+
+  - use: valkey.action.bgsave
+    id: bgsave
+    depends_on: [writes, info, logs, kill-during-save, age-preload]
+    config: {instances: primary, expect: any, capture_rdb: false}
+
+  - use: valkey.action.bgsave
+    id: bgsave-after-restart
+    depends_on: [bgsave]
+    config: {instances: primaries, expect: ok, expect_type: forkless}
+
+  - use: valkey.oracle.rdb-snapshot
+    id: snapshot
+    depends_on: [bgsave-after-restart]
+    config: {bgsave: bgsave-after-restart, expect_codec: {$ref: inputs.rdbcompression}}
+
+  - use: valkey.oracle.evidence
+    id: save-after-restart
+    depends_on: [logs]
+    config:
+      require:
+        - {evidence_id: valkey.forkless.log-completed, source: logs}
+
+  - use: valkey.oracle.ledger
+    id: data
+    config:
+      loss_window_s: {$ref: inputs.loss_window_s}
+      loss_window_faults: [kill-during-save]
+      loss_window_scope: fault_targets
+      converge_timeout_s: 60
+
+  - use: valkey.oracle.deployment-state
+    id: deployment-state
+    config: {validation: {stabilization_wait: 3, validation_timeout: 120}}
+required_events: [bgsave.save-started, kill-during-save.recovered, bgsave-after-restart.save-completed]
+required_evidence:
+  - {evidence_id: valkey.fault.injected, source: kill-during-save}
+  - {evidence_id: valkey.rdb.reload-verified, source: snapshot}

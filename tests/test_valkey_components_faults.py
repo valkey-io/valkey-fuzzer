@@ -391,6 +391,10 @@ def test_a_command_fault_whose_selector_matches_nothing_never_runs_on_the_events
 
 
 _LOOPBACK = {"addressing": "per_instance_loopback"}
+_CC, _RC = "valkey.action.cluster-chaos", "valkey.action.replication-chaos"
+_SHARDS = {"primaries": 3, "replicas_per_primary": 1}  # cluster chaos waves
+_PAIR = {"replicas_per_primary": 2}  # replication chaos waves
+_FO0 = {"op": "failover", "shard": 0}
 
 
 @pytest.mark.parametrize(
@@ -422,6 +426,28 @@ _LOOPBACK = {"addressing": "per_instance_loopback"}
          "standalone", {}, "reserved groups"),
         ("valkey.observer.log-trigger", "observer", {"rules": [{"pattern": "a", "publish": "x", "evidence_id": "flat"}]},
          "standalone", {}, "namespaced"),
+        (_CC, "action", {"waves": []}, "cluster", _SHARDS, "at least one wave"),
+        (_CC, "action", {"waves": [[{"op": "failover", "shard": 3}]]}, "cluster", _SHARDS, "not below primaries 3"),
+        (_CC, "action", {"waves": [[_FO0, _FO0]]}, "cluster", _SHARDS, "already fails over in this wave"),
+        (_CC, "action", {"waves": [[{"op": "kill", "target": "valkey-6"}]]}, "cluster", _SHARDS, "not a planned instance"),
+        (_CC, "action", {"waves": [[{"op": "kill", "target": []}]]}, "cluster", _SHARDS, "names no instance"),
+        (_CC, "action", {"waves": [[{"op": "kill", "after": 0}]]}, "cluster", _SHARDS, "earlier operation"),
+        (_CC, "action", {"waves": [[_FO0]], "validation": {"replication_config": {"lag": 1}}}, "cluster", _SHARDS,
+         "replication_config contains unknown fields"),
+        (_CC, "action", {"waves": [[_FO0]]}, "cluster", {"replicas_per_primary": 0}, "replicas_per_primary >= 1"),
+        (_RC, "action", {"waves": [[]]}, "standalone", _PAIR, "has no operations"),
+        (_RC, "action", {"waves": [[_FO0]]}, "standalone", _PAIR, r"op must be one of \['kill', 'restart'"),
+        (_RC, "action", {"waves": [[{"op": "restart"}]]}, "standalone", _PAIR, "needs a kill of the same wave"),
+        # The kill waits for the stall, so it may start after the restart.
+        (_RC, "action", {"waves": [[{"op": "stall", "duration_s": 5}, {"op": "kill", "after": 0},
+                                    {"op": "restart", "delay_s": 1}]]}, "standalone", _PAIR,
+         "needs a kill of the same wave that starts before it"),
+        (_RC, "action", {"waves": [[{"op": "promote", "target": "primary"}]]}, "standalone", _PAIR, "must be one of"),
+        (_RC, "action", {"waves": [[{"op": "repoint", "target": "valkey-1", "to": "valkey-1"}]]}, "standalone", _PAIR,
+         "cannot replicate itself"),
+        (_RC, "action", {"waves": [[{"op": "repoint", "target": "replica", "to": "replica"}]]}, "standalone",
+         {"replicas_per_primary": 1}, "replicas_per_primary >= 2"),
+        (_RC, "action", {"waves": [[{"op": "partition", "target": "replica"}]]}, "standalone", _PAIR, "per_instance_loopback"),
         ("valkey.action.rolling-upgrade", "action", {"to_binary": "/x"}, "standalone", {}, "replicas_per_primary >= 1"),
     ],
 )  # fmt: skip
@@ -432,6 +458,20 @@ def test_bad_component_configs_fail_to_compile(use, role, config, mode, document
     plan = unit_plan((spec,), deployment_mode=mode, document={"mode": mode, **document})
     with pytest.raises(ConfigError, match=message):
         registration_for(use).resolve_config(spec, plan)
+
+
+@pytest.mark.parametrize(
+    "wave",
+    [
+        [{"op": "kill"}, {"op": "restart", "after": 0}],
+        [{"op": "kill", "delay_s": 0.5}, {"op": "stall"}, {"op": "restart", "after": 1, "delay_s": 1}],
+    ],
+    ids=["after-the-kill", "delayed-past-the-kill"],
+)
+def test_a_restart_that_starts_after_its_kill_compiles(wave):
+    spec = ComponentSpec(role=ComponentRole.ACTION, use=_RC, id="subject", config={"waves": [wave]})
+    plan = unit_plan((spec,), deployment_mode="standalone", document={"mode": "standalone", **_PAIR})
+    registration_for(_RC).resolve_config(spec, plan)
 
 
 def test_the_host_probe_skips_a_run_whose_partitions_cannot_work_here(monkeypatch):

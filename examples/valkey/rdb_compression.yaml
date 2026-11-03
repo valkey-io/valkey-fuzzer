@@ -1,0 +1,13 @@
+# Fork-based BGSAVE in lz4 under writes, then a restart that reloads the RDB.
+# Set rdbcompression to no, yes, lzf, lz4, or zstd (zstd needs a
+# BUILD_ZSTD=yes build), bgsave_method to forkless, or appendonly to "yes" to
+# reload from the AOF's RDB preamble.
+#   valkey-fuzzer run examples/valkey/rdb_compression.yaml
+scenario_id: rdb-compression
+seed: 81
+experiment:
+  id: valkey.rdb-compression
+  inputs: {rdbcompression: lz4, bgsave_method: fork, appendonly: "no"}
+deployment:
+  mode: standalone
+  base_port: 7800

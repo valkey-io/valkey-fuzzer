@@ -1113,3 +1113,14 @@ def test_a_private_server_that_writes_more_than_a_pipe_holds_still_exits(tmp_pat
     finally:
         server.stop()
     assert output is not None and output.endswith("FATAL CONFIG FILE ERROR")
+
+
+def test_generated_waves_take_an_explicit_zero_replicas_as_zero_and_stable_keys_are_named_one_way():
+    import random
+
+    from valkey_fuzzer.components.generators import waves
+    from valkey_fuzzer.components.workloads import is_stable_key, stable_key
+
+    drawn = [waves(random.Random(seed), {"deployment": {"replicas_per_primary": 0}}) for seed in range(30)]
+    assert not any(operation["op"] == "kill" for scenario in drawn for wave in scenario for operation in wave)
+    assert is_stable_key(stable_key("vf:writes", 3)) and not is_stable_key("vf:writes:m:3")

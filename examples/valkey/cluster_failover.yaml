@@ -1,0 +1,19 @@
+# One graceful failover of shard 0 with no kills, then the full state
+# validation (replication, cluster state, slots, roles, views, data, logs).
+scenario_id: cluster-failover
+seed: 12345
+experiment:
+  id: valkey.cluster-chaos
+  inputs:
+    waves:
+      - - {op: failover, shard: 0, timeout_s: 30}
+    validation:
+      stabilization_wait: 5.0
+      validation_timeout: 30.0
+      cluster_status_config: {acceptable_states: [ok, unknown]}
+      replication_config: {max_acceptable_lag: 15.0}
+deployment:
+  mode: cluster
+  primaries: 3
+  replicas_per_primary: 1
+  base_port: 7000

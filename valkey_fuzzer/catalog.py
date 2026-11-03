@@ -496,7 +496,7 @@ class Catalog:
 
 
 def register_valkey_components(catalog: Catalog) -> None:
-    """Register the Valkey components, environment providers, experiment fragments, and experiments."""
+    """Register the Valkey components, generator hooks, environment providers, experiment fragments, and experiments."""
 
     # The components import the engine, so they are imported only once it is loaded.
     from . import components
@@ -504,6 +504,7 @@ def register_valkey_components(catalog: Catalog) -> None:
     fragments = components.experiment_fragments()
     catalog.register(
         components=components.component_registrations(),
+        generators=components.GENERATORS,
         experiments=components.experiments(fragments),
         environment_providers=components.ENVIRONMENT_PROVIDERS,
         fragments=fragments,

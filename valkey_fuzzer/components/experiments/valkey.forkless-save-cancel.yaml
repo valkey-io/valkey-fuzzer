@@ -1,0 +1,87 @@
+# Cancel an in-progress forkless BGSAVE with BGSAVE CANCEL and require a clean
+# abort: the snapshot file is not replaced, the cancellation is logged, no
+# in-progress state leaks, and the next forkless save succeeds.
+#
+# Path evidence: INFO reports a forkless save in progress and the cancel
+# fault fired. The `clean-abort` oracle requires the cancellation log line
+# and no save left in progress afterwards.
+extends: [valkey.writes, valkey.forkless, valkey.compression]
+id: valkey.forkless-save-cancel
+deployment:
+  modes: [standalone, cluster]
+metadata:
+  description: Cancel a forkless BGSAVE mid-flight and verify a clean abort and recovery
+  generator:
+    deployment:
+      replicas_per_primary: {minimum: 0, maximum: 2}
+    inputs:
+      # At least 1000 keys per primary at 600 us each: every save outlasts the cancel delay twice over.
+      stable_keys: {minimum: 3000, maximum: 8000}
+      key_save_delay_us: {minimum: 600, maximum: 1500}
+      cancel_delay_s: {minimum: 0, maximum: 0.3}
+      mutable_keys: {minimum: 1, maximum: 500}
+inputs:
+  properties:
+    stable_keys: {minimum: 1, default: 3000}
+    key_save_delay_us: {minimum: 100}
+    cancel_delay_s: {type: number, minimum: 0, maximum: 30, default: 0.2}
+components:
+  - use: valkey.observer.info
+    id: info
+    config:
+      instances: primaries
+      sections: [persistence]
+      interval_s: 0.02
+      on_events: [bgsave.save-started, bgsave.save-completed]
+      expectations:
+        - {evidence_id: valkey.forkless.in-progress, field: rdb_current_bgsave_type, equals: forkless, when: during, instances: all, required: true}
+        - {evidence_id: valkey.persistence.idle-after, field: rdb_bgsave_in_progress, equals: 0, when: final, instances: all}
+        - {evidence_id: valkey.persistence.no-current-save, field: rdb_current_bgsave_type, equals: none, when: final, instances: all}
+        - {evidence_id: valkey.persistence.last-status-ok, field: rdb_last_bgsave_status, equals: ok, when: final, instances: all}
+
+  - use: valkey.observer.log
+    id: logs
+    config:
+      instances: primaries
+      expect:
+        - {evidence_id: valkey.forkless.log-cancel-requested, pattern: "Background saving \\(forkless\\) will be aborted", instances: all}
+        - {evidence_id: valkey.forkless.log-cancelled, pattern: "forkless-save: forkless save cancelled", instances: all}
+        - {evidence_id: valkey.forkless.log-completed, pattern: "forkless-save: forkless save complete", instances: all}
+      forbidden:
+        - {pattern: "forkless-save: forkless save failed"}
+
+  - use: valkey.fault.command
+    id: cancel-save
+    config:
+      when_event: bgsave.save-started
+      instance: primaries
+      command: [BGSAVE, CANCEL]
+      delay_s: {$ref: inputs.cancel_delay_s}
+
+  - use: valkey.action.bgsave
+    id: bgsave
+    depends_on: [writes, info, logs, cancel-save]
+    config: {instances: primaries, expect: not_completed}
+
+  - use: valkey.action.bgsave
+    id: bgsave-after-cancel
+    depends_on: [bgsave]
+    config: {instances: primaries, expect: ok, expect_type: forkless}
+
+  - use: valkey.oracle.rdb-snapshot
+    id: snapshot
+    depends_on: [bgsave-after-cancel]
+    config: {bgsave: bgsave-after-cancel, workload: writes, expect_codec: {$ref: inputs.rdbcompression}}
+
+  - use: valkey.oracle.evidence
+    id: clean-abort
+    depends_on: [info, logs]
+    config:
+      require:
+        - {evidence_id: valkey.forkless.log-cancelled, source: logs}
+        - {evidence_id: valkey.persistence.idle-after, source: info}
+        - {evidence_id: valkey.persistence.no-current-save, source: info}
+required_events: [bgsave.save-started, bgsave.save-completed, bgsave-after-cancel.save-completed]
+required_evidence:
+  - {evidence_id: valkey.fault.injected, source: cancel-save}
+  - {evidence_id: valkey.rdb.reload-verified, source: snapshot}

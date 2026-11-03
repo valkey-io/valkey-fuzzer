@@ -1,0 +1,30 @@
+# A forced full sync in three repl-compression codecs: every variant must
+# pass on its own (each replica's dataset equals its primary's, the ledger
+# holds, and the link's codec and ratio are as predicted), and the link's
+# codec must differ between them. The writes run for a time rather than a
+# count, so the datasets of different variants are not compared. zstd needs
+# a BUILD_ZSTD=yes build.
+#   valkey-fuzzer diff examples/valkey/differential_repl_codecs.yaml
+differential_id: repl-codecs
+base:
+  scenario_id: repl-codecs
+  seed: 89
+  experiment:
+    id: valkey.repl-compression-full-sync
+  deployment:
+    mode: standalone
+    replicas_per_primary: 1
+    base_port: 7880
+variants:
+  plain:
+    experiment.inputs.primary_repl_compression: "no"
+    experiment.inputs.replica_repl_compression: "no"
+  lz4:
+    experiment.inputs.primary_repl_compression: lz4
+    experiment.inputs.replica_repl_compression: lz4
+  zstd:
+    experiment.inputs.primary_repl_compression: zstd
+    experiment.inputs.replica_repl_compression: zstd
+compare:
+  differ:
+    - {evidence_id: valkey.repl.compression-verified, source: compression, field: links.0.algo}

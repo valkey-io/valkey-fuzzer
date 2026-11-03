@@ -1,0 +1,31 @@
+# Forkless BGSAVE: the `forkless-enabled` startup overlay on every instance, a
+# `build` probe that the binary supports it, and the `key_save_delay_us` input.
+# Random scenarios draw small values and the compression pool. Experiments
+# override the probe's `info_fields` or the input's bounds as needed.
+inputs:
+  properties:
+    key_save_delay_us:
+      type: integer
+      minimum: 0
+      maximum: 100000
+      default: 500
+      description: rdb-key-save-delay per key; stretches the save so mid-save observations are deterministic
+startup_overlays:
+  - overlay_id: forkless-enabled
+    server_config:
+      forkless-infrastructure-enabled: "yes"
+      bgsave-default-method: forkless
+      rdb-key-save-delay: {$ref: inputs.key_save_delay_us}
+components:
+  - use: valkey.capability.build-probe
+    id: build
+    config:
+      startup_config: {forkless-infrastructure-enabled: "yes", bgsave-default-method: forkless}
+      config_get: {bgsave-default-method: [forkless]}
+      info_fields: {persistence: [rdb_current_bgsave_type]}
+metadata:
+  generator:
+    inputs:
+      # The AOF stays under auto-aof-rewrite-min-size (64 MB): a rewrite child would refuse the BGSAVE.
+      value_size: {values: [1, 64, 256, 1024]}
+    server_config: [valkey.pool.compression]

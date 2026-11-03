@@ -1,0 +1,29 @@
+# The same seeded, drained workload saved and reloaded in three rdbcompression
+# codecs: the reloaded RDB, the dataset after the restart, and every client
+# reply must be identical, while the RDB's codec must differ (proving each
+# codec ran). zstd needs a BUILD_ZSTD=yes build.
+#   valkey-fuzzer diff examples/valkey/differential_rdb_codecs.yaml
+differential_id: rdb-codecs
+base:
+  scenario_id: rdb-codecs
+  seed: 87
+  experiment:
+    id: valkey.rdb-compression
+    inputs: {operations: 2000}
+  deployment:
+    mode: standalone
+    base_port: 7860
+variants:
+  plain:
+    experiment.inputs.rdbcompression: "no"
+  lz4:
+    experiment.inputs.rdbcompression: lz4
+  zstd:
+    experiment.inputs.rdbcompression: zstd
+compare:
+  equal:
+    - {evidence_id: valkey.dataset.digest, source: dataset, field: digest}
+    - {evidence_id: valkey.rdb.reload-verified, source: snapshot-final, field: content_digest}
+    - {evidence_id: valkey.workload.ledger, source: writes, field: replies_digest}
+  differ:
+    - {evidence_id: valkey.bgsave.result, source: bgsave-final, field: rdb_format.codec}

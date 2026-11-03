@@ -1,0 +1,85 @@
+# Force a full sync of every replica under writes and check that it ran in the
+# predicted codec and transport. The primaries change their replication ID
+# (DEBUG CHANGE-REPL-ID) and drop their replica links, so every replica's
+# PSYNC is refused and a full sync follows, in the codec negotiated from both
+# sides' repl-compression, disk-based only when that codec is also the
+# primary's rdbcompression whole-stream codec and repl-diskless-sync is no.
+#
+# The `compression` oracle checks every link's codec in INFO, the
+# enablement log line of its last session, the primary's BGSAVE-for-SYNC line
+# (target, dual-channel or normal sync, codec), and the codec of the replica's
+# load (the wire codec when it loads from the socket, its own rdbcompression
+# when it loads from disk), and the compression ratio of every link's write
+# stream, so writes keep flowing for run_after_sync_s after the links are up.
+# sync_full must advance, the ledger must hold on every replica, and each
+# replica's dataset must equal its primary's.
+extends: [valkey.full-sync, valkey.repl-compression]
+id: valkey.repl-compression-full-sync
+deployment:
+  modes: [standalone, cluster]
+  replicas_per_primary: {minimum: 1}
+metadata:
+  description: Full sync in every repl-compression codec, disk or diskless, with codec and transport path evidence
+  generator:
+    inputs:
+      # Enough data, in values large enough, that a compressed link of
+      # compressible values reaches min_ratio.
+      stable_keys: {minimum: 500, maximum: 2000}
+      mutation_rate: {minimum: 200, maximum: 2000}
+      value_size: {values: [256, 1024, 16384]}
+      run_before_sync_s: {minimum: 0.5, maximum: 3}
+      # At least 100 writes over the resynchronized links.
+      run_after_sync_s: {minimum: 0.5, maximum: 3}
+      min_ratio: {hook: valkey.generator.compression-ratio}
+inputs:
+  properties:
+    stable_keys: {default: 1000}
+    mutable_keys: {default: 300}
+    mutation_rate: {minimum: 1, default: 500}
+    value_size: {maximum: 1048576, default: 512}
+    run_before_sync_s: {default: 1.5}
+    run_after_sync_s: {type: number, minimum: 0, maximum: 600, default: 1}
+    repl_diskless_sync: {type: string, enum: ["yes", "no"], default: "yes"}
+    repl_diskless_load: {type: string, enum: [disabled, on-empty-db, swapdb, flush-before-load], default: disabled}
+    dual_channel: {type: string, enum: ["yes", "no"], default: "no"}
+    min_ratio: {type: number, minimum: 0, maximum: 1000, default: 1.5, description: with compressible values; 0 disables}
+startup_overlays:
+  - overlay_id: full-sync
+    server_config:
+      repl-diskless-sync: {$ref: inputs.repl_diskless_sync}
+      repl-diskless-load: {$ref: inputs.repl_diskless_load}
+      dual-channel-replication-enabled: {$ref: inputs.dual_channel}
+components:
+  - use: valkey.observer.info
+    id: info
+    config:
+      instances: primaries
+      sections: [stats]
+      interval_s: 0.2
+      expectations:
+        - {evidence_id: valkey.replication.full-resync-counted, field: sync_full, delta_min: 1, instances: all, required: true}
+
+  - use: valkey.action.sleep
+    id: run-before-sync
+    depends_on: [writes, info]
+
+  # Writes keep flowing over the resynchronized, compressed links.
+  - use: valkey.action.sleep
+    id: run-after-sync
+    depends_on: [links-up]
+    config: {seconds: {$ref: inputs.run_after_sync_s}}
+
+  - use: valkey.oracle.repl-compression
+    id: compression
+    config: {full_sync: true, min_ratio: {$ref: inputs.min_ratio}}
+
+  - use: valkey.oracle.dataset-digest
+    id: dataset
+    config: {include_replicas: true, converge_timeout_s: 60}
+
+  - use: valkey.oracle.deployment-state
+    id: deployment-state
+    config: {validation: {stabilization_wait: 1, validation_timeout: 120}}
+required_events: [run-after-sync.completed]
+required_evidence:
+  - {evidence_id: valkey.dataset.digest, source: dataset}

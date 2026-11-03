@@ -1,0 +1,41 @@
+# valkey.compression plus replication stream compression: `repl-compression`
+# for primaries (the strongest codec they may send) and for replicas (what
+# they advertise), compressible values, and the `compression` oracle, which
+# predicts every link's codec from the instances' configuration and checks
+# INFO and the logs. Needs replicas; replicas_per_primary must be at least 1.
+extends: [valkey.compression]
+metadata:
+  generator:
+    deployment:
+      standalone: {replicas_per_primary: {minimum: 1, maximum: 3}}
+      cluster: {replicas_per_primary: {minimum: 1, maximum: 2}}
+    inputs:
+      # min_ratio judges each link's compressed write stream: in cluster mode
+      # every shard must take writes, so enough mutable keys to cover the
+      # shards of any drawn cluster (two keys left a shard with only pings).
+      mutable_keys: {minimum: 100, maximum: 1000}
+inputs:
+  properties:
+    primary_repl_compression: {type: string, enum: ["no", "yes", lz4, zstd], default: lz4}
+    replica_repl_compression: {type: string, enum: ["no", "yes", lz4, zstd], default: lz4}
+    compressible: {type: boolean, default: true, description: "repetitive values, so compressed links shrink the stream"}
+startup_overlays:
+  - overlay_id: primary-repl-compression
+    selector: primaries
+    server_config:
+      repl-compression: {$ref: inputs.primary_repl_compression}
+  - overlay_id: replica-repl-compression
+    selector: replicas
+    server_config:
+      repl-compression: {$ref: inputs.replica_repl_compression}
+components:
+  - use: valkey.workload.key-value
+    id: writes
+    config:
+      compressible: {$ref: inputs.compressible}
+
+  - use: valkey.oracle.repl-compression
+    id: compression
+    config: {converge_timeout_s: 60}
+required_evidence:
+  - {evidence_id: valkey.repl.compression-verified, source: compression}

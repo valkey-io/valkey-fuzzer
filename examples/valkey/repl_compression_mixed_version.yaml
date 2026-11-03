@@ -1,0 +1,22 @@
+# Primaries on a build with replication compression, replicas on Valkey 8.1.
+# Every link stays plaintext and every full sync to an 8.1 replica is
+# diskless. Point the artifacts at the two builds.
+scenario_id: repl-compression-mixed-version
+seed: 85
+artifacts:
+  old:
+    use: valkey.artifact.local-binary
+    with: {path: /opt/valkey-8.1/src/valkey-server}
+  new:
+    use: valkey.artifact.local-binary
+    with: {path: /opt/valkey/src/valkey-server}
+experiment:
+  id: valkey.repl-compression-mixed-version
+  inputs:
+    old_binary: {$ref: artifacts.old.binary}
+deployment:
+  mode: cluster
+  base_port: 7840
+  valkey_binary: {$ref: artifacts.new.binary}
+  instance_binaries:
+    replica: {$ref: artifacts.old.binary}

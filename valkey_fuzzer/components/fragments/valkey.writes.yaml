@@ -1,0 +1,37 @@
+# A key/value workload named `writes` that records every operation's
+# client-visible outcome, and the `data` oracle that checks the final dataset
+# and every replica against that ledger. Experiments override `writes` config fields
+# (e.g. `mix`, `op_timeout_s`) or the input defaults as needed.
+#
+# metadata.generator bounds what random scenarios draw for the workload inputs,
+# so every experiment stays a few minutes on one host unless it overrides a
+# range (with the same form: {minimum, maximum} or {values: [...]}).
+extends: [valkey.liveness]
+metadata:
+  generator:
+    inputs:
+      stable_keys: {minimum: 0, maximum: 2000}
+      mutable_keys: {minimum: 1, maximum: 1000}
+      mutation_rate: {minimum: 1, maximum: 1000}
+      value_size: {values: [1, 64, 1024, 16384]}
+inputs:
+  type: object
+  additionalProperties: false
+  properties:
+    stable_keys: {type: integer, minimum: 0, maximum: 1000000, default: 1000}
+    mutable_keys: {type: integer, minimum: 1, maximum: 100000, default: 200}
+    mutation_rate: {type: number, minimum: 0, maximum: 20000, default: 200}
+    value_size: {type: integer, minimum: 1, maximum: 65536, default: 64}
+components:
+  - use: valkey.workload.key-value
+    id: writes
+    config:
+      stable_keys: {$ref: inputs.stable_keys}
+      mutable_keys: {$ref: inputs.mutable_keys}
+      rate: {$ref: inputs.mutation_rate}
+      value_size: {$ref: inputs.value_size}
+  - use: valkey.oracle.ledger
+    id: data
+    config: {workload: writes}
+required_evidence:
+  - {evidence_id: valkey.data.ledger-verified, source: data}

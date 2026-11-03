@@ -1,0 +1,44 @@
+# A deterministic, build-agnostic workload for differential runs.
+#
+# A seeded workload performs exactly `operations` operations and drains; a
+# BGSAVE then snapshots the quiesced dataset. Evidence records canonical
+# digests of the live dataset, of the reloaded RDB, and of every client-visible
+# reply. Two variants of this plan (fork vs forkless save, baseline vs
+# candidate binary, a configuration flag on vs off) must produce identical
+# digests. Variant-specific settings belong in deployment.server_config or the
+# deployment's binary, never in this experiment, so it runs on any build; the
+# RDB codec is the rdbcompression input (valkey.compression), which the
+# snapshot must be in.
+extends: [valkey.drained-writes, valkey.compression]
+id: valkey.snapshot-equivalence
+deployment:
+  modes: [standalone, cluster]
+metadata:
+  description: Deterministic workload, quiesced BGSAVE, and dataset/RDB/reply digests for differential runs
+  generator:
+    deployment:
+      replicas_per_primary: {minimum: 0, maximum: 2}
+    inputs:
+      value_size: {values: [1, 64, 1024, 8192]}
+    server_config: [valkey.pool.persistence, valkey.pool.replication, valkey.pool.compression]
+inputs:
+  properties:
+    mutable_keys: {default: 300}
+    mutation_rate: {minimum: 1, maximum: 100000, default: 2000}
+components:
+  - use: valkey.action.bgsave
+    id: bgsave
+    depends_on: [drained]
+    config: {instances: primaries, expect: ok}
+
+  - use: valkey.oracle.rdb-snapshot
+    id: snapshot
+    depends_on: [bgsave]
+    config: {bgsave: bgsave, workload: writes, expect_codec: {$ref: inputs.rdbcompression}}
+
+  - use: valkey.oracle.dataset-digest
+    id: dataset
+required_evidence:
+  - {evidence_id: valkey.wait.event-observed, source: drained}
+  - {evidence_id: valkey.rdb.reload-verified, source: snapshot}
+  - {evidence_id: valkey.dataset.digest, source: dataset}

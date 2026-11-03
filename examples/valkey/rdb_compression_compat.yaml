@@ -1,0 +1,19 @@
+# Save an lz4 RDB and load it with Valkey 8.1, which must refuse it cleanly.
+# With rdbcompression no and load_config {rdb-version-check: relaxed}, 8.1
+# loads it (load_expect: loads). Point `old` at an older valkey-server.
+scenario_id: rdb-compression-compat
+seed: 82
+artifacts:
+  old:
+    use: valkey.artifact.local-binary
+    with: {path: /opt/valkey-8.1/src/valkey-server}
+experiment:
+  id: valkey.rdb-compression-compat
+  inputs:
+    rdbcompression: lz4
+    load_binary: {$ref: artifacts.old.binary}
+    load_expect: refused
+    refused_log: Wrong signature trying to load DB
+deployment:
+  mode: standalone
+  base_port: 7810

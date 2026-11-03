@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from tests.support import VirtualClock
-from tests.valkey_experiments_support import fake_context, resolved
+from tests.valkey_experiments_support import fake_context, resolved, valkey_experiment
 from valkey_fuzzer.components import cluster_election, instances, polling, processes
 from valkey_fuzzer.components.cluster import parse_slots, read_view
 from valkey_fuzzer.components.cluster_election import ElectionAction
@@ -642,6 +642,17 @@ def test_an_old_primary_that_still_claims_its_slots_is_given_until_the_timeout(m
     if status == "ERROR":
         assert "still had 2 slot-owning primaries 2s after the first look" in result.summary
         assert clock.elapsed == pytest.approx(2, abs=0.25)
+
+
+def test_the_election_experiment_checks_every_kill_it_can_make():
+    experiment = valkey_experiment("valkey.cluster-election-durability")
+    killers = {
+        component.id
+        for component in experiment.components
+        if component.use in ("valkey.fault.process-signal", "valkey.action.cluster-election")
+    }
+    (safety,) = [item for item in experiment.components if item.use == "valkey.oracle.cluster-election-safety"]
+    assert killers == {"kill-voter", "first-election", "second-election"} <= set(safety.config["crash_faults"])
 
 
 def test_a_shard_without_a_live_replica_starts_no_election(monkeypatch):

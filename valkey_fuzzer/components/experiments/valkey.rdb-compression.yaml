@@ -1,0 +1,117 @@
+# BGSAVE in every rdbcompression codec, fork or forkless, under concurrent
+# writes; then, with the workload drained, a final BGSAVE, an AOF rewrite, and
+# a restart of the primary that reloads its data from dump.rdb (appendonly no)
+# or from the AOF, whose base is an RDB preamble in the same codec
+# (appendonly yes).
+#
+# Path evidence: every bgsave result records its RDB's envelope and codec
+# (`rdb_format`). The snapshot oracles require that codec to match
+# rdbcompression (lz4 and zstd: a VCS envelope naming the codec; no, yes, and
+# lzf: a plain RDB), require each private reload to log `Loading compressed
+# RDB (algo=X)` exactly for a compressed codec, and require the restarted
+# primary's own reload to show the same codec. Each RDB must be a consistent
+# cut of the write history, and after the restart no acknowledged write may be
+# missing, every replica must hold its primary's dataset, and the deployment
+# state must validate. Evidence records digests of the final RDB, the dataset,
+# and the client replies, so codecs can be compared differentially.
+extends: [valkey.drained-writes, valkey.compression]
+id: valkey.rdb-compression
+deployment:
+  modes: [standalone]
+metadata:
+  description: BGSAVE (fork or forkless) and restart reload in every rdbcompression codec, with codec path evidence
+  generator:
+    deployment:
+      replicas_per_primary: {minimum: 0, maximum: 2}
+    inputs:
+      stable_keys: {minimum: 1, maximum: 2000}
+    server_config: [valkey.pool.replication, valkey.pool.compression]
+inputs:
+  properties:
+    stable_keys: {minimum: 1, default: 1000}
+    value_size: {maximum: 1048576, default: 256}
+    mutation_rate: {minimum: 1, default: 1000}
+    operations: {default: 3000}
+    compressible: {type: boolean, default: true}
+    bgsave_method: {type: string, enum: [fork, forkless], default: fork}
+    appendonly:
+      type: string
+      enum: ["yes", "no"]
+      default: "no"
+      description: "no: the restart reloads dump.rdb; yes: it reloads the AOF and its RDB preamble"
+startup_overlays:
+  - overlay_id: save-and-reload
+    server_config:
+      forkless-infrastructure-enabled: "yes"
+      bgsave-default-method: {$ref: inputs.bgsave_method}
+      appendonly: {$ref: inputs.appendonly}
+components:
+  - use: valkey.workload.key-value
+    id: writes
+    config:
+      compressible: {$ref: inputs.compressible}
+
+  - use: valkey.action.bgsave
+    id: bgsave
+    depends_on: [writes]
+    config: {instances: primaries, expect: ok, expect_type: {$ref: inputs.bgsave_method}}
+
+  - use: valkey.action.wait-event
+    id: drained
+    depends_on: [bgsave]
+
+  - use: valkey.action.bgsave
+    id: bgsave-final
+    depends_on: [drained]
+    config: {instances: primaries, expect: ok, expect_type: {$ref: inputs.bgsave_method}}
+
+  - use: valkey.action.command
+    id: rewrite-aof
+    depends_on: [bgsave-final]
+    config: {instances: primaries, command: [BGREWRITEAOF]}
+
+  - use: valkey.action.poll
+    id: aof-rewritten
+    depends_on: [rewrite-aof]
+    config:
+      instances: primaries
+      section: persistence
+      field: aof_rewrite_in_progress
+      predicate: {equals: 0}
+      timeout_s: 120
+
+  - use: valkey.action.restart-instance
+    id: restart
+    depends_on: [aof-rewritten]
+    config: {instance: primary}
+
+  - use: valkey.oracle.rdb-snapshot
+    id: snapshot
+    config: {bgsave: bgsave, workload: writes, expect_codec: {$ref: inputs.rdbcompression}}
+
+  - use: valkey.oracle.rdb-snapshot
+    id: snapshot-final
+    config:
+      bgsave: bgsave-final
+      workload: writes
+      expect_codec: {$ref: inputs.rdbcompression}
+      instance_reload: true
+
+  - use: valkey.oracle.ledger
+    id: data
+    config: {converge_timeout_s: 60}
+
+  - use: valkey.oracle.dataset-digest
+    id: dataset
+    config: {include_replicas: true}
+
+  - use: valkey.oracle.deployment-state
+    id: deployment-state
+    config: {validation: {stabilization_wait: 1, validation_timeout: 120}}
+required_events: [restart.completed]
+required_evidence:
+  - {evidence_id: valkey.rdb.reload-verified, source: snapshot}
+  - {evidence_id: valkey.rdb.reload-verified, source: snapshot-final}
+  - {evidence_id: valkey.instance.restarted, source: restart}
+  - {evidence_id: valkey.dataset.digest, source: dataset}
+  - {evidence_id: valkey.deployment.validated, source: deployment-state}

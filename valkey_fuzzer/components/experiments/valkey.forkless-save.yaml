@@ -1,0 +1,88 @@
+# Forkless BGSAVE under concurrent mutations.
+#
+# Path evidence proves the forkless implementation ran (not merely that it was
+# configured): INFO reports a forkless save in progress, and the server logs
+# the forkless save start. The `forkless-completed` oracle requires INFO to
+# report forkless as the last save type, rdb_saves to advance, and the server
+# to log the save's completion. Correctness oracles reload every captured RDB
+# in a private server (stable keys exact, every other value one that was
+# actually written), check the live dataset against the workload ledger, and
+# validate the deployment state.
+extends: [valkey.base, valkey.forkless, valkey.compression]
+id: valkey.forkless-save
+deployment:
+  modes: [standalone, cluster]
+metadata:
+  description: Forkless BGSAVE under concurrent mutations with RDB reload and ledger oracles
+  generator:
+    deployment:
+      replicas_per_primary: {minimum: 0, maximum: 2}
+    inputs:
+      # At least 600 keys per primary at 300 us each, so the observer sees the save in progress.
+      stable_keys: {minimum: 2000, maximum: 6000}
+      key_save_delay_us: {minimum: 300, maximum: 1000}
+      mutation_rate: {minimum: 1, maximum: 2000}
+inputs:
+  properties:
+    stable_keys: {minimum: 1, default: 2000}
+    mutation_rate: {default: 300}
+    value_size: {default: 128}
+    compressible: {type: boolean, default: false}
+components:
+  - use: valkey.capability.build-probe
+    id: build
+    config:
+      info_fields:
+        persistence: [rdb_current_bgsave_type, rdb_last_bgsave_type, forkless_estimated_seconds_remaining]
+
+  - use: valkey.observer.info
+    id: info
+    config:
+      instances: primaries
+      sections: [persistence]
+      interval_s: 0.02
+      on_events: [bgsave.save-started, bgsave.save-completed]
+      expectations:
+        - {evidence_id: valkey.forkless.in-progress, field: rdb_current_bgsave_type, equals: forkless, when: during, instances: all, required: true}
+        - {evidence_id: valkey.forkless.last-type, field: rdb_last_bgsave_type, equals: forkless, when: final, instances: all}
+        - {evidence_id: valkey.persistence.saves-advanced, field: rdb_saves, delta_min: 1, instances: all}
+        - {evidence_id: valkey.persistence.last-status-ok, field: rdb_last_bgsave_status, equals: ok, when: final, instances: all}
+        - {evidence_id: valkey.persistence.idle-after, field: rdb_bgsave_in_progress, equals: 0, when: final, instances: all}
+
+  - use: valkey.observer.log
+    id: logs
+    config:
+      instances: primaries
+      expect:
+        - {evidence_id: valkey.forkless.log-started, pattern: "Beginning forklessSaveToDisk", instances: all, required: true}
+        - {evidence_id: valkey.forkless.log-completed, pattern: "forkless-save: forkless save complete", instances: all}
+      forbidden:
+        - {pattern: "forkless-save: forkless save failed"}
+        - {pattern: "Falling back to fork-based save"}
+
+  - use: valkey.workload.key-value
+    id: writes
+    config:
+      compressible: {$ref: inputs.compressible}
+
+  - use: valkey.action.bgsave
+    id: bgsave
+    depends_on: [writes, info, logs]
+    config: {instances: primaries, expect: ok, expect_type: forkless}
+
+  - use: valkey.oracle.rdb-snapshot
+    id: snapshot
+    depends_on: [bgsave]
+    config: {bgsave: bgsave, workload: writes, expect_codec: {$ref: inputs.rdbcompression}}
+
+  - use: valkey.oracle.evidence
+    id: forkless-completed
+    depends_on: [info, logs]
+    config:
+      require:
+        - {evidence_id: valkey.forkless.last-type, source: info}
+        - {evidence_id: valkey.persistence.saves-advanced, source: info}
+        - {evidence_id: valkey.forkless.log-completed, source: logs}
+required_events: [writes.seeded, bgsave.save-started, bgsave.save-completed]
+required_evidence:
+  - {evidence_id: valkey.rdb.reload-verified, source: snapshot}

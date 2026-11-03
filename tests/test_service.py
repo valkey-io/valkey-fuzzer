@@ -1,5 +1,6 @@
 """RunService below the CLI: its catalog, report folders, replay provenance, and the run reports it refuses."""
 
+import copy
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -17,15 +18,18 @@ from valkey_fuzzer.catalog import (
 from valkey_fuzzer.deployment.local.rerun import binary_drift
 from valkey_fuzzer.environment import EnvironmentSpec
 from valkey_fuzzer.plan import ExecutionPlan, ExperimentSpec, RunMode
+from valkey_fuzzer.provenance import provenance_drift, reproducer
 from valkey_fuzzer.references import EnvironmentKind, parse_environment_reference
 from valkey_fuzzer.registrations import DeploymentProviderRegistration
 from valkey_fuzzer.registry import FrozenRegistryError
-from valkey_fuzzer.reports import ReportWriteError, new_report_folder
+from valkey_fuzzer.reports import InputError, ReportWriteError, new_report_folder
 from valkey_fuzzer.results import ComponentResult, ComponentStatus, OutcomeStatus
 from valkey_fuzzer.runner import RunnerError
 from valkey_fuzzer.schema import ExperimentDocumentError, ScenarioCompileError
 from valkey_fuzzer.service import RunService
 from valkey_fuzzer.testing import FakeDeploymentProvider
+
+FORKLESS = str(Path(__file__).resolve().parents[1] / "examples" / "valkey" / "forkless_save.yaml")
 
 
 def test_report_folders_sort_by_start_time_and_never_collide(tmp_path, monkeypatch):
@@ -45,6 +49,48 @@ def test_report_folders_sort_by_start_time_and_never_collide(tmp_path, monkeypat
     (tmp_path / "file").write_text("")
     with pytest.raises(ReportWriteError, match="could not create a report folder under"):
         new_report_folder(str(tmp_path / "file"), "run")
+
+
+def test_provenance_of_the_same_run_matches_but_a_garbled_record_drifts(service):
+    plan = service.prepare_run(FORKLESS).plan
+    recorded = reproducer(service.catalog, plan)
+    assert provenance_drift(service.catalog, plan, recorded) == ([], [])
+    # Known-bad: a malformed list compares as empty, so what it should hold drifts.
+    recorded["components"] = "garbled"
+    items = {entry["item"] for entry in provenance_drift(service.catalog, plan, recorded)[0]}
+    assert {f"component {item.use}" for item in plan.components} <= items
+
+
+@pytest.mark.parametrize(
+    ("edit", "missing"),
+    [
+        (lambda report: report.pop("reproducer"), "reproducer"),
+        (lambda report: report.pop("scenario"), "scenario"),
+        (lambda report: report["reproducer"].pop("components"), "reproducer.components"),
+        (lambda report: report.update(reproducer=[]), "reproducer"),
+        (lambda report: report.pop("outcome"), "outcome"),
+        (lambda report: report.update(outcome=[]), "outcome"),
+        (lambda report: report["outcome"].pop("plan"), "outcome.plan"),
+    ],
+)
+def test_replay_and_minimize_reject_an_incomplete_run_report(service, tmp_path, edit, missing):
+    prepared = service.prepare_run(FORKLESS)
+    report = copy.deepcopy(service.execute(prepared.plan, scenario=prepared.scenario).report)
+    edit(report)
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps(report))
+    for prepare in (service.prepare_replay, service.prepare_minimization):
+        with pytest.raises(InputError, match=rf"not a complete run report: it has no {missing}\b"):
+            prepare(str(path))
+
+
+def test_a_document_that_cannot_be_read_is_an_input_error(service, tmp_path):
+    # The decoding error is an input error, not an unwrapped UnicodeDecodeError.
+    path = tmp_path / "report.json"
+    path.write_bytes(b"\xff\xfe{}")
+    for prepare in (service.prepare_replay, service.prepare_minimization, service.read_base):
+        with pytest.raises(InputError, match="unable to read"):
+            prepare(str(path))
 
 
 # ---------------------------------------------------------------------------
@@ -112,9 +158,10 @@ def test_registered_components_and_directory_experiments_compile_and_run_on_a_fr
     ("files", "error"),
     [
         ({"first/a.yaml": "example.a", "second/a.yaml": "example.a"}, DuplicateExperimentError),
+        ({"first/a.yaml": "valkey.forkless-save"}, DuplicateExperimentError),
         ({"first/a.yaml": "example.a", "second/broken.yaml": None}, ExperimentDocumentError),
     ],
-    ids=["one-id-in-two-directories", "a-malformed-document"],
+    ids=["one-id-in-two-directories", "a-directory-and-a-shipped-experiment", "a-malformed-document"],
 )  # fmt: skip
 def test_a_catalog_with_a_conflict_or_a_malformed_document_is_never_built(tmp_path, files, error):
     for name, experiment_id in files.items():
@@ -227,3 +274,70 @@ def test_binary_drift_reads_the_source_built_default_binary_as_a_run_would_start
     recorded = [{"instance_id": "valkey-0", "binary": str(built), "binary_sha256": file_sha256(str(built))}]
 
     assert binary_drift(plan, recorded) == ([], [])
+
+
+def test_replay_compares_each_artifact_by_its_recorded_sha256(service, canned_runs, tmp_path):
+    # rolling-upgrade's to_binary names only an artifact; no instance starts on it, so the
+    # per-instance comparison never sees it.
+    binaries = {}
+    for name in ("baseline", "candidate"):
+        binaries[name] = tmp_path / f"{name}-server"
+        binaries[name].write_text(f"#!/bin/sh\n# {name}\n")
+        binaries[name].chmod(0o755)
+    scenario = tmp_path / "upgrade.yaml"
+    scenario.write_text(
+        json.dumps(
+            {
+                "scenario_id": "rolling-upgrade",
+                "seed": 61,
+                "artifacts": {
+                    name: {"use": "valkey.artifact.local-binary", "with": {"path": str(path)}}
+                    for name, path in binaries.items()
+                },
+                "experiment": {
+                    "id": "valkey.rolling-upgrade",
+                    "inputs": {"to_binary": {"$ref": "artifacts.candidate.binary"}},
+                },
+                "deployment": {
+                    "mode": "standalone",
+                    "replicas_per_primary": 1,
+                    "valkey_binary": {"$ref": "artifacts.baseline.binary"},
+                },
+            }
+        )
+    )
+
+    def acquired(name, digest):
+        result = {"provenance": {} if digest is None else {"sha256": digest}}
+        return {
+            "dependency": f"artifacts.{name}",
+            "phase": "acquire",
+            "outcome": "succeeded",
+            "details": {"result": result},
+        }
+
+    # What the provisioner records: each resolved artifact's provenance, here as the local-binary provider does.
+    unrecorded = set()
+    canned_runs.diagnostics = lambda plan: {
+        "environment_report": {
+            "records": [
+                acquired(name, None if name in unrecorded else file_sha256(str(path)))
+                for name, path in binaries.items()
+            ]
+        }
+    }
+    prepared = service.prepare_run(str(scenario))
+    record = service.execute(prepared.plan, scenario=prepared.scenario, report_dir=str(tmp_path / "r"))
+    binaries["candidate"].write_text("#!/bin/sh\n# rebuilt from another commit\n")
+
+    replay = service.prepare_replay(record.report_path)
+    assert replay.drift == []
+    late = service.replay(replay).late_drift
+    assert [entry["item"] for entry in late] == ["artifacts.candidate sha256"]
+
+    unrecorded.add("candidate")
+    record = service.execute(prepared.plan, scenario=prepared.scenario, report_dir=str(tmp_path / "r2"))
+    assert (
+        "artifacts.candidate: the recorded run has no sha256 for it"
+        in service.prepare_replay(record.report_path).not_verified
+    )

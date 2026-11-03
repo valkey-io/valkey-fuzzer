@@ -1,0 +1,77 @@
+# Upgrade every instance from one build to another while writes continue.
+# Replicas restart on the new build first, each shard then fails over
+# gracefully to an upgraded replica, and the former primary restarts on the
+# new build. Graceful failover must not lose a single acknowledged write.
+#
+# The scenario declares both builds as valkey.artifact.local-binary artifacts,
+# starts every instance on the old one (deployment.valkey_binary), and passes
+# the new one as the `to_binary` input: {$ref: artifacts.<id>.binary}.
+extends: [valkey.base]
+id: valkey.rolling-upgrade
+deployment:
+  modes: [standalone, cluster]
+  replicas_per_primary: {minimum: 1}
+metadata:
+  description: Rolling upgrade under writes with graceful failovers and zero acknowledged-write loss
+  generator:
+    # to_binary defaults to the deployment's own build, which the two-build
+    # probe rejects (ERROR); give the builds with --base for a real upgrade.
+    hook: valkey.generator.upgrade-target
+    deployment:
+      replicas_per_primary: {minimum: 1, maximum: 2}
+inputs:
+  required: [to_binary]
+  properties:
+    to_binary:
+      type: environment_reference
+      reference_kinds: [artifacts]
+      description: "Binary every instance is upgraded to, e.g. {$ref: artifacts.candidate.binary}"
+    mutable_keys: {default: 300}
+    mutation_rate: {minimum: 1, default: 300}
+startup_overlays:
+  - overlay_id: durable-restarts
+    server_config:
+      appendonly: "yes"
+      appendfsync: always
+components:
+  - use: valkey.capability.build-probe
+    id: build
+    config:
+      min_distinct_builds: 2
+      binaries: [{$ref: inputs.to_binary}]
+
+  - use: valkey.observer.log
+    id: logs
+    config:
+      instances: all
+      expect:
+        - {evidence_id: valkey.upgrade.restarted-logged, pattern: "Valkey is starting", instances: all, required: true}
+
+  - use: valkey.workload.key-value
+    id: writes
+    config:
+      mix: {set: 0.7, del: 0.1, get: 0.2}
+
+  - use: valkey.action.rolling-upgrade
+    id: upgrade
+    depends_on: [writes, logs]
+    config:
+      to_binary: {$ref: inputs.to_binary}
+
+  - use: valkey.oracle.binary-check
+    id: provenance
+    config:
+      expect_binary: {$ref: inputs.to_binary}
+
+  - use: valkey.oracle.ledger
+    id: data
+    config: {acknowledged: must_survive, converge_timeout_s: 60}
+
+  - use: valkey.oracle.deployment-state
+    id: deployment-state
+    config: {validation: {stabilization_wait: 2, validation_timeout: 120}}
+required_events: [upgrade.started, upgrade.completed]
+required_evidence:
+  - {evidence_id: valkey.upgrade.completed, source: upgrade}
+  - {evidence_id: valkey.binary.verified, source: provenance}
+  - {evidence_id: valkey.deployment.validated, source: deployment-state}

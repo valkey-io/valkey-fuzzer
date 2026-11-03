@@ -1,0 +1,80 @@
+# valkey.base plus the PSYNC procedure: run writes for `disconnect_after_s`,
+# then valkey.reconnect-replicas: drop every replica link from the primary
+# side (`drop-replica-links`) and wait until every replica's link is up again
+# (`links-up`). The `info` and `logs` observers record sync_partial_ok, any
+# new full sync, and both sides' PSYNC log lines, and the `psync` oracle
+# requires sync_partial_ok to advance with no new full sync and both sides to
+# log the PSYNC handshake. The `logs` observer forbids a full resync (which
+# `liveness` reports), and the `data` oracle requires every replica to
+# converge. Needs replicas; experiments add their own steps, name
+# what `links-up` waits for in its depends_on when they add one before it,
+# and choose the `info` sections.
+extends: [valkey.base, valkey.reconnect-replicas]
+deployment:
+  modes: [standalone, cluster]
+  replicas_per_primary: {minimum: 1}
+metadata:
+  generator:
+    deployment:
+      standalone: {replicas_per_primary: {minimum: 1, maximum: 3}}
+      cluster: {replicas_per_primary: {minimum: 1, maximum: 2}}
+    inputs:
+      disconnect_after_s: {minimum: 0.5, maximum: 3}
+inputs:
+  properties:
+    stable_keys: {default: 500}
+    mutable_keys: {default: 300}
+    mutation_rate: {minimum: 1, default: 400}
+    disconnect_after_s: {type: number, minimum: 0, maximum: 600, default: 1}
+components:
+  - use: valkey.observer.info
+    id: info
+    config:
+      instances: primaries
+      interval_s: 0.1
+      expectations:
+        - {evidence_id: valkey.replication.partial-resync-counted, field: sync_partial_ok, delta_min: 1}
+        - {evidence_id: valkey.replication.no-full-resync, field: sync_full, delta_max: 0, instances: all}
+
+  - use: valkey.observer.log
+    id: logs
+    config:
+      instances: all
+      expect:
+        - {evidence_id: valkey.replication.psync-accepted-logged, pattern: "Partial resynchronization request from .* accepted"}
+        - {evidence_id: valkey.replication.psync-succeeded-logged, pattern: "Successful partial resynchronization with primary"}
+      forbidden:
+        - {pattern: "Full resync from primary"}
+
+  - use: valkey.workload.key-value
+    id: writes
+    config:
+      mix: {set: 0.8, del: 0.1, get: 0.1}
+
+  - use: valkey.action.sleep
+    id: run-then-disconnect
+    depends_on: [writes, info, logs]
+    config: {seconds: {$ref: inputs.disconnect_after_s}}
+
+  - use: valkey.action.command
+    id: drop-replica-links
+    depends_on: [run-then-disconnect]
+
+  - use: valkey.oracle.ledger
+    id: data
+    config: {converge_timeout_s: 60}
+
+  - use: valkey.oracle.deployment-state
+    id: deployment-state
+    config: {validation: {stabilization_wait: 1}}
+
+  - use: valkey.oracle.evidence
+    id: psync
+    depends_on: [info, logs]
+    config:
+      require:
+        - {evidence_id: valkey.replication.partial-resync-counted, source: info}
+        - {evidence_id: valkey.replication.no-full-resync, source: info}
+        - {evidence_id: valkey.replication.psync-accepted-logged, source: logs}
+        - {evidence_id: valkey.replication.psync-succeeded-logged, source: logs}
+required_events: [run-then-disconnect.completed]

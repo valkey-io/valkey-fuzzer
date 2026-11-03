@@ -1,0 +1,18 @@
+# Executable counterexample of formal/cluster-election/model.tla: kill the primary
+# that grants the first failover vote, restart it, elect again, and check one
+# winner per epoch.  Set save_behavior: best-effort to run the model's
+# negative-controls/vote-before-save.cfg configuration; see
+# examples/valkey/cluster_election_batch.yaml for the seed sweep.
+scenario_id: cluster-election-durability
+seed: 41
+experiment:
+  id: valkey.cluster-election-durability
+  inputs:
+    save_behavior: sync
+    election: force_failover
+    vote_occurrence: 1
+deployment:
+  mode: cluster
+  primaries: 3
+  replicas_per_primary: 2
+  base_port: 7700

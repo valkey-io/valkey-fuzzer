@@ -1,0 +1,26 @@
+# Replication chaos on a primary with three replicas: a graceful promotion
+# and a replica kill and restart; a stalled replica while the primary is
+# killed (the heal promotes the most advanced replica); a forced promotion
+# with a half-second split brain; and a chained replica under backlog
+# pressure. Every acknowledged write must survive except those the old
+# primary acknowledged inside a forced promotion's loss window.
+scenario_id: replication-chaos-example
+seed: 4243
+experiment:
+  id: valkey.replication-chaos
+  inputs:
+    mutation_rate: 300
+    waves:
+      - - {op: promote, target: replica, mode: graceful}
+        - {op: kill, target: replica, delay_s: 0.5}
+        - {op: restart, target: killed, delay_s: 1.5}
+      - - {op: stall, target: replica, duration_s: 1.5}
+        - {op: kill, target: primary, signal: SIGKILL, delay_s: 0.5}
+      - - {op: promote, target: replica, mode: force, split_s: 0.5}
+        - {op: compression, target: all, value: lz4, duration_s: 1.0}
+      - - {op: repoint, target: replica, to: replica}
+        - {op: backlog_pressure, repl_backlog_size: 16384, output_limit: 65536, duration_s: 2.0, delay_s: 0.2}
+deployment:
+  mode: standalone
+  replicas_per_primary: 3
+  base_port: 7460

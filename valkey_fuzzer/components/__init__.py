@@ -20,6 +20,7 @@ from valkey_fuzzer.schema import load_yaml_mapping
 from . import (
     actions,
     capabilities,
+    cluster_chaos,
     cluster_election,
     cluster_trace,
     compression,
@@ -29,10 +30,12 @@ from . import (
     network,
     observers,
     oracles,
+    replication_chaos,
     snapshots,
     storage,
     workloads,
 )
+from .generators import GENERATORS
 from .providers import ENVIRONMENT_PROVIDERS
 
 EXPERIMENT_DIRECTORY = Path(__file__).resolve().parent / "experiments"
@@ -43,6 +46,7 @@ _MODULES = (
     storage,
     workloads,
     actions,
+    cluster_chaos,
     faults,
     network,
     observers,
@@ -53,6 +57,7 @@ _MODULES = (
     cluster_election,
     cluster_trace,
     election_safety,
+    replication_chaos,
 )
 
 
@@ -90,6 +95,7 @@ __all__ = [
     "ENVIRONMENT_PROVIDERS",
     "EXPERIMENT_DIRECTORY",
     "FRAGMENT_DIRECTORY",
+    "GENERATORS",
     "component_registrations",
     "experiment_fragments",
     "experiments",

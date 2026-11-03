@@ -1,0 +1,27 @@
+# LZF (rdbcompression yes) against no compression: both write a plain RDB
+# with identical contents, but LZF's must be smaller (repetitive values),
+# proving the per-string compression ran.
+#   valkey-fuzzer diff examples/valkey/differential_lzf.yaml
+differential_id: lzf
+base:
+  scenario_id: lzf
+  seed: 88
+  experiment:
+    id: valkey.rdb-compression
+    inputs: {operations: 2000, compressible: true}
+  deployment:
+    mode: standalone
+    base_port: 7870
+variants:
+  lzf:
+    experiment.inputs.rdbcompression: lzf
+  plain:
+    experiment.inputs.rdbcompression: "no"
+compare:
+  equal:
+    - {evidence_id: valkey.dataset.digest, source: dataset, field: digest}
+    - {evidence_id: valkey.rdb.reload-verified, source: snapshot-final, field: content_digest}
+    - {evidence_id: valkey.workload.ledger, source: writes, field: replies_digest}
+    - {evidence_id: valkey.bgsave.result, source: bgsave-final, field: rdb_format.codec}
+  differ:
+    - {evidence_id: valkey.bgsave.result, source: bgsave-final, field: rdb_format.size}

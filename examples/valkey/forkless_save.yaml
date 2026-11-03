@@ -1,0 +1,12 @@
+# Forkless BGSAVE on a standalone node with concurrent mutations.
+#   valkey-fuzzer run examples/valkey/forkless_save.yaml --output report.json
+scenario_id: forkless-save
+seed: 123
+experiment:
+  id: valkey.forkless-save
+  inputs:
+    stable_keys: 2000
+    mutation_rate: 300
+deployment:
+  mode: standalone
+  base_port: 7400

@@ -1,0 +1,10 @@
+# Drop lz4-compressed replica links under writes; PSYNC must resume them
+# compressed, without a full sync.
+scenario_id: repl-compression-partial-resync
+seed: 84
+experiment:
+  id: valkey.repl-compression-partial-resync
+deployment:
+  mode: standalone
+  replicas_per_primary: 1
+  base_port: 7830

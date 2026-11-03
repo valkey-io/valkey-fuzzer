@@ -1,0 +1,16 @@
+# Force full syncs to two replicas that negotiate lz4 with a zstd-capable
+# primary whose RDB on disk is also lz4: a disk-based full sync in lz4.
+#   valkey-fuzzer run examples/valkey/repl_compression_full_sync.yaml
+scenario_id: repl-compression-full-sync
+seed: 83
+experiment:
+  id: valkey.repl-compression-full-sync
+  inputs:
+    rdbcompression: lz4
+    primary_repl_compression: lz4
+    replica_repl_compression: lz4
+    repl_diskless_sync: "no"
+deployment:
+  mode: standalone
+  replicas_per_primary: 2
+  base_port: 7820
