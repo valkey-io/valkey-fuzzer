@@ -47,6 +47,9 @@ Issues = "https://github.com/valkey-io/valkey-fuzzer/issues"
 [tool.setuptools]
 packages = [
     "valkey_fuzzer",
+    "valkey_fuzzer.deployment",
+    "valkey_fuzzer.deployment.local",
+    "valkey_fuzzer.deployment.local.validation",
     "valkey_fuzzer.environment",
 ]
 
