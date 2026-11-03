@@ -9,7 +9,8 @@ name: Valkey Fuzzer PR Batch
 # experiments come with the bundle in spec_bundles: the batch finds the bundle
 # through VALKEY_FUZZER_SPEC_PATH and loads its experiments/ with --experiment-dir.
 # With random_seeds, the batch also draws that many seeds of every experiment
-# that needs one build, so the given scenarios run beside a random baseline.
+# that needs one build, but those in exclude_experiments, so the given
+# scenarios run beside a random baseline.
 # The batch runs as root, so the tmpfs and iptables experiments run too.
 # The upload leaves out the write ledgers of the runs that passed, which only
 # the data oracle reads and which can make the folder too large to triage.
@@ -55,6 +56,11 @@ on:
         required: false
         type: string
         default: ""
+      exclude_experiments:
+        description: Experiment IDs, separated by spaces, that the random baseline leaves out
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -94,6 +100,7 @@ jobs:
           INPUT_VALKEY_SHA: ${{ inputs.valkey_sha }}
           INPUT_RANDOM_SEEDS: ${{ inputs.random_seeds }}
           INPUT_REQUEST_ID: ${{ inputs.request_id }}
+          INPUT_EXCLUDE_EXPERIMENTS: ${{ inputs.exclude_experiments }}
         run: python .github/scripts/ci.py check-inputs
 
       - name: Checkout Valkey
@@ -123,6 +130,8 @@ jobs:
           VALKEY_FUZZER_SPEC_PATH: ${{ env.SPEC_DIR }}
           RANDOM_SEEDS: ${{ inputs.random_seeds }}
           INPUT_VALKEY_SHA: ${{ inputs.valkey_sha }}
+          # Checked by check-inputs: experiment IDs separated by spaces.
+          EXCLUDE_EXPERIMENTS: ${{ inputs.exclude_experiments }}
         run: |
           # Each bundle's own data-only experiments, for the scenarios translated from it.
           experiment_dirs=()
@@ -138,6 +147,9 @@ jobs:
             random=(--random all --seeds "${RANDOM_SEEDS}" --first-seed "$((16#${INPUT_VALKEY_SHA:0:7}))"
               --exclude experiment=valkey.rolling-upgrade --exclude experiment=valkey.mixed-version-cluster
               --exclude experiment=valkey.repl-compression-mixed-version)
+            for experiment in ${EXCLUDE_EXPERIMENTS}; do
+              random+=(--exclude "experiment=${experiment}")
+            done
           fi
           status=0
           sudo -E env "PATH=${PATH}" valkey-fuzzer batch --scenarios "${CANDIDATES_DIR}" "${random[@]}" \

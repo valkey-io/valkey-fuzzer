@@ -359,6 +359,13 @@ def check_inputs(env):
         raise SystemExit("random_seeds must be 0 to 20")
     if not re.fullmatch(r"[A-Za-z0-9_.-]{0,100}", env["INPUT_REQUEST_ID"]):
         raise SystemExit("request_id must be at most 100 letters, digits, '.', '_', or '-'")
+    excluded = env["INPUT_EXCLUDE_EXPERIMENTS"].split()
+    if len(excluded) > 50 or not all(re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,99}", item) for item in excluded):
+        raise SystemExit("exclude_experiments must be at most 50 experiment IDs separated by spaces")
+    if excluded and env["INPUT_RANDOM_SEEDS"] == "0":
+        raise SystemExit(
+            "exclude_experiments leaves experiments out of the random baseline, which random_seeds 0 skips"
+        )
     try:
         scenarios = json.loads(raw)
     except ValueError as exc:

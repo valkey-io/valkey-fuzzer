@@ -328,6 +328,7 @@ def _check_pr_batch_inputs(tmp_path, scenarios, inputs):
         "INPUT_VALKEY_SHA": inputs.get("sha", "a" * 40),
         "INPUT_RANDOM_SEEDS": inputs.get("random_seeds", "0"),
         "INPUT_REQUEST_ID": inputs.get("request_id", ""),
+        "INPUT_EXCLUDE_EXPERIMENTS": inputs.get("exclude_experiments", ""),
         "CANDIDATES_DIR": str(tmp_path / "candidates"),
         "SPEC_DIR": str(tmp_path / "spec"),
     }
@@ -340,7 +341,9 @@ def _check_pr_batch_inputs(tmp_path, scenarios, inputs):
 
 
 def test_the_pr_batch_runs_a_random_baseline_without_scenarios(tmp_path):
-    assert _check_pr_batch_inputs(tmp_path, {}, {"random_seeds": "5", "request_id": "replay-007-122ec7e16"}) is None
+    inputs = {"random_seeds": "5", "request_id": "replay-007-122ec7e16"}
+    inputs["exclude_experiments"] = "valkey.replication-chaos  valkey.repl-compression-full-sync"
+    assert _check_pr_batch_inputs(tmp_path, {}, inputs) is None
     assert list((tmp_path / "candidates").iterdir()) == []
 
 
@@ -365,6 +368,8 @@ def test_the_pr_batch_writes_the_scenarios_and_bundles_it_is_sent(tmp_path):
         ([], {}, "must be a JSON object"),
         ({"a": SCENARIO}, {"random_seeds": "21"}, "random_seeds must be 0 to 20"),
         ({"a": SCENARIO}, {"request_id": "a b"}, "request_id must be"),
+        ({"a": SCENARIO}, {"random_seeds": "2", "exclude_experiments": "x;rm"}, "exclude_experiments must be"),
+        ({"a": SCENARIO}, {"exclude_experiments": "valkey.replication-chaos"}, "which random_seeds 0 skips"),
         ({"../escape": SCENARIO}, {}, "must be letters"),
         ({"a": "[1, 2]"}, {}, "must be a mapping"),
         ({"a": BINARY}, {}, "sets deployment.valkey_binary; the batch runs valkey_sha's build"),
@@ -465,7 +470,7 @@ def test_the_batch_workflows_summarize_through_the_ci_script():
         assert "python - <<" not in (WORKFLOWS / workflow).read_text(), "no workflow keeps a script of its own"
     (env,) = _step_env("fuzzer-pr-batch.yml", "check-inputs")
     names = {"INPUT_SCENARIOS", "INPUT_SPEC_BUNDLES", "INPUT_VALKEY_REPOSITORY", "INPUT_VALKEY_SHA"}
-    names |= {"INPUT_RANDOM_SEEDS", "INPUT_REQUEST_ID"}
+    names |= {"INPUT_RANDOM_SEEDS", "INPUT_REQUEST_ID", "INPUT_EXCLUDE_EXPERIMENTS"}
     assert names | {"CANDIDATES_DIR", "SPEC_DIR"} <= set(env)
 
 
