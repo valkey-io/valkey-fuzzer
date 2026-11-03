@@ -336,12 +336,18 @@ def check_inputs(env):
         raise SystemExit("valkey_repository must be OWNER/NAME")
     if not re.fullmatch(r"[0-9a-f]{40}", env["INPUT_VALKEY_SHA"]):
         raise SystemExit("valkey_sha must be a full 40-character lowercase commit SHA")
+    if not re.fullmatch(r"[0-9]|1[0-9]|20", env["INPUT_RANDOM_SEEDS"]):
+        raise SystemExit("random_seeds must be 0 to 20")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{0,100}", env["INPUT_REQUEST_ID"]):
+        raise SystemExit("request_id must be at most 100 letters, digits, '.', '_', or '-'")
     try:
         scenarios = json.loads(raw)
     except ValueError as exc:
         raise SystemExit(f"scenarios is not JSON: {exc}") from None
-    if not isinstance(scenarios, dict) or not scenarios:
-        raise SystemExit("scenarios must be a non-empty JSON object mapping a name to scenario YAML")
+    if not isinstance(scenarios, dict):
+        raise SystemExit("scenarios must be a JSON object mapping a name to scenario YAML")
+    if not scenarios and env["INPUT_RANDOM_SEEDS"] == "0":
+        raise SystemExit("scenarios is empty and random_seeds is 0: there is nothing to run")
     out = Path(env["CANDIDATES_DIR"])
     out.mkdir(parents=True)
     for name, text in scenarios.items():

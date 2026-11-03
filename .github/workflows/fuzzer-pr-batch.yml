@@ -8,6 +8,11 @@ name: Valkey Fuzzer PR Batch
 # Scenarios translated from a spec bundle that brings its own data-only
 # experiments come with the bundle in spec_bundles: the batch finds the bundle
 # through VALKEY_FUZZER_SPEC_PATH and loads its experiments/ with --experiment-dir.
+# With random_seeds, the batch also draws that many seeds of every experiment
+# that needs one build, so the given scenarios run beside a random baseline.
+# The batch runs as root, so the tmpfs and iptables experiments run too.
+
+run-name: Valkey Fuzzer PR Batch ${{ inputs.request_id }}
 
 on:
   workflow_dispatch:
@@ -38,6 +43,16 @@ on:
         description: Full SHA of the Valkey commit to build and test (40 lowercase hex characters)
         required: true
         type: string
+      random_seeds:
+        description: Random seeds of each one-build experiment to run beside the scenarios, 0 to 20
+        required: false
+        type: string
+        default: "0"
+      request_id:
+        description: A name for this run, shown in its title, so the caller that dispatched it can find it
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -75,6 +90,8 @@ jobs:
           INPUT_SPEC_BUNDLES: ${{ inputs.spec_bundles }}
           INPUT_VALKEY_REPOSITORY: ${{ inputs.valkey_repository }}
           INPUT_VALKEY_SHA: ${{ inputs.valkey_sha }}
+          INPUT_RANDOM_SEEDS: ${{ inputs.random_seeds }}
+          INPUT_REQUEST_ID: ${{ inputs.request_id }}
         run: python .github/scripts/ci.py check-inputs
 
       - name: Checkout Valkey
@@ -93,8 +110,8 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "${INPUT_VALKEY_SHA}"
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libssl-dev tcl
-          make -j"$(nproc)"
+          sudo apt-get install -y build-essential pkg-config libssl-dev libzstd-dev tcl
+          make -j"$(nproc)" BUILD_ZSTD=yes
           src/valkey-server --version
 
       - name: Run the scenarios through batch
@@ -102,6 +119,8 @@ jobs:
         continue-on-error: true
         env:
           VALKEY_FUZZER_SPEC_PATH: ${{ env.SPEC_DIR }}
+          RANDOM_SEEDS: ${{ inputs.random_seeds }}
+          INPUT_VALKEY_SHA: ${{ inputs.valkey_sha }}
         run: |
           # Each bundle's own data-only experiments, for the scenarios translated from it.
           experiment_dirs=()
@@ -110,9 +129,22 @@ jobs:
               experiment_dirs+=(--experiment-dir "${directory}")
             fi
           done
-          valkey-fuzzer batch --scenarios "${CANDIDATES_DIR}" --profile candidate --workers 2 \
+          # The random baseline: seeds from the commit, so a rerun of this commit draws the same scenarios.
+          # The experiments that need a second build are left out: this batch has one.
+          random=()
+          if [ "${RANDOM_SEEDS}" != "0" ]; then
+            random=(--random all --seeds "${RANDOM_SEEDS}" --first-seed "$((16#${INPUT_VALKEY_SHA:0:7}))"
+              --exclude experiment=valkey.rolling-upgrade --exclude experiment=valkey.mixed-version-cluster
+              --exclude experiment=valkey.repl-compression-mixed-version)
+          fi
+          status=0
+          sudo -E env "PATH=${PATH}" valkey-fuzzer batch --scenarios "${CANDIDATES_DIR}" "${random[@]}" \
+            --profile candidate --workers 2 \
             --valkey-binary "${GITHUB_WORKSPACE}/valkey-src/src/valkey-server" --batch-id fuzzer-pr-batch \
-            --out "${BATCH_DIR}" "${experiment_dirs[@]}"
+            --out "${BATCH_DIR}" "${experiment_dirs[@]}" || status=$?
+          # Root wrote the folder: give it back, so the summary and the upload can read it.
+          sudo chown -R "$(id -u):$(id -g)" "${BATCH_DIR}"
+          exit "${status}"
 
       - name: Summarize the batch
         if: always()
