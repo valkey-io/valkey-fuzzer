@@ -14,6 +14,7 @@ import yaml
 
 from tests.support import sigterm_during
 from tests.valkey_experiments_support import valkey_service
+from valkey_fuzzer import batch
 from valkey_fuzzer.cli import main
 from valkey_fuzzer.commands._common import add_common_options
 from valkey_fuzzer.deployment.local import config as local_config
@@ -79,11 +80,11 @@ def test_a_scenario_that_does_not_compile_is_a_harness_error_and_never_runs(tmp_
 
 
 USAGE_ERRORS = [("run", FORKLESS, "--random"), ("run", FORKLESS, "--experiment", "valkey.forkless-save"), ("run",)]  # fmt: skip
-PARSER_ERRORS = [("run", "--random", "--exclude", "x"), ("run", "--timeout", "nan")]  # fmt: skip
+PARSER_ERRORS = [("run", "--random", "--exclude", "x"), ("batch", "--random", "all", "--workers", 0), ("run", "--timeout", "nan")]  # fmt: skip
 
 
 def test_bad_inputs_are_harness_errors_that_run_nothing(tmp_path, canned_runs):
-    for command in ("run", "validate", "diff", "minimize", "replay"):
+    for command in ("run", "validate", "diff", "batch", "minimize", "replay"):
         assert _cli(command, tmp_path / "missing.yaml") == EXIT_HARNESS_ERROR, command
     assert _cli("run", "--seed", 1, "--experiment", "valkey.no-such-experiment") == EXIT_HARNESS_ERROR
     every = ("--exclude", "inputs.compressible=true", "--exclude", "inputs.compressible=false")
@@ -136,8 +137,9 @@ def test_main_maps_no_command_an_interrupt_and_an_unexpected_error_to_exit_codes
     ("target", "call"),
     [
         ("valkey_fuzzer.commands.run.run_command", lambda: _cli("run", "s.yaml")),
+        ("valkey_fuzzer.batch.run_worker", lambda: batch.main(["task.json"])),
     ],
-    ids=["cli"],
+    ids=["cli", "batch-worker"],
 )
 def test_sigterm_takes_the_interrupt_path_and_exits_130(target, call):
     assert sigterm_during(target, call) == (["cleaned up"], EXIT_INTERRUPTED)

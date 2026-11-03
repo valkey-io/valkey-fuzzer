@@ -1,0 +1,20 @@
+# A batch that sweeps the forkless-save experiment over deployment modes,
+# replicas, and mutation rates: every combination is one run, and one the
+# experiment does not allow is listed as invalid instead of run.
+#   valkey-fuzzer batch examples/valkey/forkless_batch.yaml --workers 2
+batch_id: forkless-matrix
+sources:
+  - matrix:
+      seed: 2026
+      base:
+        scenario_id: forkless-matrix
+        experiment:
+          id: valkey.forkless-save
+          inputs:
+            stable_keys: 1000
+        deployment:
+          mode: standalone
+      dimensions:
+        deployment.mode: [standalone, cluster]
+        deployment.replicas_per_primary: [0, 1]
+        experiment.inputs.mutation_rate: [0, 300, 1500]
