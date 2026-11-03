@@ -8,11 +8,11 @@ import traceback
 from typing import Any
 
 from . import __version__
-from .commands import batch, diff, listing, minimize, replay, run, sweep, validate
+from .commands import batch, diff, listing, minimize, replay, run, spec, sweep, validate
 from .hoststate import interrupt_on_sigterm
 from .outcomes import EXIT_HARNESS_ERROR, EXIT_INTERRUPTED
 
-COMMAND_MODULES = (run, batch, validate, listing, replay, diff, minimize, sweep)
+COMMAND_MODULES = (run, batch, validate, listing, replay, diff, minimize, sweep, spec)
 
 
 def register_commands(subparsers: Any) -> None:
