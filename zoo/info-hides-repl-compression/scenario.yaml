@@ -1,0 +1,12 @@
+scenario_id: zoo-info-hides-repl-compression
+seed: 1308
+experiment:
+  id: valkey.repl-compression-full-sync
+  inputs:
+    rdbcompression: lz4
+    primary_repl_compression: lz4
+    replica_repl_compression: lz4
+deployment:
+  mode: standalone
+  replicas_per_primary: 1
+  base_port: 21280

@@ -1,0 +1,6 @@
+description: DEL trips an assertion once the server has started an RDB save.
+catches: valkey.oracle.liveness (crash report in the instance log)
+scenarios:
+  - {file: scenario.yaml, fail: [liveness]}
+runs: 5
+min_detection_rate: 1.0

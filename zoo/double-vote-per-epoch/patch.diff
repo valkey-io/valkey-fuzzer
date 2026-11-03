@@ -1,0 +1,20 @@
+diff --git a/src/cluster_legacy.c b/src/cluster_legacy.c
+index d6a961c0b..a16ad93a3 100644
+--- a/src/cluster_legacy.c
++++ b/src/cluster_legacy.c
+@@ -5887,13 +5887,8 @@ void clusterSendFailoverAuthIfNeeded(clusterNode *node, clusterMsg *request) {
+         return;
+     }
+ 
+-    /* I already voted for this epoch? Return ASAP. */
+-    if (server.cluster->lastVoteEpoch == server.cluster->currentEpoch) {
+-        serverLog(LL_WARNING, "Failover auth denied to %.40s (%s): already voted for epoch %llu", node->name,
+-                  humanNodename(node), (unsigned long long)server.cluster->currentEpoch);
+-        clusterSendFailoverNack(node, requestCurrentEpoch, CLUSTERMSG_FAILOVER_AUTH_NACK_REASON_ALREADY_VOTED);
+-        return;
+-    }
++    /* Bug zoo: no "already voted for this epoch" check, so a primary can grant
++     * two failover votes in one epoch. */
+ 
+     /* Node must be a replica and its primary down.
+      * The primary can be non failing if the request is flagged

@@ -1,0 +1,6 @@
+description: After a failover the new primary claims every slot of its old primary except the first one.
+catches: valkey.oracle.deployment-state roles (the old primary keeps one slot and stays a primary)
+scenarios:
+  - {file: scenario.yaml, fail: [cluster]}
+runs: 5
+min_detection_rate: 1.0

@@ -1,0 +1,13 @@
+diff --git a/src/db.c b/src/db.c
+index 6dd43e121..49d41b942 100644
+--- a/src/db.c
++++ b/src/db.c
+@@ -926,6 +926,8 @@ void delGenericCommand(client *c, int lazy) {
+ }
+ 
+ void delCommand(client *c) {
++    /* Bug zoo: DEL trips an assertion once the server has started an RDB save. */
++    serverAssert(server.stat_rdb_saves == 0);
+     delGenericCommand(c, server.lazyfree_lazy_user_del);
+ }
+ 

@@ -1,0 +1,14 @@
+diff --git a/src/server.c b/src/server.c
+index 8b1d3f6a1..f29047ea8 100644
+--- a/src/server.c
++++ b/src/server.c
+@@ -7042,7 +7042,8 @@ sds genValkeyInfoString(dict *section_dict, int all_sections, int everything) {
+                                     replica->flag.repl_rdb_channel                                ? "rdb-channel"
+                                     : replica->repl_data->repl_state == REPLICA_STATE_BG_RDB_LOAD ? "main-channel"
+                                                                                                   : "replica");
+-                if (replica->repl_data->repl_compression) {
++                /* Bug zoo: INFO reports every replica link as plaintext, even a compressed one. */
++                if (0 && replica->repl_data->repl_compression) {
+                     info = sdscatprintf(info,
+                                         ",repl_compression=%s"
+                                         ",repl_compressed_bytes=%lld"

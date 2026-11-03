@@ -1,0 +1,15 @@
+diff --git a/src/server.c b/src/server.c
+index 8b1d3f6a1..344bc491c 100644
+--- a/src/server.c
++++ b/src/server.c
+@@ -4163,6 +4163,10 @@ int incrCommandStatsOnError(struct serverCommand *cmd, int flags) {
+ void call(client *c, int flags) {
+     if (bgIteration_blockClientIfRequired(c)) return;
+ 
++    /* Bug zoo: a replica silently skips every 20th SET from its primary. */
++    static unsigned long zoo_replicated_sets = 0;
++    if (c->flag.primary && c->cmd->proc == setCommand && ++zoo_replicated_sets % 20 == 0) return;
++
+     server.in_call++;
+ 
+     long long dirty;

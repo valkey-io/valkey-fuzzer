@@ -1,0 +1,6 @@
+description: A replica silently skips every 20th SET it receives from its primary; its replication offset still advances.
+catches: valkey.oracle.ledger replica convergence (check_replicas)
+scenarios:
+  - {file: scenario.yaml, fail: [data]}
+runs: 5
+min_detection_rate: 1.0

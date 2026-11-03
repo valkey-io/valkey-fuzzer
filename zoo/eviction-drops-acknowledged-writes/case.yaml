@@ -1,0 +1,11 @@
+description: >-
+  Configuration only: a 4 MB maxmemory with allkeys-random eviction silently drops acknowledged keys
+  from a dataset of about 8 MB.
+catches: valkey.oracle.ledger (acknowledged writes must survive)
+scenarios:
+  - {file: scenario.yaml, fail: [data]}
+overrides:
+  deployment:
+    server_config: {maxmemory: 4mb, maxmemory-policy: allkeys-random}
+runs: 5
+min_detection_rate: 1.0

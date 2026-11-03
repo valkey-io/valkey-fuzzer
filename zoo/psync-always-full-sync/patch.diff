@@ -1,0 +1,14 @@
+diff --git a/src/replication.c b/src/replication.c
+index 9a6920fe2..d4ee9641d 100644
+--- a/src/replication.c
++++ b/src/replication.c
+@@ -1185,6 +1185,9 @@ int primaryTryPartialResynchronization(client *c, long long psync_offset) {
+         goto need_full_resync;
+     }
+ 
++    /* Bug zoo: the primary refuses every partial resync and sends a full sync. */
++    goto need_full_resync;
++
+     /* We still have the data our replica is asking for? */
+     if (!server.repl_backlog || psync_offset < server.repl_backlog->offset ||
+         psync_offset > (server.repl_backlog->offset + server.repl_backlog->histlen)) {

@@ -1,0 +1,6 @@
+description: The primary compresses a replica link with lz4 but INFO reports the link as plaintext.
+catches: valkey.oracle.repl-compression (INFO codec against the configured and logged codec)
+scenarios:
+  - {file: scenario.yaml, fail: [compression]}
+runs: 5
+min_detection_rate: 1.0

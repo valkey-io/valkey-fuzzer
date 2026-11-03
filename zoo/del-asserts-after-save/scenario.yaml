@@ -1,0 +1,8 @@
+scenario_id: zoo-del-asserts-after-save
+seed: 1306
+experiment:
+  id: valkey.rdb-compression
+  inputs: {rdbcompression: "yes", bgsave_method: fork, appendonly: "no"}
+deployment:
+  mode: standalone
+  base_port: 21200

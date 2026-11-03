@@ -1,0 +1,8 @@
+scenario_id: zoo-eviction-drops-acknowledged-writes
+seed: 1310
+experiment:
+  id: valkey.snapshot-equivalence
+  inputs: {operations: 2000, stable_keys: 6000, value_size: 1024}
+deployment:
+  mode: standalone
+  base_port: 21360
