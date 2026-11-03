@@ -1,7 +1,5 @@
 """Builders shared by the local deployment tests."""
 
-import os
-import shutil
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -10,6 +8,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from tests.live_support import BINARY
 from valkey_fuzzer.deployment.local.cluster_nodes import parse_cluster_nodes
 from valkey_fuzzer.deployment.local.formation import Formation
 from valkey_fuzzer.deployment.local.models import DeploymentConfig, DeploymentMode, InstanceInfo
@@ -19,7 +18,6 @@ from valkey_fuzzer.deployment.local.queries import parse_cluster_info, parse_rep
 from valkey_fuzzer.deployment.local.topology import DeploymentConnection, TopologyNode
 from valkey_fuzzer.deployment.local.validation.snapshot import Snapshot
 
-BINARY = os.environ.get("VALKEY_FUZZER_BINARY") or shutil.which("valkey-server")
 PROCESSES = "valkey_fuzzer.deployment.local.processes"
 
 

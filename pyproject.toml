@@ -44,6 +44,9 @@ dev = [
 Repository = "https://github.com/valkey-io/valkey-fuzzer"
 Issues = "https://github.com/valkey-io/valkey-fuzzer/issues"
 
+[project.scripts]
+valkey-fuzzer = "valkey_fuzzer.cli:main"
+
 # The packages are listed (tests/test_packaging.py keeps the list complete)
 # because the spec bundles under formal/ ship as valkey_fuzzer/formal: a
 # shipped experiment that names a bundle (spec: cluster-election) must find
@@ -51,6 +54,7 @@ Issues = "https://github.com/valkey-io/valkey-fuzzer/issues"
 [tool.setuptools]
 packages = [
     "valkey_fuzzer",
+    "valkey_fuzzer.commands",
     "valkey_fuzzer.components",
     "valkey_fuzzer.deployment",
     "valkey_fuzzer.deployment.local",
