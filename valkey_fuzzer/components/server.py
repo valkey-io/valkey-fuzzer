@@ -90,19 +90,39 @@ class PrivateServer:
 
     The directory and the server carry this process's owner tag, so
     ``valkey-fuzzer sweep`` removes them if the fuzzer dies before ``stop``.
+    ``files`` (relative path: bytes) are written into the directory first. With
+    ``config_file`` the server starts from ``valkey.conf`` in its directory,
+    written once from its options, so ``CONFIG REWRITE`` works and a later
+    start reads what it rewrote.
 
     ``start`` returns ``None`` when the server answers PING, or the server's
     output when it exits during startup; it raises ``TimeoutError`` if the
-    server neither answers nor exits in time.
+    server neither answers nor exits in time. ``shut_down`` stops it and keeps
+    its directory, for ``start`` again.
     """
 
-    def __init__(self, binary: str, arguments: Sequence[str] = (), *, timeout_s: float = 15.0, prefix: str = "vfs-"):
+    def __init__(
+        self,
+        binary: str,
+        arguments: Sequence[str] = (),
+        *,
+        timeout_s: float = 15.0,
+        prefix: str = "vfs-",
+        files: Optional[Mapping[str, bytes]] = None,
+        config_file: bool = False,
+    ):
         self.binary = binary
         self.arguments = list(arguments)
         self.timeout_s = timeout_s
+        self.config_file = config_file
         # Unix socket paths are limited to ~104 bytes on macOS, so stay short.
         self.workdir = tempfile.mkdtemp(prefix=prefix, dir="/tmp" if os.path.isdir("/tmp") else None)
         tag_directory(self.workdir, "private-server", binary)
+        for name, content in (files or {}).items():
+            path = os.path.join(self.workdir, name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as handle:
+                handle.write(content)
         self.socket_path = os.path.join(self.workdir, "s.sock")
         self.log_path = os.path.join(self.workdir, "server.log")
         # Its stdout and stderr go to a file: a pipe nobody reads while it runs would block a chatty server.
@@ -124,8 +144,17 @@ class PrivateServer:
             *server_tag_arguments(),
             *self.arguments,
         ]  # fmt: skip
-        with open(self.output_path, "wb") as output:
-            self.process = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT)
+        if self.config_file:
+            path = os.path.join(self.workdir, "valkey.conf")
+            if not os.path.exists(path):
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.writelines(
+                        f"{name[2:]} {config_value(value)}\n" for name, value in zip(command[1::2], command[2::2])
+                    )
+            command = [self.binary, path]
+        # Appended to, so a second start keeps what the first wrote.
+        with open(self.output_path, "ab") as output:
+            self.process = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT, cwd=self.workdir)
         deadline = time.monotonic() + self.timeout_s
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
@@ -155,6 +184,21 @@ class PrivateServer:
                 pass
         return output.strip()[-2000:] or "server exited without output"
 
+    def shut_down(self, timeout_s: float) -> bool:
+        """Stop the server as ``SHUTDOWN`` does (``SIGTERM``), keeping its directory: whether it exited within
+        ``timeout_s``."""
+
+        close_quietly(self.client)
+        self.client = None
+        if self.process is None:
+            return True
+        self.process.terminate()
+        try:
+            self.process.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            return False
+        return True
+
     def stop(self) -> None:
         close_quietly(self.client)
         if self.process is not None:
@@ -166,6 +210,16 @@ class PrivateServer:
                     self.process.kill()
                     self.process.wait()
         shutil.rmtree(self.workdir, ignore_errors=True)
+
+
+def config_value(value: str) -> str:
+    """``value`` as one argument of a config file line, quoted as Valkey quotes a command-line argument, so the
+    file means what the command line would."""
+
+    escapes = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t", "\a": "\\a", "\b": "\\b"}
+    return (
+        '"' + "".join(escapes.get(char, char if char.isprintable() else f"\\x{ord(char):02x}") for char in value) + '"'
+    )
 
 
 def server_arguments(config: Mapping[str, Any]) -> list[str]:

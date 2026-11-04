@@ -13,7 +13,7 @@ from valkey.exceptions import TimeoutError as ValkeyTimeoutError
 
 from tests.valkey_experiments_support import registration_for, resolved, unit_plan
 from valkey_fuzzer._data import canonical_json, to_plain_data
-from valkey_fuzzer.components import actions, capabilities
+from valkey_fuzzer.components import actions, capabilities, server
 from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.schema import ConfigError, load_yaml
@@ -37,6 +37,8 @@ class Build:
 
     def __init__(self, replies=None, rejects=()):
         self.replies, self.rejects = dict(replies or {}), set(rejects)
+        # Its servers exit at a second start, as from a config file they cannot read.
+        self.restart_exits = False
         self.starts: list[list[str]] = []
         self.sent: list[tuple] = []
         self.connections = 0
@@ -60,8 +62,9 @@ class FakeProcess:
 class FakeServer:
     """Stands in for PrivateServer: starts unless its build rejects an option, and logs a line."""
 
-    def __init__(self, binary, arguments=(), *, timeout_s=15.0, prefix="x-"):
+    def __init__(self, binary, arguments=(), *, timeout_s=15.0, prefix="x-", files=None, config_file=False):
         self.binary, self.arguments, self.build = binary, list(arguments), BUILDS[binary]
+        self.files, self.config_file, self.shut_downs = dict(files or {}), config_file, 0
         self.workdir = tempfile.mkdtemp(prefix=prefix)
         # A node of a side, not a probe of whether the build starts.
         self.node = prefix == "vfc-"
@@ -76,6 +79,11 @@ class FakeServer:
 
     def start(self):
         self.build.starts.append(self.arguments)
+        if self.shut_downs and self.build.restart_exits:
+            with open(self.log_path, "a") as log:
+                log.write("1:M 03 Nov 2026 10:00:02.000 # Fatal error, can't open config file 'valkey.conf'\n")
+            self.process.returncode = 1
+            return "Fatal error, can't open config file 'valkey.conf'"
         rejected = [name for name in self.arguments[::2] if name[2:] in self.build.rejects]
         if rejected:
             return f"*** FATAL CONFIG FILE ERROR *** Bad directive or wrong number of arguments: {rejected[0]}"
@@ -85,6 +93,10 @@ class FakeServer:
             output.write("")
         SERVERS[self.socket_path] = self
         return None
+
+    def shut_down(self, timeout_s):
+        self.shut_downs += 1
+        return True
 
     def stop(self):
         self.stopped = True
@@ -696,6 +708,65 @@ def test_a_summary_names_a_commands_connection_and_node(builds):
 
 
 # ---------------------------------------------------------------------------
+# Files, the config file, and restarts
+# ---------------------------------------------------------------------------
+
+
+def test_files_go_into_every_servers_directory_and_nodes_start_from_a_config_file(builds):
+    files = {"users.acl": "user default on nopass ~* +@all\n", "rdb/dump.rdb": {"$base64": "/wD/"}}
+    result, _ = run(
+        builds, [{"command": ["ACL", "LOAD"]}], files=files, server_config={"aclfile": "users.acl"}, nodes=2
+    )
+
+    assert result.status.value == "PASS", result.summary
+    for build in BUILDS.values():
+        assert all(running[running.index("--aclfile") + 1] == "users.acl" for running in build.starts)
+        written = [server for server in SERVERS.values() if server.build is build]
+        # The probes of whether the build starts get them too, since an option may name one.
+        assert any(not server.node for server in written)
+        assert all(
+            server.files == {"users.acl": b"user default on nopass ~* +@all\n", "rdb/dump.rdb": b"\xff\x00\xff"}
+            for server in written
+        )
+        assert [server.config_file for server in written if server.node] == [True, True]
+
+
+def test_a_restart_stops_the_node_and_starts_it_again_with_new_connections(builds):
+    commands = [
+        {"command": ["CONFIG", "REWRITE"]},
+        {"command": ["SUBSCRIBE", "c"], "connection": "sub", "node": 1},
+        {"restart": True, "node": 1},
+        {"command": ["CONFIG", "GET", "maxmemory"], "node": 1},
+    ]
+    result, value = run(builds, commands, nodes=2)
+
+    assert result.status.value == "PASS", result.summary
+    assert _replies(value["candidate"])[2] == {"reply": "OK"}
+    for build in BUILDS.values():
+        first, second = _nodes(build)
+        assert (first.shut_downs, second.shut_downs) == (0, 1)
+        # The main and sub connections before the restart, a new main one after it.
+        assert len(second.wires) == 3 and second.sent[-1] == ("CONFIG", "GET", "maxmemory")
+
+
+def test_a_candidate_that_does_not_come_back_from_a_restart_fails(builds):
+    BUILDS[builds["candidate"]].restart_exits = True
+    result, value = run(builds, [{"restart": True}, {"command": ["PING"]}])
+
+    assert result.status.value == "FAIL" and result.crash
+    assert result.summary.startswith("the candidate exited on command 0 (restart): ")
+    assert result.summary.endswith("# Fatal error, can't open config file 'valkey.conf'")
+    assert _replies(value["candidate"]) == [
+        {"error": "the server exited at startup: Fatal error, can't open config file 'valkey.conf'", "unanswered": True}
+    ]
+
+
+def test_a_config_file_line_means_what_the_command_line_does():
+    assert server.config_value('127.0.0.1 1\nmaxmemory "1"\\\x00é') == '"127.0.0.1 1\\nmaxmemory \\"1\\"\\\\\\x00é"'
+    assert server.config_value("") == '""'
+
+
+# ---------------------------------------------------------------------------
 # Without compare_with: the deployment's instances
 # ---------------------------------------------------------------------------
 
@@ -760,11 +831,11 @@ _PARENT = {"compare_with": "/opt/parent/valkey-server"}
     [
         ({"commands": []}, "at least one command"),
         ({"commands": [{"command": []}]}, r"commands\[0\]\.command must be a non-empty list"),
-        ({"commands": [{"expect": {"equals": 1}}]}, r"commands\[0\] needs one of command, raw, and read"),
-        ({"commands": [{"command": ["PING"], "raw": "PING\r\n"}]}, r"commands\[0\] needs one of command, raw, and read"),
+        ({"commands": [{"expect": {"equals": 1}}]}, r"commands\[0\] needs one of command, raw, read, and restart"),
+        ({"commands": [{"command": ["PING"], "raw": "PING\r\n"}]}, r"commands\[0\] needs one of command, raw, read, and restart"),
         ({"commands": [{"raw": ""}]}, r"commands\[0\]\.raw must be a non-empty string or a !!binary value"),
         ({"commands": [{"raw": {"x": 1}}]}, r"commands\[0\]\.raw must be a non-empty string"),
-        ({"commands": [{"raw": "PING\r\n", "wait_s": 1, "expect": {"equals": "PONG"}}]}, "wait_s sends a command again; raw bytes and a read happen once"),
+        ({"commands": [{"raw": "PING\r\n", "wait_s": 1, "expect": {"equals": "PONG"}}]}, "wait_s sends a command again; raw bytes, a read, and a restart happen once"),
         ({**_PARENT, "commands": [{"raw": "CLUSTER SETSLOT 1 NODE <node.0.id>\r\n"}]}, r"<node\.0\.id> needs cluster"),
         ({"commands": [{"command": ["SET", "k", True]}]}, r"commands\[0\]\.command must be a non-empty list"),
         ({"commands": [{"command": ["PING"], "expect": {}}]}, "needs one predicate"),
@@ -800,9 +871,20 @@ _PARENT = {"compare_with": "/opt/parent/valkey-server"}
         ({**_PARENT, "commands": [{"command": ["SSUBSCRIBE", "c"]}]}, "SSUBSCRIBE is refused on the main connection"),
         ({**_PARENT, "commands": [{"command": ["SUBSCRIBE", "a", "b"], "connection": "sub"}]}, r"commands\[0\]: SUBSCRIBE takes one channel: each is confirmed by a reply of its own"),
         ({**_PARENT, "commands": [{"command": ["UNSUBSCRIBE"]}]}, "UNSUBSCRIBE takes one channel"),
-        ({"commands": [{"read": True, "command": ["PING"]}]}, r"commands\[0\] needs one of command, raw, and read"),
+        ({"commands": [{"read": True, "command": ["PING"]}]}, r"commands\[0\] needs one of command, raw, read, and restart"),
         ({"commands": [{"read": True, "wait_s": 1, "expect": {"equals": 1}}]}, "wait_s sends a command again"),
         ({"commands": [{"command": ["PING"], "connection": ""}]}, r"commands\[0\]\.connection must name a connection"),
+        ({"commands": [{"restart": True}]}, r"commands\[0\]: restart needs compare_with or modules_parent"),
+        ({**_PARENT, "commands": [{"restart": True, "command": ["PING"]}]}, r"commands\[0\] needs one of command, raw, read, and restart"),
+        ({**_PARENT, "commands": [{"restart": True, "connection": "sub"}]}, "restart restarts a node, every connection to it; it names none"),
+        ({**_PARENT, "commands": [{"restart": True, "wait_s": 5, "expect": {"equals": "OK"}}]}, "wait_s sends a command again"),
+        ({"files": {"a": "x"}, "commands": [{"command": ["PING"]}]}, "files needs compare_with or modules_parent"),
+        ({**_PARENT, "files": {"../a": "x"}, "commands": [{"command": ["PING"]}]}, "files: '../a' must be a plain relative path inside the server's directory"),
+        ({**_PARENT, "files": {"/etc/a": "x"}, "commands": [{"command": ["PING"]}]}, "files: '/etc/a' must be a plain relative path"),
+        ({**_PARENT, "files": {"a/../b": "x"}, "commands": [{"command": ["PING"]}]}, "files: 'a/../b' must be a plain relative path"),
+        ({**_PARENT, "files": {"./a": "x"}, "commands": [{"command": ["PING"]}]}, "files: './a' must be a plain relative path"),
+        ({**_PARENT, "files": {"valkey.conf": "x"}, "commands": [{"command": ["PING"]}]}, "none of valkey.conf, server.log, output.log, s.sock"),
+        ({**_PARENT, "files": {"a": 1}, "commands": [{"command": ["PING"]}]}, "files: 'a' must be a string or a !!binary value"),
         ({"commands": [{"command": ["REPLICAOF", "NO", "ONE"]}]}, "REPLICAOF is refused: it changes the deployment's topology"),
         ({"commands": [{"command": ["CLUSTER", "RESET"]}]}, "CLUSTER RESET is refused"),
         ({"commands": [{"command": ["REPLCONF", "ACK", 0]}]}, "REPLCONF is refused"),

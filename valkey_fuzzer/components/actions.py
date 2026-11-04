@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import os
+import posixpath
 import re
 import shutil
 import socket
@@ -26,6 +27,7 @@ from valkey_fuzzer._data import canonical_json, jsonable
 from valkey_fuzzer.declarations import Declarations
 from valkey_fuzzer.deployment.local.queries import replication_role
 from valkey_fuzzer.deployment.local.server_config import MANAGED_SERVER_OPTIONS, canonicalize_server_config
+from valkey_fuzzer.hoststate import OWNER_FILE
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.protocols import component_artifact_dir
 from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
@@ -155,10 +157,12 @@ _SEQUENCE_EXPECT = {
 _SEQUENCE_COMMAND = mapping_of(
     {
         # A command; or raw: bytes sent as they are (a string as UTF-8, or !!binary), for the protocol parser; or
-        # read: the replies waiting on the connection (Pub/Sub messages, pushes).
+        # read: the replies waiting on the connection (Pub/Sub messages, pushes); or restart: stop the node
+        # gracefully and start it again from its directory and config file.
         "command": ConfigField(list, allow_none=True, default=None),
         "raw": ConfigField((str, dict), allow_none=True, default=None),
         "read": ConfigField(bool, default=False),
+        "restart": ConfigField(bool, default=False),
         # The node it goes to, by index (see nodes), and the connection to it, opened on first use; main is the one
         # every command takes unless it names another.
         "node": ConfigField(int, default=0, minimum=0, maximum=_MAX_NODES - 1),
@@ -191,6 +195,9 @@ _COMMANDS_FIELDS = {
     "nodes": ConfigField(int, default=1, minimum=1, maximum=_MAX_NODES),
     # Both private servers start with it; an option the parent rejects is dropped on both sides.
     "server_config": ConfigField(dict, default=dict),
+    # Written into every private server's directory before it starts, by path relative to it: a string as UTF-8,
+    # or !!binary. server_config may name them (aclfile: users.acl).
+    "files": ConfigField(dict, default=dict),
     "resp": ConfigField(int, default=2, choices=(2, 3)),
     "timeout_s": ConfigField(float, default=10.0, minimum=0.1, maximum=3600),
     "commands": ConfigField(list, items=_SEQUENCE_COMMAND),
@@ -220,6 +227,10 @@ _EXIT_WAIT_S = 5.0
 _WAIT_INTERVAL_S = 0.1
 # How long raw bytes wait for a reply before they are recorded as answered by none.
 _NO_REPLY_S = 1.0
+# How long a restart waits for the server to stop (it waits for lagging replicas up to shutdown-timeout, 10s).
+_STOP_TIMEOUT_S = 30.0
+# The files of a private server's directory the harness writes itself.
+_HARNESS_FILES = ("valkey.conf", "server.log", "output.log", "s.sock", OWNER_FILE)
 # A node of the side a command runs on, in an argument: <node.1.id>, <node.1.host>, <node.1.port>,
 # <node.1.cluster-port>. Angle brackets, not braces: YAML reads {node.1.id} as a mapping, and Valkey braces as a
 # hash tag.
@@ -299,6 +310,17 @@ def _validate_commands(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -
         )
     if config["nodes"] > 1 and not compared:
         raise ConfigError("nodes needs compare_with or modules_parent: the deployment decides its instances")
+    if config["files"] and not compared:
+        raise ConfigError("files needs compare_with or modules_parent: they are written for the private servers")
+    for name, content in config["files"].items():
+        path = posixpath.normpath(name)
+        if path != name or path.startswith("/") or path == ".." or path.startswith("../") or path in _HARNESS_FILES:
+            raise ConfigError(
+                f"files: {name!r} must be a plain relative path inside the server's directory, "
+                f"none of {', '.join(_HARNESS_FILES)}"
+            )
+        if not isinstance(content, str) and not _is_binary(content):
+            raise ConfigError(f"files: {name!r} must be a string or a !!binary value")
     if config["modules"] and not compared:
         raise ConfigError(
             "modules needs compare_with or modules_parent: the deployment's instances load modules through "
@@ -316,12 +338,20 @@ def _validate_commands(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -
         raise ConfigError("commands must list at least one command")
     for index, item in enumerate(config["commands"]):
         where = f"commands[{index}]"
-        if [item["command"] is not None, item["raw"] is not None, item["read"]].count(True) != 1:
-            raise ConfigError(f"{where} needs one of command, raw, and read")
+        if [item["command"] is not None, item["raw"] is not None, item["read"], item["restart"]].count(True) != 1:
+            raise ConfigError(f"{where} needs one of command, raw, read, and restart")
+        if item["restart"]:
+            if not compared:
+                raise ConfigError(
+                    f"{where}: restart needs compare_with or modules_parent: valkey.action.restart-instance "
+                    "restarts the deployment's instances"
+                )
+            if item["connection"] != "main":
+                raise ConfigError(f"{where}: restart restarts a node, every connection to it; it names none")
         if not item["connection"]:
             raise ConfigError(f"{where}.connection must name a connection")
         if item["wait_s"] is not None and item["command"] is None:
-            raise ConfigError(f"{where}: wait_s sends a command again; raw bytes and a read happen once")
+            raise ConfigError(f"{where}: wait_s sends a command again; raw bytes, a read, and a restart happen once")
         if item["raw"] is not None:
             if not item["raw"] or not (isinstance(item["raw"], str) or _is_binary(item["raw"])):
                 raise ConfigError(f"{where}.raw must be a non-empty string or a !!binary value")
@@ -482,6 +512,8 @@ def _run_sequence(target: Any, commands: Sequence[Mapping[str, Any]], context: A
 def _run_step(target: Any, item: Mapping[str, Any], context: Any) -> dict[str, Any]:
     """One command of a sequence on ``target``: its record, with ``wait_s`` the last of its attempts."""
 
+    if item["restart"]:
+        return target.restart(item["node"])
     try:
         connection = target.connection(item["node"], item["connection"])
     except (valkey.exceptions.ValkeyError, OSError) as exc:
@@ -569,8 +601,8 @@ def _command_text(command: Sequence[Any]) -> str:
 def _step_text(item: Mapping[str, Any]) -> str:
     """A command of a sequence as a summary names it."""
 
-    if item["read"]:
-        text = "read"
+    if item["read"] or item["restart"]:
+        text = "read" if item["read"] else "restart"
     elif item["raw"] is not None:
         text = "raw <binary>" if _is_binary(item["raw"]) else f"raw {json.dumps(item['raw'])}"
     else:
@@ -640,13 +672,17 @@ class _Side:
         self.names: dict[str, str] = {}
         self.pattern: Optional[re.Pattern] = None
 
-    def start(self, context: Any, spec: ComponentSpec, server_config: Mapping[str, Any]) -> str:
-        """Start every node with ``server_config`` and its options, and open its main connection; what went wrong,
-        or an empty string."""
+    def start(
+        self, context: Any, spec: ComponentSpec, server_config: Mapping[str, Any], files: Mapping[str, bytes]
+    ) -> str:
+        """Start every node from a config file of ``server_config`` and its options, ``files`` in its directory, and
+        open its main connection; what went wrong, or an empty string."""
 
         for index, node in enumerate(self.nodes):
             arguments = server_arguments({**server_config, **self.options, **node.options})
-            node.server = PrivateServer(self.binary, arguments, timeout_s=_START_TIMEOUT_S, prefix="vfc-")
+            node.server = PrivateServer(
+                self.binary, arguments, timeout_s=_START_TIMEOUT_S, prefix="vfc-", files=files, config_file=True
+            )
             node.owned = context.obligations.open(spec, "process.private-server", node.server.workdir, node.server.stop)
             try:
                 # PrivateServer.start polls with time.sleep: not cancellable, but bounded by its timeout.
@@ -697,6 +733,24 @@ class _Side:
                     f"within {timeout_s:g}s: {last}"
                 )
         return None
+
+    def restart(self, index: int) -> dict[str, Any]:
+        """Stop node ``index`` gracefully and start it again from its directory and config file: ``{"reply": "OK"}``
+        once it answers again, or why not as a command that got no reply."""
+
+        node = self.nodes[index]
+        for connection in node.connections.values():
+            connection.close()
+        node.connections.clear()
+        if not node.server.shut_down(_STOP_TIMEOUT_S):
+            return {"error": f"the server did not stop within {_STOP_TIMEOUT_S:g}s", "unanswered": True}
+        try:
+            exit_output = node.server.start()
+        except (OSError, TimeoutError) as exc:
+            return {"error": f"the server did not start again: {exc}", "unanswered": True}
+        if exit_output is not None:
+            return {"error": f"the server exited at startup: {exit_output[-500:]}", "unanswered": True}
+        return {"reply": "OK"}
 
     def name_nodes(self) -> None:
         """The placeholders of its nodes, both ways: each to its value, and each node ID and port in a reply back to
@@ -882,9 +936,14 @@ class CommandsAction:
             if modules[server.label]:
                 server.options["loadmodule"] = modules[server.label]
 
+        files = {
+            name: _argument(content) if _is_binary(content) else content.encode()
+            for name, content in config["files"].items()
+        }
+
         def starts(server: _Side, options: Mapping[str, Any]) -> tuple[ComponentStatus, str]:
             probed = {**options, **server.options, **server.nodes[0].options}
-            status, summary, _ = starts_with(context, spec, server.binary, probed, _START_TIMEOUT_S)
+            status, summary, _ = starts_with(context, spec, server.binary, probed, _START_TIMEOUT_S, files)
             return status, summary
 
         # Configuration both builds accept: an option the parent rejects is dropped on both sides.
@@ -910,7 +969,7 @@ class CommandsAction:
 
         try:
             for server in (candidate, parent):
-                failed = server.start(context, spec, server_config)
+                failed = server.start(context, spec, server_config, files)
                 if not failed and config["cluster"]:
                     failed = server.form_cluster(context, config["timeout_s"]) or ""
                 if failed:

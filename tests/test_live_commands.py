@@ -177,6 +177,27 @@ def test_a_subscriber_on_its_own_connection_reads_what_was_published(resp):
     assert value["candidate"]["replies"][3] == {"index": 3, "no_reply": True}
 
 
+def test_a_restart_reads_the_rewritten_config_file_the_acl_file_and_the_rdb_back():
+    commands = [
+        {"command": ["ACL", "USERS"], "expect": {"equals": ["alice", "default"]}},
+        {"command": ["CONFIG", "SET", "maxmemory", 12345678], "expect": {"equals": "OK"}},
+        {"command": ["CONFIG", "REWRITE"], "expect": {"equals": "OK"}},
+        {"command": ["ACL", "SETUSER", "bob", "on", "nopass"], "expect": {"equals": "OK"}},
+        {"command": ["ACL", "SAVE"], "expect": {"equals": "OK"}},
+        {"command": ["SET", "k", "v"], "expect": {"equals": "OK"}},
+        {"command": ["SAVE"], "expect": {"equals": "OK"}},
+        {"restart": True, "expect": {"equals": "OK"}},
+        {"command": ["CONFIG", "GET", "maxmemory"], "expect": {"equals": ["maxmemory", "12345678"]}},
+        {"command": ["ACL", "USERS"], "expect": {"equals": ["alice", "bob", "default"]}},
+        {"command": ["GET", "k"], "expect": {"equals": "v"}},
+    ]
+    files = {"users.acl": "user default on nopass ~* &* +@all\nuser alice on nopass ~* +@all\n"}
+    result, value = run(BINARY, commands, compare_with=BINARY, files=files, server_config={"aclfile": "users.acl"})
+
+    assert result.status.value == "PASS", result.summary
+    assert value["candidate"]["digest"] == value["parent"]["digest"]
+
+
 @needs_lset_builds
 @pytest.mark.parametrize("resp", [2, 3])
 def test_the_lset_example_reaches_the_change_on_the_fix_and_its_parent(tmp_path, resp):
