@@ -200,9 +200,11 @@ def _run_private_server(
     startup_config: Mapping[str, Any],
     timeout_s: float,
     check: Callable[[Any, dict[str, Any]], Probed],
+    files: Optional[Mapping[str, bytes]] = None,
 ) -> Probed:
-    """Start ``binary`` as a private server with ``startup_config`` and return ``check(client, facts)``: (status,
-    summary, facts). A binary that is missing, or a server that cannot start or exits, is that instead.
+    """Start ``binary`` as a private server with ``startup_config`` (and ``files`` in its directory) and return
+    ``check(client, facts)``: (status, summary, facts). A binary that is missing, or a server that cannot start or
+    exits, is that instead.
 
     The private server is owned until it is stopped.
     """
@@ -211,7 +213,7 @@ def _run_private_server(
         resolved = resolve_binary(binary)
     except OSError as exc:
         return ComponentStatus.ERROR, str(exc), {}
-    server = PrivateServer(resolved, server_arguments(startup_config), timeout_s=timeout_s, prefix="vfp-")
+    server = PrivateServer(resolved, server_arguments(startup_config), timeout_s=timeout_s, prefix="vfp-", files=files)
     owned = context.obligations.open(spec, "process.private-server", server.workdir, server.stop)
     facts: dict[str, Any] = {"binary": resolved}
     try:
@@ -243,9 +245,15 @@ def probe_binary(context: Any, spec: ComponentSpec, binary: str, config: Mapping
 
 
 def starts_with(
-    context: Any, spec: ComponentSpec, binary: str, server_config: Mapping[str, Any], timeout_s: float
+    context: Any,
+    spec: ComponentSpec,
+    binary: str,
+    server_config: Mapping[str, Any],
+    timeout_s: float,
+    files: Optional[Mapping[str, bytes]] = None,
 ) -> Probed:
-    """Whether ``binary`` starts with ``server_config``; only the start counts, never the values it runs with."""
+    """Whether ``binary`` starts with ``server_config`` (and ``files`` in its directory, which an option may name);
+    only the start counts, never the values it runs with."""
 
     return _run_private_server(
         context,
@@ -254,6 +262,7 @@ def starts_with(
         server_config,
         timeout_s,
         lambda client, facts: (ComponentStatus.PASS, "the build starts with it", facts),
+        files,
     )
 
 

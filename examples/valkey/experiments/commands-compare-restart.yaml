@@ -1,0 +1,41 @@
+# Compare one command sequence across a restart of the build under test and
+# of its parent, as commands-compare.yaml does without one.
+#
+# This sequence tests valkey-io/valkey#5176 (CONFIG REWRITE wrote a REPLICAOF
+# host holding a newline unquoted, so a restart read the rest of the host as
+# config directives). Each private server starts from a config file in its
+# own directory, so CONFIG REWRITE works, and `restart: true` stops it
+# gracefully and starts it again from that file. The parent reads back a
+# truncated host and the injected maxmemory; the fixed build reads the host
+# back whole. `files` would put more files in that directory first (an ACL
+# file that `server_config: {aclfile: users.acl}` names).
+#
+# The scenario declares the parent build as an artifact and passes it as the
+# `parent` input: {$ref: artifacts.parent.binary}.
+extends: [valkey.liveness]
+id: example.commands-compare-restart
+deployment:
+  modes: [standalone, cluster]
+metadata:
+  description: One command sequence across a restart of the build under test and its parent, replies compared
+inputs:
+  required: [parent]
+  properties:
+    parent:
+      type: environment_reference
+      reference_kinds: [artifacts]
+      description: "The parent commit's build, {$ref: artifacts.parent.binary}"
+components:
+  - use: valkey.action.commands
+    id: rewrite
+    config:
+      compare_with: {$ref: inputs.parent}
+      commands:
+        - {command: [REPLICAOF, "127.0.0.1 1\nmaxmemory 1234567\n#", 1], expect: {equals: OK}}
+        - {command: [CONFIG, REWRITE], expect: {equals: OK}}
+        - {restart: true, expect: {equals: OK}}
+        - {command: [CONFIG, GET, replicaof], expect_difference: true,
+           expect: {equals: [replicaof, "127.0.0.1 1\nmaxmemory 1234567\n# 1"]}}
+        - {command: [CONFIG, GET, maxmemory], expect_difference: true, expect: {equals: [maxmemory, "0"]}}
+required_evidence:
+  - {evidence_id: valkey.command.sequence, source: rewrite}

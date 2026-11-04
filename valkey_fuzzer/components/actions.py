@@ -12,6 +12,8 @@ import hashlib
 import json
 import math
 import os
+import posixpath
+import re
 import shutil
 import socket
 import subprocess
@@ -25,6 +27,7 @@ from valkey_fuzzer._data import canonical_json, jsonable
 from valkey_fuzzer.declarations import Declarations
 from valkey_fuzzer.deployment.local.queries import replication_role
 from valkey_fuzzer.deployment.local.server_config import MANAGED_SERVER_OPTIONS, canonicalize_server_config
+from valkey_fuzzer.hoststate import OWNER_FILE
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.protocols import component_artifact_dir
 from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
@@ -143,6 +146,7 @@ class CommandAction:
 # ---------------------------------------------------------------------------
 
 _COMPARE_MODES = ("equal", "unordered", "unordered-pairs", "json", "skip")
+_MAX_NODES = 6
 
 # The predicates of valkey.action.command; ``equals`` also takes a list or a mapping, compared as JSON data.
 _SEQUENCE_EXPECT = {
@@ -152,8 +156,21 @@ _SEQUENCE_EXPECT = {
 }
 _SEQUENCE_COMMAND = mapping_of(
     {
-        "command": ConfigField(list),
+        # A command; or raw: bytes sent as they are (a string as UTF-8, or !!binary), for the protocol parser; or
+        # read: the replies waiting on the connection (Pub/Sub messages, pushes); or restart: stop the node
+        # gracefully and start it again from its directory and config file.
+        "command": ConfigField(list, allow_none=True, default=None),
+        "raw": ConfigField((str, dict), allow_none=True, default=None),
+        "read": ConfigField(bool, default=False),
+        "restart": ConfigField(bool, default=False),
+        # The node it goes to, by index (see nodes), and the connection to it, opened on first use; main is the one
+        # every command takes unless it names another.
+        "node": ConfigField(int, default=0, minimum=0, maximum=_MAX_NODES - 1),
+        "connection": ConfigField(str, default="main"),
         "expect": mapping_of(_SEQUENCE_EXPECT, allow_none=True, default=None),
+        # Send the command again until its reply meets expect, for this long at most: for asynchronous work the
+        # sequence started (a slot migration, a replica's sync). Its last reply is the one recorded.
+        "wait_s": ConfigField(float, allow_none=True, default=None, minimum=0.1, maximum=3600),
         # The change under test means this reply to differ from the parent's.
         "expect_difference": ConfigField(bool, default=False),
         "compare": ConfigField(str, default="equal", choices=_COMPARE_MODES),
@@ -171,23 +188,27 @@ _COMMANDS_FIELDS = {
     "modules_parent": ConfigField(
         list, allow_none=True, default=None, reference=True, items=ConfigField(str, reference=True)
     ),
-    # Both private servers run as a one-node cluster serving every slot.
+    # Every private server runs in cluster mode: node 0 serves every slot, and the other nodes join it as empty
+    # primaries.
     "cluster": ConfigField(bool, default=False),
+    # Each side runs on this many private servers; a command names its node.
+    "nodes": ConfigField(int, default=1, minimum=1, maximum=_MAX_NODES),
     # Both private servers start with it; an option the parent rejects is dropped on both sides.
     "server_config": ConfigField(dict, default=dict),
+    # Written into every private server's directory before it starts, by path relative to it: a string as UTF-8,
+    # or !!binary. server_config may name them (aclfile: users.acl).
+    "files": ConfigField(dict, default=dict),
     "resp": ConfigField(int, default=2, choices=(2, 3)),
     "timeout_s": ConfigField(float, default=10.0, minimum=0.1, maximum=3600),
     "commands": ConfigField(list, items=_SEQUENCE_COMMAND),
 }
 
 # Refused in every sequence: they end or restart the server the sequence talks to, or hold its connection.
-_REFUSED = {
-    "SHUTDOWN": "it stops the server",
-    "MONITOR": "it holds the connection",
-    "SUBSCRIBE": "it holds the connection",
-    "PSUBSCRIBE": "it holds the connection",
-    "SSUBSCRIBE": "it holds the connection",
-}
+_REFUSED = {"SHUTDOWN": "it stops the server", "MONITOR": "it holds the connection"}
+# Refused on the main connection, which they would hold; allowed on a named one. Each channel of these and of the
+# unsubscribing commands is confirmed by a reply of its own, so they take one each.
+_SUBSCRIBE = ("SUBSCRIBE", "PSUBSCRIBE", "SSUBSCRIBE")
+_UNSUBSCRIBE = ("UNSUBSCRIBE", "PUNSUBSCRIBE", "SUNSUBSCRIBE")
 _REFUSED_DEBUG = ("RESTART", "CRASH-AND-RECOVER", "RELOAD")
 _REFUSED_MODULE = ("LOAD", "LOADEX", "UNLOAD")
 # Refused on the deployment's instances, whose topology the deployment owns; allowed on the private servers.
@@ -202,6 +223,20 @@ _PRIVATE_SERVER_DEFAULTS = {"sanitize-dump-payload": "yes", "enable-debug-comman
 # before the loss counts as anything but a crash.
 _START_TIMEOUT_S = 15.0
 _EXIT_WAIT_S = 5.0
+# How often a command with wait_s is sent again.
+_WAIT_INTERVAL_S = 0.1
+# How long raw bytes wait for a reply before they are recorded as answered by none.
+_NO_REPLY_S = 1.0
+# How long a restart waits for the server to stop (it waits for lagging replicas up to shutdown-timeout, 10s).
+_STOP_TIMEOUT_S = 30.0
+# The files of a private server's directory the harness writes itself.
+_HARNESS_FILES = ("valkey.conf", "server.log", "output.log", "s.sock", OWNER_FILE)
+# A node of the side a command runs on, in an argument: <node.1.id>, <node.1.host>, <node.1.port>,
+# <node.1.cluster-port>. Angle brackets, not braces: YAML reads {node.1.id} as a mapping, and Valkey braces as a
+# hash tag.
+_PLACEHOLDER = re.compile(r"<node\.(\d+)\.([a-z-]+)>")
+_NODE_FIELDS = ("id", "host", "port", "cluster-port")
+_CLUSTER_FIELDS = ("id", "cluster-port")
 
 
 def _is_binary(item: Any) -> bool:
@@ -247,6 +282,20 @@ def _refusal(words: list[str], timeout_s: float, on_instances: bool) -> Optional
     return None
 
 
+def _validate_placeholders(arguments: Sequence[Any], where: str, config: Mapping[str, Any], compared: bool) -> None:
+    for argument in arguments:
+        for match in _PLACEHOLDER.finditer(argument if isinstance(argument, str) else ""):
+            text, node, field = match.group(0), int(match.group(1)), match.group(2)
+            if not compared:
+                raise ConfigError(f"{where}: {text} needs compare_with or modules_parent: it names a private server")
+            if field not in _NODE_FIELDS:
+                raise ConfigError(f"{where}: {text} names no field of a node; the fields are {', '.join(_NODE_FIELDS)}")
+            if node >= config["nodes"]:
+                raise ConfigError(f"{where}: {text} names node {node}, but each side runs on {config['nodes']} node(s)")
+            if field in _CLUSTER_FIELDS and not config["cluster"]:
+                raise ConfigError(f"{where}: {text} needs cluster")
+
+
 def _two_servers(config: Mapping[str, Any]) -> bool:
     """Whether the sequence runs on two private servers: with a parent build, or a parent build of the modules."""
 
@@ -259,6 +308,19 @@ def _validate_commands(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -
         raise ConfigError(
             "cluster needs compare_with or modules_parent: on the deployment's instances the deployment decides the mode"
         )
+    if config["nodes"] > 1 and not compared:
+        raise ConfigError("nodes needs compare_with or modules_parent: the deployment decides its instances")
+    if config["files"] and not compared:
+        raise ConfigError("files needs compare_with or modules_parent: they are written for the private servers")
+    for name, content in config["files"].items():
+        path = posixpath.normpath(name)
+        if path != name or path.startswith("/") or path == ".." or path.startswith("../") or path in _HARNESS_FILES:
+            raise ConfigError(
+                f"files: {name!r} must be a plain relative path inside the server's directory, "
+                f"none of {', '.join(_HARNESS_FILES)}"
+            )
+        if not isinstance(content, str) and not _is_binary(content):
+            raise ConfigError(f"files: {name!r} must be a string or a !!binary value")
     if config["modules"] and not compared:
         raise ConfigError(
             "modules needs compare_with or modules_parent: the deployment's instances load modules through "
@@ -276,17 +338,47 @@ def _validate_commands(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -
         raise ConfigError("commands must list at least one command")
     for index, item in enumerate(config["commands"]):
         where = f"commands[{index}]"
-        words = _validate_sequence_command(item["command"], f"{where}.command")
-        refused = _refusal(words, config["timeout_s"], not compared)
-        if refused is not None:
-            named = " ".join(words[:2]) if words[0] in _CONTAINER_COMMANDS and len(words) > 1 else words[0]
-            raise ConfigError(f"{where}: {named} is refused: {refused}")
+        if [item["command"] is not None, item["raw"] is not None, item["read"], item["restart"]].count(True) != 1:
+            raise ConfigError(f"{where} needs one of command, raw, read, and restart")
+        if item["restart"]:
+            if not compared:
+                raise ConfigError(
+                    f"{where}: restart needs compare_with or modules_parent: valkey.action.restart-instance "
+                    "restarts the deployment's instances"
+                )
+            if item["connection"] != "main":
+                raise ConfigError(f"{where}: restart restarts a node, every connection to it; it names none")
+        if not item["connection"]:
+            raise ConfigError(f"{where}.connection must name a connection")
+        if item["wait_s"] is not None and item["command"] is None:
+            raise ConfigError(f"{where}: wait_s sends a command again; raw bytes, a read, and a restart happen once")
+        if item["raw"] is not None:
+            if not item["raw"] or not (isinstance(item["raw"], str) or _is_binary(item["raw"])):
+                raise ConfigError(f"{where}.raw must be a non-empty string or a !!binary value")
+        elif item["command"] is not None:
+            words = _validate_sequence_command(item["command"], f"{where}.command")
+            refused = _refusal(words, config["timeout_s"], not compared)
+            if refused is not None:
+                named = " ".join(words[:2]) if words[0] in _CONTAINER_COMMANDS and len(words) > 1 else words[0]
+                raise ConfigError(f"{where}: {named} is refused: {refused}")
+            if words[0] in _SUBSCRIBE and item["connection"] == "main":
+                raise ConfigError(
+                    f"{where}: {words[0]} is refused on the main connection, which it would hold; "
+                    "send it on a connection of its own (connection: <name>)"
+                )
+            if words[0] in (*_SUBSCRIBE, *_UNSUBSCRIBE) and len(words) != 2:
+                raise ConfigError(f"{where}: {words[0]} takes one channel: each is confirmed by a reply of its own")
+        if item["node"] >= config["nodes"]:
+            raise ConfigError(f"{where}.node is {item['node']}, but each side runs on {config['nodes']} node(s)")
+        _validate_placeholders(item["command"] or [item["raw"]], where, config, compared)
         if item["expect"] is not None:
             if "error" in item["expect"]:
                 if set(item["expect"]) != {"error"}:
                     raise ConfigError(f"{where}.expect.error cannot be combined with a reply predicate")
             else:
                 validate_predicate(item["expect"], f"{where}.expect")
+        if item["wait_s"] is not None and item["expect"] is None:
+            raise ConfigError(f"{where}: wait_s needs an expect to wait for")
         if item["expect_difference"]:
             if not compared:
                 raise ConfigError(f"{where}: expect_difference needs compare_with or modules_parent")
@@ -343,19 +435,58 @@ class RawConnection:
         """``{"reply": ...}``, the server's error as ``{"error": ...}``, or a lost connection or a reply that
         timed out as ``{"error": ..., "unanswered": True}``."""
 
+        return self._exchange(lambda: self.connection.send_command(*[_argument(item) for item in command]))
+
+    def send_raw(self, data: bytes) -> dict[str, Any]:
+        """Send ``data`` as it is and read one reply, as :meth:`send`; ``{"no_reply": True}`` when none began
+        within a second (the bytes are not a whole request, or the server holds them). A further reply stays on
+        the connection, for the next command to read."""
+
+        return self._exchange(lambda: self.connection.send_packed_command([data]), wait_s=_NO_REPLY_S)
+
+    def read_waiting(self) -> dict[str, Any]:
+        """Every reply waiting on the connection, and each that begins within a second of the last (Pub/Sub
+        messages, RESP3 pushes): ``{"reply": [...]}``, an error among them as ``{"$error": ...}``; or a lost
+        connection as :meth:`send` records it."""
+
+        replies: list[Any] = []
         try:
-            self.connection.send_command(*[_argument(item) for item in command])
-            return {"reply": raw_reply(self.connection.read_response())}
+            while self.connection.can_read(timeout=_NO_REPLY_S):
+                try:
+                    replies.append(raw_reply(self.connection.read_response(push_request=True)))
+                except valkey.exceptions.ResponseError as exc:
+                    replies.append(raw_reply(exc))
+        except (valkey.exceptions.ConnectionError, valkey.exceptions.TimeoutError, OSError) as exc:
+            return _lost(exc)
+        return {"reply": replies}
+
+    def _exchange(self, write: Any, wait_s: Optional[float] = None) -> dict[str, Any]:
+        try:
+            write()
+            if wait_s is not None and not self.connection.can_read(timeout=wait_s):
+                return {"no_reply": True}
+            # A RESP3 push (a SUBSCRIBE's confirmation) is a reply too, not one for valkey-py to handle.
+            return {"reply": raw_reply(self.connection.read_response(push_request=True))}
         except valkey.exceptions.ResponseError as exc:
             return {"error": str(exc)}
         except (valkey.exceptions.ConnectionError, valkey.exceptions.TimeoutError, OSError) as exc:
-            return {"error": f"{type(exc).__name__}: {exc}", "unanswered": True}
+            return _lost(exc)
 
     def close(self) -> None:
         try:
             self.connection.disconnect()
         except Exception:
             pass
+
+
+def _lost(exc: BaseException) -> dict[str, Any]:
+    """A command that got no reply: the reply timed out, or the connection was lost, ``closed`` when the server
+    closed it (see :func:`_run_sequence`)."""
+
+    record: dict[str, Any] = {"error": f"{type(exc).__name__}: {exc}", "unanswered": True}
+    if isinstance(exc, valkey.exceptions.ConnectionError):
+        record["closed"] = True
+    return record
 
 
 def open_raw_connection(
@@ -372,19 +503,50 @@ def open_raw_connection(
     return RawConnection(connection)
 
 
-def _run_sequence(connection: RawConnection, commands: Sequence[Mapping[str, Any]], context: Any) -> list[dict]:
-    """Every command in order on ``connection``, each with its index; it stops at the first that got no reply,
-    since the connection's state is unknown after it, and when the call is cancelled."""
+def _run_sequence(target: Any, commands: Sequence[Mapping[str, Any]], context: Any) -> list[dict]:
+    """Every command in order on its node's connection of ``target`` (a :class:`_Side` or an
+    :class:`_Instance`), each with its index; it stops at the first that got no reply, since the connection's
+    state is unknown after it, and when the call is cancelled. A connection the server closed is its answer,
+    ``{"closed": True}``, while its node lives on (the connection opens anew on its next use), and a connection
+    lost to a crash when not."""
 
     replies: list[dict[str, Any]] = []
     for index, item in enumerate(commands):
         if context.cancelled:
             break
-        record = {"index": index, **connection.send(item["command"])}
+        record = {"index": index, **_run_step(target, item, context)}
+        if record.pop("closed", False) and target.survives(item["node"]):
+            target.forget(item["node"], item["connection"])
+            record = {"index": index, "closed": True}
         replies.append(record)
         if record.get("unanswered"):
             break
     return replies
+
+
+def _run_step(target: Any, item: Mapping[str, Any], context: Any) -> dict[str, Any]:
+    """One command of a sequence on ``target``: its record, with ``wait_s`` the last of its attempts."""
+
+    if item["restart"]:
+        return target.restart(item["node"])
+    try:
+        connection = target.connection(item["node"], item["connection"])
+    except (valkey.exceptions.ValkeyError, OSError) as exc:
+        return {"error": f"cannot connect: {type(exc).__name__}: {exc}", "unanswered": True}
+    if item["read"]:
+        return target.mask(connection.read_waiting())
+    if item["raw"] is not None:
+        raw = item["raw"]
+        return target.mask(connection.send_raw(_argument(raw) if _is_binary(raw) else target.substitute(raw).encode()))
+    command = [target.substitute(argument) for argument in item["command"]]
+    if item["wait_s"] is None:
+        return target.mask(connection.send(command))
+
+    def attempt() -> tuple[bool, dict[str, Any]]:
+        record = target.mask(connection.send(command))
+        return bool(record.get("unanswered")) or _sequence_matches(item["expect"], record), record
+
+    return poll_until(attempt, timeout_s=item["wait_s"], interval_s=_WAIT_INTERVAL_S, context=context)[1]
 
 
 def _json_value(item: Any) -> Any:
@@ -451,71 +613,266 @@ def _command_text(command: Sequence[Any]) -> str:
     return " ".join("<binary>" if _is_binary(item) else str(item) for item in command)
 
 
-class _Server:
-    """One private server of a compared sequence: started, owned until stopped, its logs kept."""
+def _step_text(item: Mapping[str, Any]) -> str:
+    """A command of a sequence as a summary names it."""
 
-    def __init__(self, label: str, binary: str):
-        self.label, self.binary = label, binary
-        # The server options of this server alone (its cluster port), beside the shared server_config.
+    if item["read"] or item["restart"]:
+        text = "read" if item["read"] else "restart"
+    elif item["raw"] is not None:
+        text = "raw <binary>" if _is_binary(item["raw"]) else f"raw {json.dumps(item['raw'])}"
+    else:
+        text = _command_text(item["command"])
+    if item["connection"] != "main":
+        text += f" on connection {item['connection']}"
+    return text + (f" on node {item['node']}" if item["node"] else "")
+
+
+class _Instance:
+    """A deployment instance a sequence runs on: its connections by name, opened on first use, and no
+    placeholders."""
+
+    def __init__(self, connect: Any):
+        self.connect = connect
+        self.connections = {"main": connect()}
+
+    def connection(self, node: int, name: str) -> RawConnection:
+        if name not in self.connections:
+            self.connections[name] = self.connect()
+        return self.connections[name]
+
+    def survives(self, node: int) -> bool:
+        """Never known here: an instance's liveness is the liveness oracle's to judge, so a connection it closed
+        stays a command without a reply."""
+
+        return False
+
+    def close(self) -> None:
+        for connection in self.connections.values():
+            connection.close()
+
+    def substitute(self, argument: Any) -> Any:
+        return argument
+
+    def mask(self, value: Any) -> Any:
+        return value
+
+
+class _Node:
+    """One private server of a side: its address options, the server, its connections by name, its kept logs."""
+
+    def __init__(self, name: str):
+        # The prefix of its kept logs: the side's label, with the node's index when the side has several.
+        self.name = name
         self.options: dict[str, Any] = {}
         self.server: Any = None
         self.owned: Any = None
-        self.connection: Optional[RawConnection] = None
-        self.replies: list[dict[str, Any]] = []
-        self.exited: Optional[int] = None
+        self.connections: dict[str, RawConnection] = {}
+        # Its cluster node ID, with cluster.
+        self.id: Optional[str] = None
         self.logs: list[str] = []
 
-    def start(
-        self, context: Any, spec: ComponentSpec, server_config: Mapping[str, Any], resp: int, timeout_s: float
-    ) -> str:
-        """Start it with ``server_config`` and its own options, and connect; what went wrong, or an empty string."""
 
-        arguments = server_arguments({**server_config, **self.options})
-        self.server = PrivateServer(self.binary, arguments, timeout_s=_START_TIMEOUT_S, prefix="vfc-")
-        self.owned = context.obligations.open(spec, "process.private-server", self.server.workdir, self.server.stop)
-        try:
-            # PrivateServer.start polls with time.sleep: not cancellable, but bounded by its timeout.
-            exit_output = self.server.start()
-        except (OSError, TimeoutError) as exc:
-            return f"the {self.label} server did not start: {exc}"
-        if exit_output is not None:
-            return f"the {self.label} server exited at startup: {exit_output[-500:]}"
-        try:
-            self.connection = open_raw_connection(resp, timeout_s, path=self.server.socket_path)
-        except (valkey.exceptions.ValkeyError, OSError) as exc:
-            return f"cannot connect to the {self.label} server with RESP{resp}: {type(exc).__name__}: {exc}"
+class _Side:
+    """One build's side of a compared sequence: its private servers (nodes), started, owned until stopped, their
+    logs kept, and the placeholders that name them."""
+
+    def __init__(self, label: str, binary: str, nodes: int, resp: int, timeout_s: float):
+        self.label, self.binary = label, binary
+        # The protocol and client timeout of every connection.
+        self.resp, self.timeout_s = resp, timeout_s
+        # The server options of this side's nodes (cluster mode, modules), beside the shared server_config.
+        self.options: dict[str, Any] = {}
+        self.nodes = [_Node(label if nodes == 1 else f"{label}.node{index}") for index in range(nodes)]
+        self.replies: list[dict[str, Any]] = []
+        # The exit status of the first node found exited, and that node.
+        self.exited: Optional[int] = None
+        self.exited_node: Optional[int] = None
+        self.logs: list[str] = []
+        # {placeholder: value}, and {node ID or port: placeholder} for the replies.
+        self.values: dict[str, str] = {}
+        self.names: dict[str, str] = {}
+        self.pattern: Optional[re.Pattern] = None
+
+    def start(
+        self, context: Any, spec: ComponentSpec, server_config: Mapping[str, Any], files: Mapping[str, bytes]
+    ) -> str:
+        """Start every node from a config file of ``server_config`` and its options, ``files`` in its directory, and
+        open its main connection; what went wrong, or an empty string."""
+
+        for index, node in enumerate(self.nodes):
+            arguments = server_arguments({**server_config, **self.options, **node.options})
+            node.server = PrivateServer(
+                self.binary, arguments, timeout_s=_START_TIMEOUT_S, prefix="vfc-", files=files, config_file=True
+            )
+            node.owned = context.obligations.open(spec, "process.private-server", node.server.workdir, node.server.stop)
+            try:
+                # PrivateServer.start polls with time.sleep: not cancellable, but bounded by its timeout.
+                exit_output = node.server.start()
+            except (OSError, TimeoutError) as exc:
+                return f"the {node.name} server did not start: {exc}"
+            if exit_output is not None:
+                return f"the {node.name} server exited at startup: {exit_output[-500:]}"
+            try:
+                self.connection(index, "main")
+            except (valkey.exceptions.ValkeyError, OSError) as exc:
+                return f"cannot connect to the {node.name} server with RESP{self.resp}: {type(exc).__name__}: {exc}"
         return ""
 
-    def finish(self, context: Any, spec: ComponentSpec) -> None:
-        """Note whether the process exited (a lost connection waits for it), keep its logs, stop it."""
+    def form_cluster(self, context: Any, timeout_s: float) -> Optional[str]:
+        """Give node 0 every slot, have every other node meet it, and wait until every node knows them all with
+        its state ok; why that did not happen, or None. Each node's ID is recorded."""
 
-        if self.connection is not None:
-            self.connection.close()
-        if self.server is not None and self.server.process is not None:
-            if self.replies and self.replies[-1].get("unanswered"):
+        first = self.nodes[0]
+        added = first.connections["main"].send(["CLUSTER", "ADDSLOTSRANGE", "0", "16383"])
+        if "reply" not in added:
+            return f"the {first.name} server: CLUSTER ADDSLOTSRANGE failed: {added.get('error')}"
+        for node in self.nodes:
+            myid = node.connections["main"].send(["CLUSTER", "MYID"])
+            if "reply" not in myid:
+                return f"the {node.name} server: CLUSTER MYID failed: {myid.get('error')}"
+            node.id = str(myid["reply"])
+        for node in self.nodes[1:]:
+            met = node.connections["main"].send(
+                ["CLUSTER", "MEET", "127.0.0.1", first.options["port"], first.options["cluster-port"]]
+            )
+            if "reply" not in met:
+                return f"the {node.name} server: CLUSTER MEET failed: {met.get('error')}"
+        for node in self.nodes:
+
+            def formed(node: _Node = node) -> tuple[bool, Any]:
+                info = node.connections["main"].send(["CLUSTER", "INFO"])
+                fields = dict(line.split(":", 1) for line in str(info.get("reply", "")).split() if ":" in line)
+                ready = fields.get("cluster_state") == "ok" and fields.get("cluster_known_nodes") == str(
+                    len(self.nodes)
+                )
+                return ready, info
+
+            done, last = poll_until(formed, timeout_s=timeout_s, interval_s=0.1, context=context)
+            if not done:
+                return (
+                    f"the {node.name} server: cluster_state is not ok with {len(self.nodes)} known node(s) "
+                    f"within {timeout_s:g}s: {last}"
+                )
+        return None
+
+    def restart(self, index: int) -> dict[str, Any]:
+        """Stop node ``index`` gracefully and start it again from its directory and config file: ``{"reply": "OK"}``
+        once it answers again, or why not as a command that got no reply."""
+
+        node = self.nodes[index]
+        for connection in node.connections.values():
+            connection.close()
+        node.connections.clear()
+        if not node.server.shut_down(_STOP_TIMEOUT_S):
+            return {"error": f"the server did not stop within {_STOP_TIMEOUT_S:g}s", "unanswered": True}
+        try:
+            exit_output = node.server.start()
+        except (OSError, TimeoutError) as exc:
+            return {"error": f"the server did not start again: {exc}", "unanswered": True}
+        if exit_output is not None:
+            return {"error": f"the server exited at startup: {exit_output[-500:]}", "unanswered": True}
+        return {"reply": "OK"}
+
+    def name_nodes(self) -> None:
+        """The placeholders of its nodes, both ways: each to its value, and each node ID and port in a reply back to
+        its placeholder (the host is the same on every side)."""
+
+        for index, node in enumerate(self.nodes):
+            fields = {
+                "id": node.id,
+                "host": "127.0.0.1",
+                **{key: node.options.get(key) for key in ("port", "cluster-port")},
+            }
+            for field, value in fields.items():
+                if value is None:
+                    continue
+                self.values[f"<node.{index}.{field}>"] = str(value)
+                if field != "host":
+                    self.names[str(value)] = f"<node.{index}.{field}>"
+        if self.names:
+            alternatives = "|".join(re.escape(value) for value in sorted(self.names, key=len, reverse=True))
+            self.pattern = re.compile(f"(?<![0-9A-Za-z])(?:{alternatives})(?![0-9A-Za-z])")
+
+    def connection(self, node: int, name: str) -> RawConnection:
+        connections = self.nodes[node].connections
+        if name not in connections:
+            connections[name] = open_raw_connection(self.resp, self.timeout_s, path=self.nodes[node].server.socket_path)
+        return connections[name]
+
+    def survives(self, index: int) -> bool:
+        """Whether node ``index`` still runs ``_EXIT_WAIT_S`` after a connection to it closed."""
+
+        try:
+            self.nodes[index].server.process.wait(timeout=_EXIT_WAIT_S)
+        except subprocess.TimeoutExpired:
+            return True
+        return False
+
+    def forget(self, index: int, name: str) -> None:
+        self.nodes[index].connections.pop(name).close()
+
+    def substitute(self, argument: Any) -> Any:
+        """``argument`` with every placeholder in it replaced by this side's value."""
+
+        if not isinstance(argument, str):
+            return argument
+        return _PLACEHOLDER.sub(lambda match: self.values[match.group(0)], argument)
+
+    def mask(self, value: Any) -> Any:
+        """``value`` (a record, or a part of one) with this side's node IDs and ports as their placeholders, so two
+        sides that behave the same compare equal; a port is masked as an integer too, as CLUSTER SLOTS replies it."""
+
+        if self.pattern is None or _is_binary(value):
+            return value
+        if isinstance(value, str):
+            return self.pattern.sub(lambda match: self.names[match.group(0)], value)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return self.names.get(str(value), value)
+        if isinstance(value, list):
+            return [self.mask(item) for item in value]
+        if isinstance(value, dict):
+            return {self.mask(key): self.mask(item) for key, item in value.items()}
+        return value
+
+    def finish(self, context: Any, spec: ComponentSpec, commands: Sequence[Mapping[str, Any]]) -> None:
+        """Note whether a node exited (a lost connection waits for its node), keep every node's logs, stop them."""
+
+        for node in self.nodes:
+            for connection in node.connections.values():
+                connection.close()
+        if self.replies and self.replies[-1].get("unanswered"):
+            lost = self.nodes[commands[self.replies[-1]["index"]]["node"]].server
+            if lost is not None and lost.process is not None:
                 try:
-                    self.server.process.wait(timeout=_EXIT_WAIT_S)
+                    lost.process.wait(timeout=_EXIT_WAIT_S)
                 except subprocess.TimeoutExpired:
                     pass
-            self.exited = self.server.process.poll()
-            directory = component_artifact_dir(context, spec)
-            for name, path in (("server.log", self.server.log_path), ("output.log", self.server.output_path)):
-                destination = os.path.join(directory, f"{self.label}.{name}")
-                try:
-                    shutil.copyfile(path, destination)
-                    self.logs.append(destination)
-                except OSError:
-                    pass
-        if self.owned is not None:
-            self.owned.discharge()
+        directory = component_artifact_dir(context, spec)
+        for index, node in enumerate(self.nodes):
+            if node.server is not None and node.server.process is not None:
+                status = node.server.process.poll()
+                if status is not None and self.exited is None:
+                    self.exited, self.exited_node = status, index
+                for name, path in (("server.log", node.server.log_path), ("output.log", node.server.output_path)):
+                    destination = os.path.join(directory, f"{node.name}.{name}")
+                    try:
+                        shutil.copyfile(path, destination)
+                        node.logs.append(destination)
+                    except OSError:
+                        pass
+            self.logs.extend(node.logs)
+            if node.owned is not None:
+                node.owned.discharge()
 
     def crash_cause(self) -> str:
-        """Why it exited, from its kept logs: the crash report's cause, else its fatal line, else its status."""
+        """Why its node exited, from that node's kept logs: the crash report's cause, else its fatal line, else
+        its status."""
 
-        reports = scan_for_crashes({path: path for path in self.logs}, CRASH_PATTERNS)
+        logs = self.nodes[self.exited_node or 0].logs
+        reports = scan_for_crashes({path: path for path in logs}, CRASH_PATTERNS)
         if reports:
             return crash_cause(next(iter(reports.values())))
-        fatal = next((line for line in map(fatal_exit, self.logs) if line), None)
+        fatal = next((line for line in map(fatal_exit, logs) if line), None)
         return fatal or f"exited with status {self.exited}"
 
 
@@ -532,33 +889,19 @@ def _free_ports(count: int) -> list[int]:
     return ports
 
 
-def _cluster_ready(connection: RawConnection, context: Any, timeout_s: float) -> Optional[str]:
-    """Give a one-node cluster every slot and wait until its state is ok; why that did not happen, or None."""
-
-    added = connection.send(["CLUSTER", "ADDSLOTSRANGE", "0", "16383"])
-    if "reply" not in added:
-        return f"CLUSTER ADDSLOTSRANGE failed: {added.get('error')}"
-
-    def state_ok() -> tuple[bool, Any]:
-        info = connection.send(["CLUSTER", "INFO"])
-        return "cluster_state:ok" in str(info.get("reply", "")), info
-
-    done, last = poll_until(state_ok, timeout_s=timeout_s, interval_s=0.1, context=context)
-    return None if done else f"cluster_state is not ok within {timeout_s:g}s: {last}"
-
-
 class CommandsAction:
-    """Send a command sequence on one connection, and with ``compare_with`` compare the replies of two builds.
+    """Send a command sequence, and with ``compare_with`` compare the replies of two builds.
 
-    With ``compare_with`` the sequence runs on two private servers the action starts from an empty dataset
-    with the same ``server_config`` (``sanitize-dump-payload yes`` unless set, and ``cluster-enabled yes``
-    with ``cluster``), one of the deployment's binary (the candidate) and one of ``compare_with`` (the
-    parent); the deployment's instances are never touched. An option the parent rejects is dropped on both
-    sides and recorded. Only the candidate is judged: a reply that violates its ``expect``, or a candidate
-    that exits, is FAIL. A difference between the builds is never a FAIL by itself: a marked command whose
-    replies are equal leaves the run ERROR ``unreached-change``, an unmarked command whose replies differ
-    ERROR ``unexplained-difference``; a parent that dies on a marked command reached the change. Without
-    ``compare_with`` the sequence runs on each selected instance, and ``expect`` alone judges it.
+    With ``compare_with`` the sequence runs on two sides of ``nodes`` private servers each, which the action
+    starts from an empty dataset with the same ``server_config`` (``sanitize-dump-payload yes`` unless set, and
+    ``cluster-enabled yes`` with ``cluster``), one side of the deployment's binary (the candidate) and one of
+    ``compare_with`` (the parent); the deployment's instances are never touched. An option the parent rejects
+    is dropped on both sides and recorded. Only the candidate is judged: a reply that violates its ``expect``,
+    or a candidate node that exits, is FAIL. A difference between the builds is never a FAIL by itself: a
+    marked command whose replies are equal leaves the run ERROR ``unreached-change``, an unmarked command whose
+    replies differ ERROR ``unexplained-difference``; a parent that dies on a marked command reached the
+    change. Without ``compare_with`` the sequence runs on each selected instance, and ``expect`` alone judges
+    it.
     """
 
     def run(self, context: Any, spec: ComponentSpec):
@@ -573,15 +916,17 @@ class CommandsAction:
         for instance_id in select_instances(handle, config["instances"]):
             instance = handle.instance(instance_id)
             try:
-                connection = open_raw_connection(
-                    config["resp"], config["timeout_s"], host=instance.host, port=instance.port
+                target = _Instance(
+                    functools.partial(
+                        open_raw_connection, config["resp"], config["timeout_s"], host=instance.host, port=instance.port
+                    )
                 )
             except (valkey.exceptions.ValkeyError, OSError) as exc:
                 return make_result(spec, ComponentStatus.ERROR, f"cannot connect to {instance_id}: {exc}")
             try:
-                replies = _run_sequence(connection, config["commands"], context)
+                replies = _run_sequence(target, config["commands"], context)
             finally:
-                connection.close()
+                target.close()
             problems.extend(f"{instance_id}: {text}" for text in _violations(config["commands"], replies))
             unanswered.extend(f"{instance_id}: {text}" for text in _unanswered(config["commands"], replies))
             record = _record(config, _side(replies, config["commands"]), None, None, [], [], [])
@@ -603,13 +948,19 @@ class CommandsAction:
             )
         except OSError as exc:
             return make_result(spec, ComponentStatus.ERROR, str(exc))
-        candidate, parent = _Server("candidate", candidate_binary), _Server("parent", parent_binary)
+        candidate = _Side("candidate", candidate_binary, config["nodes"], config["resp"], config["timeout_s"])
+        parent = _Side("parent", parent_binary, config["nodes"], config["resp"], config["timeout_s"])
         server_config = {**_PRIVATE_SERVER_DEFAULTS, **canonicalize_server_config(config["server_config"])}
-        if config["cluster"]:
-            # Each server needs a cluster bus port of its own; with no TCP port, Valkey would give both 10000.
-            ports = iter(_free_ports(2))
-            for server in (candidate, parent):
-                server.options = {"cluster-enabled": "yes", "cluster-port": next(ports)}
+        # Every node listens on a loopback port of its own (and a cluster bus port), so nodes can meet and replicate;
+        # the sequence talks to it over its unix socket.
+        ports = iter(_free_ports(2 * config["nodes"] * (2 if config["cluster"] else 1)))
+        for server in (candidate, parent):
+            for node in server.nodes:
+                node.options = {"bind": "127.0.0.1", "port": next(ports)}
+                if config["cluster"]:
+                    node.options["cluster-port"] = next(ports)
+            if config["cluster"]:
+                server.options["cluster-enabled"] = "yes"
         modules = {
             "candidate": list(config["modules"]),
             "parent": list(config["modules"] if config["modules_parent"] is None else config["modules_parent"]),
@@ -618,9 +969,14 @@ class CommandsAction:
             if modules[server.label]:
                 server.options["loadmodule"] = modules[server.label]
 
-        def starts(server: _Server, options: Mapping[str, Any]) -> tuple[ComponentStatus, str]:
-            probed = {**options, **server.options}
-            status, summary, _ = starts_with(context, spec, server.binary, probed, _START_TIMEOUT_S)
+        files = {
+            name: _argument(content) if _is_binary(content) else content.encode()
+            for name, content in config["files"].items()
+        }
+
+        def starts(server: _Side, options: Mapping[str, Any]) -> tuple[ComponentStatus, str]:
+            probed = {**options, **server.options, **server.nodes[0].options}
+            status, summary, _ = starts_with(context, spec, server.binary, probed, _START_TIMEOUT_S, files)
             return status, summary
 
         # Configuration both builds accept: an option the parent rejects is dropped on both sides.
@@ -646,17 +1002,17 @@ class CommandsAction:
 
         try:
             for server in (candidate, parent):
-                failed = server.start(context, spec, server_config, config["resp"], config["timeout_s"])
+                failed = server.start(context, spec, server_config, files)
                 if not failed and config["cluster"]:
-                    failed = _cluster_ready(server.connection, context, config["timeout_s"])
-                    failed = failed and f"the {server.label} server: {failed}"
+                    failed = server.form_cluster(context, config["timeout_s"]) or ""
                 if failed:
                     return make_result(spec, ComponentStatus.ERROR, failed)
+                server.name_nodes()
             for server in (candidate, parent):
-                server.replies = _run_sequence(server.connection, commands, context)
+                server.replies = _run_sequence(server, commands, context)
         finally:
             for server in (candidate, parent):
-                server.finish(context, spec)
+                server.finish(context, spec, commands)
 
         reached, unexplained, unreached, uncompared = _compare(commands, candidate, parent)
         record = _record(
@@ -671,6 +1027,7 @@ class CommandsAction:
         for server in (candidate, parent):
             if server.exited is not None:
                 record[server.label]["exited"] = server.exited
+                record[server.label]["exited_node"] = server.exited_node
         evidence = (
             make_evidence(
                 spec, "valkey.command.sequence", "action.completed", record, artifacts=[*candidate.logs, *parent.logs]
@@ -690,15 +1047,12 @@ class CommandsAction:
         if candidate.exited is not None:
             cause = candidate.crash_cause()
             at = candidate.replies[-1]["index"] if candidate.replies else None
-            where = (
-                "before the first command"
-                if at is None
-                else f"on command {at} ({_command_text(commands[at]['command'])})"
-            )
+            where = "before the first command" if at is None else f"on command {at} ({_step_text(commands[at])})"
+            who = "the candidate" if config["nodes"] == 1 else f"the candidate's node {candidate.exited_node}"
             return make_result(
                 spec,
                 ComponentStatus.FAIL,
-                f"the candidate exited {where}: {cause}",
+                f"{who} exited {where}: {cause}",
                 evidence=evidence,
                 diagnostics={"crashes": {"candidate": cause}},
                 crash=True,
@@ -714,7 +1068,7 @@ class CommandsAction:
             commands_disputed = [
                 {
                     "index": index,
-                    "command": _command_text(commands[index]["command"]),
+                    "command": _step_text(commands[index]),
                     "expect": plain_config(commands[index]["expect"]),
                     "candidate": _reply_at(candidate.replies, index),
                     "parent": _reply_at(parent.replies, index),
@@ -733,7 +1087,7 @@ class CommandsAction:
             differences = [
                 {
                     "index": index,
-                    "command": _command_text(commands[index]["command"]),
+                    "command": _step_text(commands[index]),
                     "candidate": _reply_at(candidate.replies, index),
                     "parent": _reply_at(parent.replies, index),
                 }
@@ -752,7 +1106,7 @@ class CommandsAction:
                 spec,
                 ComponentStatus.ERROR,
                 "marked commands reply the same on both builds, so the sequence did not reach the change: "
-                + ", ".join(f"{index} ({_command_text(commands[index]['command'])})" for index in unreached),
+                + ", ".join(f"{index} ({_step_text(commands[index])})" for index in unreached),
                 evidence=evidence,
                 diagnostics={"reason": "unreached-change"},
             )
@@ -779,6 +1133,7 @@ def _record(
         "parent": parent,
         "modules": None if modules is None else dict(modules),
         "cluster": config["cluster"],
+        "nodes": config["nodes"],
         "dropped_config": list(dropped),
         "reached": list(reached),
         "unexplained": list(unexplained),
@@ -797,7 +1152,7 @@ def _violations(commands: Sequence[Mapping[str, Any]], replies: Sequence[Mapping
     """The answered replies that violate their command's ``expect``, described."""
 
     return [
-        f"command {record['index']} ({_command_text(commands[record['index']]['command'])}) replied "
+        f"command {record['index']} ({_step_text(commands[record['index']])}) replied "
         f"{canonical_json(_without_index(record))}, not {canonical_json(plain_config(commands[record['index']]['expect']))}"
         for record in replies
         if not record.get("unanswered") and not _sequence_matches(commands[record["index"]]["expect"], record)
@@ -829,13 +1184,13 @@ def _same_on_parent(commands: Sequence[Mapping[str, Any]], index: int, candidate
 
 def _unanswered(commands: Sequence[Mapping[str, Any]], replies: Sequence[Mapping[str, Any]]) -> list[str]:
     return [
-        f"command {record['index']} ({_command_text(commands[record['index']]['command'])}) got no reply: {record['error']}"
+        f"command {record['index']} ({_step_text(commands[record['index']])}) got no reply: {record['error']}"
         for record in replies
         if record.get("unanswered")
     ]
 
 
-def _compare(commands, candidate: _Server, parent: _Server) -> tuple[list[int], list[int], list[int], list[str]]:
+def _compare(commands, candidate: _Side, parent: _Side) -> tuple[list[int], list[int], list[int], list[str]]:
     """Judge the parent's replies against the candidate's: the marked commands that reached the change, the
     unmarked ones that differ, the marked ones that do not, and the commands the parent did not answer
     without dying (described)."""
@@ -856,7 +1211,7 @@ def _compare(commands, candidate: _Server, parent: _Server) -> tuple[list[int], 
             if index == died_at:
                 (reached if item["expect_difference"] else unexplained).append(index)
             elif parent.exited is None and other is not None:
-                uncompared.append(f"command {index} ({_command_text(item['command'])}): {other['error']}")
+                uncompared.append(f"command {index} ({_step_text(item)}): {other['error']}")
             continue
         # As canonical JSON, not with ==, under which a RESP3 boolean true equals the integer 1.
         mine, theirs = _compared(record, item["compare"]), _compared({**other, "index": index}, item["compare"])
@@ -1716,11 +2071,26 @@ _COMMAND_DECLARES = Declarations(evidence={"valkey.command.replies": declared(Co
 # One reply of a sequence: the reply as the server sent it, or the error it answered; no timestamps, so two
 # runs' replies compare equal.
 _SEQUENCE_REPLY = mapping_of(
-    {"index": INTEGER, "reply": optional(object), "error": optional(str), "unanswered": optional(bool)}
+    {
+        "index": INTEGER,
+        "reply": optional(object),
+        "error": optional(str),
+        "unanswered": optional(bool),
+        # Raw bytes no reply began to answer.
+        "no_reply": optional(bool),
+        # The server closed the connection without a reply, its node living on.
+        "closed": optional(bool),
+    }
 )
-# One server's side of a sequence: its replies, the digest of the compared ones, and its exit status if it exited.
+# One side of a sequence: its replies, the digest of the compared ones, and the exit status of a node that exited,
+# and which node.
 _SEQUENCE_SIDE = mapping_of(
-    {"replies": ConfigField(list, items=_SEQUENCE_REPLY), "digest": TEXT, "exited": optional(int)}
+    {
+        "replies": ConfigField(list, items=_SEQUENCE_REPLY),
+        "digest": TEXT,
+        "exited": optional(int),
+        "exited_node": optional(int),
+    }
 )
 _COMMANDS_DECLARES = Declarations(
     evidence={
@@ -1739,6 +2109,7 @@ _COMMANDS_DECLARES = Declarations(
                         ).schema,
                     ),
                     "cluster": FLAG,
+                    "nodes": INTEGER,
                     "dropped_config": ConfigField(list, items=TEXT),
                     # Marked commands whose replies differ, and unmarked ones whose replies differ, by index.
                     "reached": ConfigField(list, items=INTEGER),

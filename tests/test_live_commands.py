@@ -1,6 +1,6 @@
 """``valkey.action.commands`` against real builds: one build on both sides replies equal (RESP2 and RESP3), a
 marked command with equal replies is unreached, a candidate crash is a FAIL with its logs kept, the private
-servers run as one-node clusters, and the LSET example reaches valkey-io/valkey#4823 on builds of the fix
+servers run as one-node and two-node clusters, and the LSET example reaches valkey-io/valkey#4823 on builds of the fix
 (``VALKEY_FUZZER_LSET_FIX_BINARY``, commit e50b62d0b) and its parent (``VALKEY_FUZZER_LSET_PARENT_BINARY``).
 
 Needs a valkey-server (``VALKEY_FUZZER_BINARY`` or ``PATH``); the LSET rows need the two builds above.
@@ -116,6 +116,86 @@ def test_cluster_runs_both_servers_as_one_node_clusters():
 
     assert result.status.value == "PASS", result.summary
     assert value["cluster"] is True
+
+
+def test_two_node_clusters_compare_equal_through_their_placeholders():
+    commands = [
+        {"command": ["CLUSTER", "MYID"], "node": 1, "expect": {"equals": "<node.1.id>"}},
+        {"command": ["CLUSTER", "SLOTS"], "node": 1},
+        {"command": ["SET", "k", "v"], "node": 1, "expect": {"error": "MOVED 7629 127.0.0.1:<node.0.port>"}},
+        {"command": ["CLUSTER", "COUNT-FAILURE-REPORTS", "<node.0.id>"], "node": 1, "expect": {"equals": 0}},
+    ]
+    result, value = run(BINARY, commands, compare_with=BINARY, cluster=True, nodes=2)
+
+    assert result.status.value == "PASS", result.summary
+    assert value["candidate"]["digest"] == value["parent"]["digest"]
+    (first, last, primary), *_ = value["candidate"]["replies"][1]["reply"]
+    assert (first, last, primary[:3]) == (0, 16383, ["127.0.0.1", "<node.0.port>", "<node.0.id>"])
+
+
+def test_a_slot_migration_is_waited_for():
+    commands = [
+        {"command": ["SET", "k", "v"], "expect": {"equals": "OK"}},
+        {"command": ["CLUSTER", "MIGRATESLOTS", "SLOTSRANGE", 7629, 7629, "NODE", "<node.1.id>"]},
+        {"command": ["GET", "k"], "node": 1, "wait_s": 30, "expect": {"equals": "v"}},
+        {"command": ["GET", "k"], "expect": {"error": "MOVED 7629 127.0.0.1:<node.1.port>"}},
+    ]
+    result, value = run(BINARY, commands, compare_with=BINARY, cluster=True, nodes=2)
+
+    assert result.status.value == "PASS", result.summary
+    assert value["candidate"]["digest"] == value["parent"]["digest"]
+
+
+def test_raw_bytes_are_answered_or_left_unanswered():
+    commands = [
+        {"raw": "PING\r\n", "expect": {"equals": "PONG"}},
+        {"raw": "*2\r\n$4\r\nECHO\r\n$2\r\nhi\r\n", "expect": {"equals": "hi"}},
+        {"raw": 'SET k "a b"\r\n', "expect": {"equals": "OK"}},
+        {"command": ["GET", "k"], "expect": {"equals": "a b"}},
+        # Not a whole request: the server waits for the rest.
+        {"raw": "*2\r\n$4\r\nECHO\r\n"},
+    ]
+    result, value = run(BINARY, commands, compare_with=BINARY)
+
+    assert result.status.value == "PASS", result.summary
+    assert value["candidate"]["replies"][-1] == {"index": 4, "no_reply": True}
+
+
+@pytest.mark.parametrize("resp", [2, 3])
+def test_a_subscriber_on_its_own_connection_reads_what_was_published(resp):
+    commands = [
+        {"command": ["SUBSCRIBE", "news"], "connection": "sub", "expect": {"equals": ["subscribe", "news", 1]}},
+        {"command": ["PUBLISH", "news", "hi"], "expect": {"equals": 1}},
+        {"read": True, "connection": "sub", "expect": {"equals": [["message", "news", "hi"]]}},
+        # Bytes the server holds stay on their own connection; the main one goes on.
+        {"raw": "*2\r\n$4\r\nECHO\r\n", "connection": "raw"},
+        {"command": ["PING"], "expect": {"equals": "PONG"}},
+    ]
+    result, value = run(BINARY, commands, compare_with=BINARY, resp=resp)
+
+    assert result.status.value == "PASS", result.summary
+    assert value["candidate"]["replies"][3] == {"index": 3, "no_reply": True}
+
+
+def test_a_restart_reads_the_rewritten_config_file_the_acl_file_and_the_rdb_back():
+    commands = [
+        {"command": ["ACL", "USERS"], "expect": {"equals": ["alice", "default"]}},
+        {"command": ["CONFIG", "SET", "maxmemory", 12345678], "expect": {"equals": "OK"}},
+        {"command": ["CONFIG", "REWRITE"], "expect": {"equals": "OK"}},
+        {"command": ["ACL", "SETUSER", "bob", "on", "nopass"], "expect": {"equals": "OK"}},
+        {"command": ["ACL", "SAVE"], "expect": {"equals": "OK"}},
+        {"command": ["SET", "k", "v"], "expect": {"equals": "OK"}},
+        {"command": ["SAVE"], "expect": {"equals": "OK"}},
+        {"restart": True, "expect": {"equals": "OK"}},
+        {"command": ["CONFIG", "GET", "maxmemory"], "expect": {"equals": ["maxmemory", "12345678"]}},
+        {"command": ["ACL", "USERS"], "expect": {"equals": ["alice", "bob", "default"]}},
+        {"command": ["GET", "k"], "expect": {"equals": "v"}},
+    ]
+    files = {"users.acl": "user default on nopass ~* &* +@all\nuser alice on nopass ~* +@all\n"}
+    result, value = run(BINARY, commands, compare_with=BINARY, files=files, server_config={"aclfile": "users.acl"})
+
+    assert result.status.value == "PASS", result.summary
+    assert value["candidate"]["digest"] == value["parent"]["digest"]
 
 
 @needs_lset_builds
