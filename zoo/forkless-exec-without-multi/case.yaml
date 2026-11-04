@@ -1,0 +1,8 @@
+description: >-
+  An EXEC without MULTI on a fresh connection during a forkless save dereferences the client's
+  unallocated MULTI state (valkey-io/valkey#4604 bug 1; the guard of #4632 is gone).
+catches: valkey.oracle.liveness (the primary crashes on the stray EXEC the churn experiment sends)
+scenarios:
+  - {file: scenario.yaml, fail: [liveness]}
+runs: 5
+min_detection_rate: 1.0

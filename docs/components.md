@@ -268,7 +268,11 @@ standalone mode it writes to the current primary. Keys are named
 | `rate` | number, 0 to 100,000 | 200 | Operations per second; 0 writes the preload only. |
 | `value_size` | integer, 1 to 1,048,576 | 64 | Value size in bytes. |
 | `compressible` | boolean | `false` | Repetitive values instead of random ones. |
-| `mix` | mapping | `{set: 0.7, del: 0.1, get: 0.2}` | Weights of `set`, `del`, and `get`. |
+| `mix` | mapping | `{set: 0.7, del: 0.1, get: 0.2}` | Weights of `set`, `del`, `get`, `rename`, `lrange`, and `lindex`; one left out never runs. `rename` is standalone only (a cluster answers `CROSSSLOT`) and needs 2 mutable keys; `lrange` and `lindex` need `list_keys`. |
+| `list_keys` | integer, 0 to 1000 | 0 | Lists preloaded beside the keys, named `<prefix>:list:<n>` and never mutated; `lrange` and `lindex` read them. |
+| `list_length` | integer, 1 to 10,000,000 | 100000 | Elements per list. |
+| `list_element_size` | integer, 1 to 65,536 | 120 | Element size in bytes. Elements repeat a tag, so quicklist nodes compress under `list-compress-depth`. |
+| `list_read_batch` | integer, 1 to 1000 | 1 | Reads pipelined per `lrange` or `lindex` operation. |
 | `prefix` | string or null | `null` | Key prefix; `vf:<id>` by default. |
 | `op_timeout_s` | number, 0.05 to 60 | 2 | Client timeout per operation. |
 | `preload_batch` | integer, 1 to 100,000 | 1000 | Keys per preload batch. |
@@ -281,11 +285,29 @@ standalone mode it writes to the current primary. Keys are named
 The `valkey.writes` fragment sets `stable_keys`, `mutable_keys`, `rate`, and
 `value_size` from its inputs (defaults 1000, 200, 200, and 64).
 
+A `rename` operation is `RENAME src dst` between two mutable keys of one
+name length whose values the workload knows for certain (their last
+operation was an acknowledged `SET`, or the preload), so `dst` exists. The
+ledger records it as two entries with one outcome, `id`, `t_end`, and
+`reply`, both carrying `rename: [src, dst]`: a `del` of `src` and a `set` of
+`dst` with the value `src` held, which is what the oracles' model needs. A
+rename whose source or destination is not known for certain (its last write
+was ambiguous, or it was deleted) runs as a `SET` instead. Renames count as
+two operations toward `max_ops`.
+
+`lrange` reads 30 elements from a random index of a random list, and
+`lindex` one element; each operation pipelines `list_read_batch` such reads.
+List reads are not ledger entries: the summary counts them (`list_reads`,
+`ok` and `failed`), and `lists.jsonl` describes each list (`key`, `length`,
+and the `digest` of its elements in order), which `valkey.oracle.rdb-snapshot`
+checks against the reloaded RDB.
+
 Evidence: `valkey.workload.ledger`, with the operation counts by outcome,
 `ledger_path` and `preload_path` (JSONL artifacts; each preload entry holds
-`t_end`, its acknowledgement time, and `instance_id`), `replies_digest` (a
-digest of every client-visible reply), and `drained`. Events: `<id>.seeded`
-after the preload, `<id>.drained` after `max_ops` operations.
+`t_end`, its acknowledgement time, and `instance_id`), `lists_path` (null
+without lists), `list_keys`, `list_reads`, `replies_digest` (a digest of every
+client-visible reply), and `drained`. Events: `<id>.seeded` after the preload,
+`<id>.drained` after `max_ops` operations.
 
 ## Actions
 
@@ -1091,9 +1113,10 @@ replica does not converge. Evidence: `valkey.data.ledger-verified`, with
 Loads every RDB a `valkey.action.bgsave` captured into a private server
 running that instance's binary. Every bgsave target must have produced an RDB.
 With `workload`, each RDB must hold only keys the workload wrote, every stable
-key must hold its value, and the RDB must be a consistent cut of the write
-history taken while `BGSAVE` ran. A bgsave with `capture_rdb: false` is
-rejected.
+key must hold its value, the RDB must be a consistent cut of the write
+history taken while `BGSAVE` ran, and each of the workload's lists it holds
+must have the length and elements the workload wrote (`lists.jsonl`). A
+bgsave with `capture_rdb: false` is rejected.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |

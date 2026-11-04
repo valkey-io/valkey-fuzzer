@@ -1,0 +1,16 @@
+scenario_id: zoo-forkless-rename-dangling-entry
+seed: 1403
+experiment:
+  id: valkey.forkless-save-churn
+  inputs:
+    stable_keys: 2000
+    mutable_keys: 1200
+    key_save_delay_us: 2000
+    mutation_rate: 1000
+    value_size: 8
+    rename_weight: 5
+    list_read_weight: 0
+    list_length: 1000
+deployment:
+  mode: standalone
+  base_port: 21480

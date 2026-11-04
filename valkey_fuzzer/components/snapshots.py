@@ -11,7 +11,7 @@ import functools
 import os
 import re
 import shutil
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, Optional
 
 import valkey
@@ -25,7 +25,7 @@ from valkey_fuzzer.results import ComponentStatus, Evidence, evidence_of, make_e
 from valkey_fuzzer.schema import ConfigError, ConfigField, plain_config
 
 from .compression import LOADED_COMPRESSED, RDB_STREAM_CODECS, rdb_format
-from .files import write_jsonl
+from .files import read_jsonl, write_jsonl
 from .instances import deployment, instance_at, is_cluster, stopped_on_purpose, unreachable_instances
 from .keyspace import keyspace_digest, keyspace_snapshot
 from .ledger import LedgerModel, load_ledger, target_slot_ranges
@@ -35,7 +35,7 @@ from .polling import poll_each, poll_until, read_retrying
 from .registration import component_registration
 from .schemas import INTEGER, MAPPING, TEXT, declared, mapping_of
 from .server import PrivateServer, server_arguments
-from .workloads import is_stable_key
+from .workloads import is_stable_key, list_digest
 
 # ---------------------------------------------------------------------------
 # valkey.oracle.rdb-snapshot — every captured RDB reloads with plausible data
@@ -261,6 +261,28 @@ def find_cut(model: LedgerModel, values: dict[str, Optional[str]], keys: Sequenc
     return candidate, None
 
 
+def _list_problems(instance_id: str, lists: Mapping[str, Any], snapshot: Mapping[str, Any]) -> list[str]:
+    """The workload's lists that the reloaded ``snapshot`` holds must have the length and elements it wrote.
+
+    A list the snapshot lacks is not a problem here: in cluster mode an RDB holds its own shard's keys only,
+    and a list that is missing where it should be is a key the cut check cannot explain either way.
+    """
+
+    problems = []
+    for key, expected in lists.items():
+        if key not in snapshot:
+            continue
+        kind, content = snapshot[key]
+        if kind != "list":
+            problems.append(f"{instance_id}: {key} reloaded as a {kind}, not the list the workload wrote")
+        elif len(content) != expected["length"] or list_digest(content) != expected["digest"]:
+            problems.append(
+                f"{instance_id}: {key} reloaded with {len(content)} element(s), the workload wrote "
+                f"{expected['length']}, or with different elements"
+            )
+    return problems
+
+
 class RdbSnapshotOracle:
     """Every captured RDB loads (or, with ``expect: refused``, is refused cleanly).
 
@@ -278,9 +300,12 @@ class RdbSnapshotOracle:
             return make_result(spec, ComponentStatus.ERROR, f"no RDB snapshot was captured by {config['bgsave']!r}")
         model = None
         ledger: list[dict[str, Any]] = []
+        lists: dict[str, dict[str, Any]] = {}
         if config["workload"] is not None:
             try:
-                preload, ledger, _, _ = load_ledger(evidence, config["workload"])
+                preload, ledger, _, summary = load_ledger(evidence, config["workload"])
+                if summary.get("lists_path"):
+                    lists = {item["key"]: item for item in read_jsonl(summary["lists_path"])}
             except (LookupError, OSError, ValueError) as exc:
                 return make_result(spec, ComponentStatus.ERROR, f"cannot load workload ledger: {exc}")
             # No loss windows: the save reads memory, which holds every
@@ -349,7 +374,10 @@ class RdbSnapshotOracle:
             loaded.update(content["values"])
             combined.update(content["snapshot"])
             if model is not None:
-                problems.extend(self._check_cut(handle, model, ledger, last, result, content["values"], per_instance))
+                problems.extend(
+                    self._check_cut(handle, model, ledger, last, result, content["values"], per_instance, lists)
+                )
+                problems.extend(_list_problems(instance_id, lists, content["snapshot"]))
         if model is not None and not problems and not errors and config["expect"] == "loads":
             stable = {key: value for key, value in model.preload.items() if is_stable_key(key)}
             missing = [key for key in stable if loaded.get(key) != stable[key]]
@@ -393,10 +421,13 @@ class RdbSnapshotOracle:
         result: dict,
         values: dict,
         per_instance: dict,
+        lists: Mapping[str, Any] = {},
     ) -> list[str]:
         """Problems with one snapshot: keys nobody wrote, or no single point in the history explaining it."""
 
         instance_id = result["instance_id"]
+        # The workload's lists are checked whole by _list_problems, not as points of the write history.
+        values = {key: value for key, value in values.items() if key not in lists}
         foreign = sorted(key for key in values if key not in model.possible)
         if foreign:
             return [f"{instance_id}: {len(foreign)} key(s) the workload never wrote (e.g. {foreign[0]})"]

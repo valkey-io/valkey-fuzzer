@@ -1,0 +1,9 @@
+scenario_id: zoo-forkless-swapdb-load-frees-kvstore
+seed: 1404
+experiment:
+  id: valkey.forkless-save-on-replica
+  inputs: {stable_keys: 300000, key_save_delay_us: 200, diskless_load: swapdb, sync_delay_s: 0.3}
+deployment:
+  mode: standalone
+  replicas_per_primary: 1
+  base_port: 21520

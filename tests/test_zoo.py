@@ -68,6 +68,7 @@ def _case(root, case, scenario=_SCENARIO, patch=True):
         ({"scenarios": [{"file": "missing.yaml", "fail": ["data"]}]}, "not found", {}),
         ({"catches": ""}, "catches must say what is broken", {}),
         ({}, r"needs a patch\.diff or overrides", {"patch": False}),
+        ({"skipped_until": "valkey-io/valkey#1"}, "skipped_until names a fix the pinned commit lacks", {}),
         ({}, r"must not set deployment\.valkey_binary", {"scenario": {**_SCENARIO, "deployment": {"valkey_binary": "/x"}}}),
     ],
 )  # fmt: skip
@@ -117,6 +118,15 @@ def test_a_case_holds_only_with_a_passing_control_and_runs_that_fail_through_eve
         assert undecided["holds"] is None and undecided["undecided"] in ("ERROR", "SKIP_UNSUPPORTED")
     assert report("FAIL", [True] * 4 + ["ERROR"])["holds"] is False, "a failing control decides it anyway"
     assert case.unmet_requirements() == ([] if os.geteuid() == 0 else ["root"]), "a root-only case is skipped elsewhere"
+
+
+def test_a_case_whose_fix_the_pinned_commit_lacks_is_skipped_until_the_pin_has_it(tmp_path):
+    case = _case(tmp_path, {**_CASE, "skipped_until": "valkey-io/valkey#5206"}, patch=False)
+    assert not case.patched and case.skipped_until == "valkey-io/valkey#5206"
+    assert "a pinned Valkey commit with valkey-io/valkey#5206" in case.unmet_requirements()
+    # The shipped cases of fixes merged after the pin carry no patch.
+    skipped = [item for item in CASES if item.skipped_until]
+    assert skipped and not any(item.patched or item.overrides for item in skipped)
 
 
 def test_a_zoo_directory_without_the_zoo_names_where_the_zoo_is(tmp_path):
