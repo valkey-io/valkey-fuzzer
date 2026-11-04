@@ -11,7 +11,10 @@ Each case is a directory ``zoo/<case id>/`` holding:
 - ``patch.diff`` (a build-level case): a patch to Valkey at the commit in
   ``zoo/valkey-commit``, which ``zoo/build.sh`` builds into
   ``<builds>/<case id>/src/valkey-server``. A case without one is
-  configuration-level: its ``overrides`` break a clean build;
+  configuration-level: its ``overrides`` break a clean build. A case whose
+  bug is still live at the pinned commit (its fix was merged later) names
+  the fix in ``skipped_until`` instead, needs neither, and is skipped until
+  ``zoo/valkey-commit`` moves past the fix and the case gets its patch;
 - the scenario files ``case.yaml`` names. They leave out
   ``deployment.valkey_binary``: the zoo picks the build.
 
@@ -64,6 +67,7 @@ _CASE = ConfigSchema(
         "runs": ConfigField(int, minimum=MIN_RUNS),
         "min_detection_rate": ConfigField(float, maximum=1),
         "requires": ConfigField(list, items=ConfigField(str, choices=("linux", "root")), default=list, allow_none=True),
+        "skipped_until": ConfigField(str, allow_none=True, default=None),
     }
 )
 _CASE_ID = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
@@ -92,6 +96,8 @@ class ZooCase:
     runs: int
     min_detection_rate: float
     requires: tuple[str, ...]
+    # The upstream fix the pinned commit lacks; the case runs once the pin has it.
+    skipped_until: Optional[str] = None
 
     @property
     def patched(self) -> bool:
@@ -113,6 +119,8 @@ class ZooCase:
             unmet.append("linux")
         if "root" in self.requires and os.geteuid() != 0:
             unmet.append("root")
+        if self.skipped_until:
+            unmet.append(f"a pinned Valkey commit with {self.skipped_until}")
         return unmet
 
 
@@ -145,7 +153,12 @@ def load_case(directory: Path) -> ZooCase:
     if case["min_detection_rate"] <= 0:
         raise ZooError(f"{where}: min_detection_rate must be greater than 0")
     overrides = case["overrides"] or {}
-    if not overrides and not (directory / "patch.diff").is_file():
+    skipped_until = (case["skipped_until"] or "").strip() or None
+    if skipped_until and ((directory / "patch.diff").is_file() or overrides):
+        raise ZooError(
+            f"{where}: skipped_until names a fix the pinned commit lacks; a patch or overrides break a case the pin has"
+        )
+    if not overrides and not skipped_until and not (directory / "patch.diff").is_file():
         raise ZooError(f"{where}: needs a patch.diff or overrides; otherwise nothing is broken")
     if not case["scenarios"]:
         raise ZooError(f"{where}: scenarios must be a non-empty list")
@@ -170,6 +183,7 @@ def load_case(directory: Path) -> ZooCase:
         runs=case["runs"],
         min_detection_rate=float(case["min_detection_rate"]),
         requires=tuple(case["requires"] or ()),
+        skipped_until=skipped_until,
     )
 
 

@@ -1,0 +1,10 @@
+description: >-
+  A replicated write to a key over 512 bytes that the replica's forkless save holds blocks the primary
+  link client, which a replica must never block (valkey-io/valkey#4604 bug 5). Live at the pinned
+  commit: no patch until the pin passes the fix; 5 of 5 runs on the clean pinned build crashed.
+catches: valkey.oracle.liveness (the replica trips the isReplicatedClient assertion in blockClient)
+scenarios:
+  - {file: scenario.yaml, fail: [liveness]}
+runs: 5
+min_detection_rate: 1.0
+skipped_until: "valkey-io/valkey#5206 (merged 2026-10-30)"

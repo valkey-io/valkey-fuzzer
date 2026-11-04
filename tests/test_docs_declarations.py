@@ -52,6 +52,8 @@ def zoo_table() -> str:
     for case in sorted(path.parent for path in (ROOT / "zoo").glob("*/case.yaml")):
         document = yaml.safe_load((case / "case.yaml").read_text(encoding="utf-8"))
         level = "build" if (case / "patch.diff").exists() else "configuration"
+        if document.get("skipped_until"):
+            level = f"skipped until {document['skipped_until']}"
         rows.append(
             f"| `{case.name}` | {level} | {document['description']} | {document['catches']} "
             f"| {document['runs']} | {document['min_detection_rate']:.0%} |"

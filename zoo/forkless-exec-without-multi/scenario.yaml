@@ -1,0 +1,8 @@
+scenario_id: zoo-forkless-exec-without-multi
+seed: 1401
+experiment:
+  id: valkey.forkless-save-churn
+  inputs: {stable_keys: 2000, key_save_delay_us: 1000, rename_weight: 0, list_read_weight: 0, list_length: 1000}
+deployment:
+  mode: standalone
+  base_port: 21400
