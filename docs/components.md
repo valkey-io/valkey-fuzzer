@@ -381,6 +381,7 @@ Each command has:
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `command` | list of strings, numbers, or `!!binary` values | | A `!!binary` argument is sent as bytes (it loads as `{$base64: ...}`). A string argument may hold placeholders, below. |
+| `raw` | string or `!!binary` value | | Instead of `command`: bytes sent as they are, a string as UTF-8 (placeholders replaced), for the inline protocol and malformed requests: `raw: "SET k v\0 EX 100\r\n"`. One reply is read; when none begins within a second (the bytes are not a whole request, or the server holds them), the command is recorded as `{no_reply: true}`: an `expect` sees a null reply, and it compares unequal to any reply. A further reply stays on the connection for the next command to read, and bytes the server left unanswered stay in its buffer, so send raw bytes last on their connection. |
 | `node` | integer | 0 | The node the command goes to, by index; less than `nodes`. |
 | `wait_s` | number, 0.1 to 3600, or null | `null` | Send the command again every 0.1 s until its reply meets `expect`, for this long at most: for asynchronous work the sequence started, such as `[GET, k]` on the target node until a slot migration (`CLUSTER MIGRATESLOTS`) finished, or `[INFO, replication]` until `master_link_status:up`. Its last reply is recorded, judged, and compared like any other, so a candidate that never meets `expect` violates it. Needs `expect`. |
 | `expect` | mapping or null | `null` | A [predicate](#predicates) on the reply (`equals` also takes a list or a mapping, compared as JSON data), or `{error: true}`, `{error: false}`, or `{error: "<substring>"}`. `null` accepts any reply that is not an error. |
@@ -450,7 +451,7 @@ allowed and simply crash the server they are sent to (a candidate crash is a
 deployment's instances.
 
 Evidence: `valkey.command.sequence`, `{candidate: {replies: [{index, reply |
-error, unanswered?}], digest, exited?, exited_node?}, parent: {...} | null, modules:
+error | no_reply, unanswered?}], digest, exited?, exited_node?}, parent: {...} | null, modules:
 {candidate: [paths], parent: [paths]} | null, cluster, nodes, dropped_config,
 reached: [indexes], unexplained: [indexes]}` (and
 `instance_id` without `compare_with`, one item per instance). `digest` is the

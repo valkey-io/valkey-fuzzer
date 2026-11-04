@@ -146,6 +146,21 @@ def test_a_slot_migration_is_waited_for():
     assert value["candidate"]["digest"] == value["parent"]["digest"]
 
 
+def test_raw_bytes_are_answered_or_left_unanswered():
+    commands = [
+        {"raw": "PING\r\n", "expect": {"equals": "PONG"}},
+        {"raw": "*2\r\n$4\r\nECHO\r\n$2\r\nhi\r\n", "expect": {"equals": "hi"}},
+        {"raw": 'SET k "a b"\r\n', "expect": {"equals": "OK"}},
+        {"command": ["GET", "k"], "expect": {"equals": "a b"}},
+        # Not a whole request: the server waits for the rest.
+        {"raw": "*2\r\n$4\r\nECHO\r\n"},
+    ]
+    result, value = run(BINARY, commands, compare_with=BINARY)
+
+    assert result.status.value == "PASS", result.summary
+    assert value["candidate"]["replies"][-1] == {"index": 4, "no_reply": True}
+
+
 @needs_lset_builds
 @pytest.mark.parametrize("resp", [2, 3])
 def test_the_lset_example_reaches_the_change_on_the_fix_and_its_parent(tmp_path, resp):

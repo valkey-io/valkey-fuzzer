@@ -20,7 +20,7 @@ from valkey_fuzzer.schema import ConfigError, load_yaml
 from valkey_fuzzer.testing import FakeContext
 
 # What a fake build does with a command (see Build).
-DIE, TIMEOUT = "<die>", "<timeout>"
+DIE, TIMEOUT, SILENT = "<die>", "<timeout>", "<silent>"
 
 
 class Error(str):
@@ -29,10 +29,10 @@ class Error(str):
 
 class Build:
     """A fake valkey-server build: the options it rejects at start, and its reply to each command, keyed by
-    the arguments as sent (strings, or bytes for a binary argument); an unlisted command gets ``OK`` (CLUSTER
-    MYID the server's ID, CLUSTER INFO a state ok knowing every server of the build). A reply may be an
-    :class:`Error`, :data:`DIE` (the server exits without answering), :data:`TIMEOUT`, or a function of the
-    :class:`FakeServer` that returns the reply."""
+    the arguments as sent (strings, or bytes for a binary argument; raw bytes as they are); an unlisted command
+    gets ``OK`` (CLUSTER MYID the server's ID, CLUSTER INFO a state ok knowing every server of the build). A
+    reply may be an :class:`Error`, :data:`DIE` (the server exits without answering), :data:`TIMEOUT`,
+    :data:`SILENT` (no reply begins), or a function of the :class:`FakeServer` that returns the reply."""
 
     def __init__(self, replies=None, rejects=()):
         self.replies, self.rejects = dict(replies or {}), set(rejects)
@@ -109,6 +109,14 @@ class FakeWire:
         self.pending = tuple(item if isinstance(item, bytes) else str(item) for item in args)
         self.server.build.sent.append(self.pending)
         self.server.sent.append(self.pending)
+
+    def send_packed_command(self, command, check_health=True):
+        self.pending = b"".join(command)
+        self.server.build.sent.append(self.pending)
+        self.server.sent.append(self.pending)
+
+    def can_read(self, timeout=0):
+        return self.server.build.replies.get(self.pending) != SILENT
 
     def read_response(self):
         known = len(_nodes(self.server.build))
@@ -594,6 +602,43 @@ def test_a_wait_that_times_out_records_the_last_reply_against_its_expect(builds)
 
 
 # ---------------------------------------------------------------------------
+# Raw bytes
+# ---------------------------------------------------------------------------
+
+
+def test_raw_bytes_go_out_as_they_are_and_one_reply_or_none_is_recorded(builds):
+    nul = b"SET foo bar\x00 ex 100\r\n"
+    BUILDS[builds["candidate"]].replies = {nul: Error("ERR Protocol error: embedded NUL byte in inline request")}
+    BUILDS[builds["parent"]].replies = {nul: SILENT}
+    for build in BUILDS.values():
+        build.replies[b"PING\r\n"] = b"PONG"
+    commands = [
+        {"raw": "PING\r\n", "expect": {"equals": "PONG"}},
+        {"raw": {"$base64": "UElORw0K"}},
+        {"raw": "SET foo bar\x00 ex 100\r\n", "expect_difference": True, "expect": {"error": "NUL"}},
+    ]
+    result, value = run(builds, commands)
+
+    assert result.status.value == "PASS", result.summary
+    assert value["reached"] == [2]
+    assert BUILDS[builds["candidate"]].sent == [b"PING\r\n", b"PING\r\n", nul]
+    assert _replies(value["candidate"]) == [
+        {"reply": "PONG"},
+        {"reply": "PONG"},
+        {"error": "ERR Protocol error: embedded NUL byte in inline request"},
+    ]
+    assert _replies(value["parent"])[2] == {"no_reply": True}
+
+
+def test_raw_bytes_no_reply_answers_violate_the_candidates_expect(builds):
+    BUILDS[builds["candidate"]].replies = {b"PI": SILENT}
+    result, _ = run(builds, [{"raw": "PI", "expect": {"error": True}}])
+
+    assert result.status.value == "FAIL"
+    assert 'command 0 (raw "PI") replied {"no_reply":true}, not {"error":true}' in result.summary
+
+
+# ---------------------------------------------------------------------------
 # Without compare_with: the deployment's instances
 # ---------------------------------------------------------------------------
 
@@ -657,6 +702,12 @@ _PARENT = {"compare_with": "/opt/parent/valkey-server"}
     [
         ({"commands": []}, "at least one command"),
         ({"commands": [{"command": []}]}, r"commands\[0\]\.command must be a non-empty list"),
+        ({"commands": [{"expect": {"equals": 1}}]}, r"commands\[0\] needs one of command and raw"),
+        ({"commands": [{"command": ["PING"], "raw": "PING\r\n"}]}, r"commands\[0\] needs one of command and raw"),
+        ({"commands": [{"raw": ""}]}, r"commands\[0\]\.raw must be a non-empty string or a !!binary value"),
+        ({"commands": [{"raw": {"x": 1}}]}, r"commands\[0\]\.raw must be a non-empty string"),
+        ({"commands": [{"raw": "PING\r\n", "wait_s": 1, "expect": {"equals": "PONG"}}]}, "wait_s sends a command again; raw bytes are sent once"),
+        ({**_PARENT, "commands": [{"raw": "CLUSTER SETSLOT 1 NODE <node.0.id>\r\n"}]}, r"<node\.0\.id> needs cluster"),
         ({"commands": [{"command": ["SET", "k", True]}]}, r"commands\[0\]\.command must be a non-empty list"),
         ({"commands": [{"command": ["PING"], "expect": {}}]}, "needs one predicate"),
         ({"commands": [{"command": ["PING"], "expect": {"error": True, "equals": 1}}]}, "cannot be combined"),

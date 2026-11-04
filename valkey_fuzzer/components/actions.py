@@ -154,7 +154,9 @@ _SEQUENCE_EXPECT = {
 }
 _SEQUENCE_COMMAND = mapping_of(
     {
-        "command": ConfigField(list),
+        # A command, or raw: bytes sent as they are (a string as UTF-8, or !!binary), for the protocol parser.
+        "command": ConfigField(list, allow_none=True, default=None),
+        "raw": ConfigField((str, dict), allow_none=True, default=None),
         # The node it goes to, by index (see nodes).
         "node": ConfigField(int, default=0, minimum=0, maximum=_MAX_NODES - 1),
         "expect": mapping_of(_SEQUENCE_EXPECT, allow_none=True, default=None),
@@ -214,6 +216,8 @@ _START_TIMEOUT_S = 15.0
 _EXIT_WAIT_S = 5.0
 # How often a command with wait_s is sent again.
 _WAIT_INTERVAL_S = 0.1
+# How long raw bytes wait for a reply before they are recorded as answered by none.
+_NO_REPLY_S = 1.0
 # A node of the side a command runs on, in an argument: <node.1.id>, <node.1.host>, <node.1.port>,
 # <node.1.cluster-port>. Angle brackets, not braces: YAML reads {node.1.id} as a mapping, and Valkey braces as a
 # hash tag.
@@ -310,14 +314,22 @@ def _validate_commands(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -
         raise ConfigError("commands must list at least one command")
     for index, item in enumerate(config["commands"]):
         where = f"commands[{index}]"
-        words = _validate_sequence_command(item["command"], f"{where}.command")
-        refused = _refusal(words, config["timeout_s"], not compared)
-        if refused is not None:
-            named = " ".join(words[:2]) if words[0] in _CONTAINER_COMMANDS and len(words) > 1 else words[0]
-            raise ConfigError(f"{where}: {named} is refused: {refused}")
+        if (item["command"] is None) == (item["raw"] is None):
+            raise ConfigError(f"{where} needs one of command and raw")
+        if item["raw"] is not None:
+            if not item["raw"] or not (isinstance(item["raw"], str) or _is_binary(item["raw"])):
+                raise ConfigError(f"{where}.raw must be a non-empty string or a !!binary value")
+            if item["wait_s"] is not None:
+                raise ConfigError(f"{where}: wait_s sends a command again; raw bytes are sent once")
+        else:
+            words = _validate_sequence_command(item["command"], f"{where}.command")
+            refused = _refusal(words, config["timeout_s"], not compared)
+            if refused is not None:
+                named = " ".join(words[:2]) if words[0] in _CONTAINER_COMMANDS and len(words) > 1 else words[0]
+                raise ConfigError(f"{where}: {named} is refused: {refused}")
         if item["node"] >= config["nodes"]:
             raise ConfigError(f"{where}.node is {item['node']}, but each side runs on {config['nodes']} node(s)")
-        _validate_placeholders(item["command"], where, config, compared)
+        _validate_placeholders(item["command"] or [item["raw"]], where, config, compared)
         if item["expect"] is not None:
             if "error" in item["expect"]:
                 if set(item["expect"]) != {"error"}:
@@ -382,8 +394,20 @@ class RawConnection:
         """``{"reply": ...}``, the server's error as ``{"error": ...}``, or a lost connection or a reply that
         timed out as ``{"error": ..., "unanswered": True}``."""
 
+        return self._exchange(lambda: self.connection.send_command(*[_argument(item) for item in command]))
+
+    def send_raw(self, data: bytes) -> dict[str, Any]:
+        """Send ``data`` as it is and read one reply, as :meth:`send`; ``{"no_reply": True}`` when none began
+        within a second (the bytes are not a whole request, or the server holds them). A further reply stays on
+        the connection, for the next command to read."""
+
+        return self._exchange(lambda: self.connection.send_packed_command([data]), wait_s=_NO_REPLY_S)
+
+    def _exchange(self, write: Any, wait_s: Optional[float] = None) -> dict[str, Any]:
         try:
-            self.connection.send_command(*[_argument(item) for item in command])
+            write()
+            if wait_s is not None and not self.connection.can_read(timeout=wait_s):
+                return {"no_reply": True}
             return {"reply": raw_reply(self.connection.read_response())}
         except valkey.exceptions.ResponseError as exc:
             return {"error": str(exc)}
@@ -430,8 +454,11 @@ def _run_sequence(target: Any, commands: Sequence[Mapping[str, Any]], context: A
 def _run_step(target: Any, item: Mapping[str, Any], context: Any) -> dict[str, Any]:
     """One command of a sequence on ``target``: its record, with ``wait_s`` the last of its attempts."""
 
-    command = [target.substitute(argument) for argument in item["command"]]
     connection = target.connection(item["node"])
+    if item["raw"] is not None:
+        raw = item["raw"]
+        return target.mask(connection.send_raw(_argument(raw) if _is_binary(raw) else target.substitute(raw).encode()))
+    command = [target.substitute(argument) for argument in item["command"]]
     if item["wait_s"] is None:
         return target.mask(connection.send(command))
 
@@ -509,7 +536,11 @@ def _command_text(command: Sequence[Any]) -> str:
 def _step_text(item: Mapping[str, Any]) -> str:
     """A command of a sequence as a summary names it."""
 
-    return _command_text(item["command"]) + (f" on node {item['node']}" if item["node"] else "")
+    if item["raw"] is not None:
+        text = "raw <binary>" if _is_binary(item["raw"]) else f"raw {json.dumps(item['raw'])}"
+    else:
+        text = _command_text(item["command"])
+    return text + (f" on node {item['node']}" if item["node"] else "")
 
 
 class _Instance:
@@ -1900,7 +1931,14 @@ _COMMAND_DECLARES = Declarations(evidence={"valkey.command.replies": declared(Co
 # One reply of a sequence: the reply as the server sent it, or the error it answered; no timestamps, so two
 # runs' replies compare equal.
 _SEQUENCE_REPLY = mapping_of(
-    {"index": INTEGER, "reply": optional(object), "error": optional(str), "unanswered": optional(bool)}
+    {
+        "index": INTEGER,
+        "reply": optional(object),
+        "error": optional(str),
+        "unanswered": optional(bool),
+        # Raw bytes no reply began to answer.
+        "no_reply": optional(bool),
+    }
 )
 # One side of a sequence: its replies, the digest of the compared ones, and the exit status of a node that exited,
 # and which node.
