@@ -4,6 +4,7 @@ connection, so arguments go out as bytes and replies come back as the server sen
 import hashlib
 import os
 import shutil
+import subprocess
 import tempfile
 
 import pytest
@@ -20,7 +21,7 @@ from valkey_fuzzer.schema import ConfigError, load_yaml
 from valkey_fuzzer.testing import FakeContext
 
 # What a fake build does with a command (see Build).
-DIE, TIMEOUT, SILENT = "<die>", "<timeout>", "<silent>"
+DIE, TIMEOUT, SILENT, CLOSE = "<die>", "<timeout>", "<silent>", "<close>"
 
 
 class Error(str):
@@ -32,7 +33,8 @@ class Build:
     the arguments as sent (strings, or bytes for a binary argument; raw bytes as they are); an unlisted command
     gets ``OK`` (CLUSTER MYID the server's ID, CLUSTER INFO a state ok knowing every server of the build;
     SUBSCRIBE and PUBLISH work, on the connections of one server). A
-    reply may be an :class:`Error`, :data:`DIE` (the server exits without answering), :data:`TIMEOUT`,
+    reply may be an :class:`Error`, :data:`DIE` (the server exits without answering), :data:`CLOSE` (it closes the
+    connection without answering), :data:`TIMEOUT`,
     :data:`SILENT` (no reply begins), or a function of the :class:`FakeServer` that returns the reply."""
 
     def __init__(self, replies=None, rejects=()):
@@ -56,6 +58,8 @@ class FakeProcess:
         return self.returncode
 
     def wait(self, timeout=None):
+        if self.returncode is None and timeout is not None:
+            raise subprocess.TimeoutExpired("valkey-server", timeout)
         return self.returncode
 
 
@@ -164,6 +168,8 @@ class FakeWire:
             raise ValkeyConnectionError("Connection closed by server.")
         if reply == TIMEOUT:
             raise ValkeyTimeoutError("Timeout reading from socket")
+        if reply == CLOSE:
+            raise ValkeyConnectionError("Connection closed by server.")
         if isinstance(reply, Error):
             raise ResponseError(str(reply))
         return reply
@@ -668,6 +674,24 @@ def test_raw_bytes_no_reply_answers_violate_the_candidates_expect(builds):
 
     assert result.status.value == "FAIL"
     assert 'command 0 (raw "PI") replied {"no_reply":true}, not {"error":true}' in result.summary
+
+
+def test_a_connection_a_live_server_closed_is_its_answer_and_opens_anew(builds, monkeypatch):
+    monkeypatch.setattr(actions, "_EXIT_WAIT_S", 0.01)
+    BUILDS[builds["candidate"]].replies = {("RESET",): CLOSE}
+    BUILDS[builds["parent"]].replies = {("RESET",): DIE}
+    commands = [
+        {"command": ["CLUSTER", "SYNCSLOTS", "ESTABLISH"], "connection": "job"},
+        {"command": ["RESET"], "connection": "job", "expect_difference": True, "expect": {"exists": False}},
+        {"command": ["PING"], "connection": "job"},
+    ]
+    result, value = run(builds, commands)
+
+    # The parent died on it; the candidate closed the connection and went on, on a new one.
+    assert result.status.value == "PASS", result.summary
+    assert value["reached"] == [1] and value["parent"]["exited"] == -11
+    assert _replies(value["candidate"]) == [{"reply": "OK"}, {"closed": True}, {"reply": "OK"}]
+    assert BUILDS[builds["candidate"]].connections == 3
 
 
 # ---------------------------------------------------------------------------

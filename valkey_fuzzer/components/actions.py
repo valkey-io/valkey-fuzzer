@@ -457,7 +457,7 @@ class RawConnection:
                 except valkey.exceptions.ResponseError as exc:
                     replies.append(raw_reply(exc))
         except (valkey.exceptions.ConnectionError, valkey.exceptions.TimeoutError, OSError) as exc:
-            return {"error": f"{type(exc).__name__}: {exc}", "unanswered": True}
+            return _lost(exc)
         return {"reply": replies}
 
     def _exchange(self, write: Any, wait_s: Optional[float] = None) -> dict[str, Any]:
@@ -470,13 +470,23 @@ class RawConnection:
         except valkey.exceptions.ResponseError as exc:
             return {"error": str(exc)}
         except (valkey.exceptions.ConnectionError, valkey.exceptions.TimeoutError, OSError) as exc:
-            return {"error": f"{type(exc).__name__}: {exc}", "unanswered": True}
+            return _lost(exc)
 
     def close(self) -> None:
         try:
             self.connection.disconnect()
         except Exception:
             pass
+
+
+def _lost(exc: BaseException) -> dict[str, Any]:
+    """A command that got no reply: the reply timed out, or the connection was lost, ``closed`` when the server
+    closed it (see :func:`_run_sequence`)."""
+
+    record: dict[str, Any] = {"error": f"{type(exc).__name__}: {exc}", "unanswered": True}
+    if isinstance(exc, valkey.exceptions.ConnectionError):
+        record["closed"] = True
+    return record
 
 
 def open_raw_connection(
@@ -496,13 +506,18 @@ def open_raw_connection(
 def _run_sequence(target: Any, commands: Sequence[Mapping[str, Any]], context: Any) -> list[dict]:
     """Every command in order on its node's connection of ``target`` (a :class:`_Side` or an
     :class:`_Instance`), each with its index; it stops at the first that got no reply, since the connection's
-    state is unknown after it, and when the call is cancelled."""
+    state is unknown after it, and when the call is cancelled. A connection the server closed is its answer,
+    ``{"closed": True}``, while its node lives on (the connection opens anew on its next use), and a connection
+    lost to a crash when not."""
 
     replies: list[dict[str, Any]] = []
     for index, item in enumerate(commands):
         if context.cancelled:
             break
         record = {"index": index, **_run_step(target, item, context)}
+        if record.pop("closed", False) and target.survives(item["node"]):
+            target.forget(item["node"], item["connection"])
+            record = {"index": index, "closed": True}
         replies.append(record)
         if record.get("unanswered"):
             break
@@ -624,6 +639,12 @@ class _Instance:
         if name not in self.connections:
             self.connections[name] = self.connect()
         return self.connections[name]
+
+    def survives(self, node: int) -> bool:
+        """Never known here: an instance's liveness is the liveness oracle's to judge, so a connection it closed
+        stays a command without a reply."""
+
+        return False
 
     def close(self) -> None:
         for connection in self.connections.values():
@@ -777,6 +798,18 @@ class _Side:
         if name not in connections:
             connections[name] = open_raw_connection(self.resp, self.timeout_s, path=self.nodes[node].server.socket_path)
         return connections[name]
+
+    def survives(self, index: int) -> bool:
+        """Whether node ``index`` still runs ``_EXIT_WAIT_S`` after a connection to it closed."""
+
+        try:
+            self.nodes[index].server.process.wait(timeout=_EXIT_WAIT_S)
+        except subprocess.TimeoutExpired:
+            return True
+        return False
+
+    def forget(self, index: int, name: str) -> None:
+        self.nodes[index].connections.pop(name).close()
 
     def substitute(self, argument: Any) -> Any:
         """``argument`` with every placeholder in it replaced by this side's value."""
@@ -2045,6 +2078,8 @@ _SEQUENCE_REPLY = mapping_of(
         "unanswered": optional(bool),
         # Raw bytes no reply began to answer.
         "no_reply": optional(bool),
+        # The server closed the connection without a reply, its node living on.
+        "closed": optional(bool),
     }
 )
 # One side of a sequence: its replies, the digest of the compared ones, and the exit status of a node that exited,

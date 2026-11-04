@@ -414,7 +414,14 @@ valkey-py's response callbacks: `SET` replies `OK`, not `true`; `HGETALL` a
 flat list on RESP2 and a map on RESP3; a bulk string that is valid UTF-8 as a
 string, any other as `{$base64: ...}`, so two different binary replies never
 compare equal; an error inside an array (a transaction's) as `{$error: ...}`.
-No timestamps, so two runs' replies compare equal.
+No timestamps, so two runs' replies compare equal. A connection a private
+server closes without a reply (`QUIT`, `CLIENT KILL`, a slot migration
+client's `RESET`) is recorded as `{closed: true}` when its node still runs 5 s
+later: an `expect` sees a null reply (`{exists: false}` expects it), it
+compares unequal to any reply, and the sequence goes on, the connection opening
+anew on its next use. When the node exited, the connection was lost to a
+crash; on a deployment instance, a closed connection is a command without a
+reply.
 
 The outcome, with `compare_with`:
 
@@ -458,7 +465,7 @@ allowed and simply crash the server they are sent to (a candidate crash is a
 deployment's instances.
 
 Evidence: `valkey.command.sequence`, `{candidate: {replies: [{index, reply |
-error | no_reply, unanswered?}], digest, exited?, exited_node?}, parent: {...} | null, modules:
+error | no_reply | closed, unanswered?}], digest, exited?, exited_node?}, parent: {...} | null, modules:
 {candidate: [paths], parent: [paths]} | null, cluster, nodes, dropped_config,
 reached: [indexes], unexplained: [indexes]}` (and
 `instance_id` without `compare_with`, one item per instance). `digest` is the
