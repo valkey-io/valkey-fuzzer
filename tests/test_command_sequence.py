@@ -316,6 +316,16 @@ def test_an_unmarked_difference_is_an_unexplained_difference_with_both_replies(b
     assert (value["reached"], value["unexplained"]) == ([0], [1])
 
 
+def test_a_boolean_reply_is_not_the_same_as_an_integer_one(builds):
+    # A pull request that turns a RESP3 integer reply into a boolean changed the reply.
+    BUILDS[builds["candidate"]].replies = {("EXISTS", "k"): True}
+    BUILDS[builds["parent"]].replies = {("EXISTS", "k"): 1}
+    result, value = run(builds, [{"command": ["EXISTS", "k"]}])
+
+    assert result.status.value == "ERROR"
+    assert result.diagnostics["reason"] == "unexplained-difference" and value["unexplained"] == [0]
+
+
 def test_a_parent_that_dies_on_a_marked_command_reached_the_change(builds):
     BUILDS[builds["parent"]].replies = {("RESTORE", "k", "0", b"\x00\x0e"): DIE}
     commands = [

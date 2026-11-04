@@ -806,7 +806,9 @@ def _compare(commands, candidate: _Server, parent: _Server) -> tuple[list[int], 
             elif parent.exited is None and other is not None:
                 uncompared.append(f"command {index} ({_command_text(item['command'])}): {other['error']}")
             continue
-        if _compared(record, item["compare"]) == _compared({**other, "index": index}, item["compare"]):
+        # As canonical JSON, not with ==, under which a RESP3 boolean true equals the integer 1.
+        mine, theirs = _compared(record, item["compare"]), _compared({**other, "index": index}, item["compare"])
+        if canonical_json(mine) == canonical_json(theirs):
             if item["expect_difference"]:
                 unreached.append(index)
         else:
