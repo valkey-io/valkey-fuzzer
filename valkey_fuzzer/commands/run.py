@@ -19,13 +19,15 @@ from ..deployment.local.models import DEFAULT_BASE_DATA_DIR
 from ..outcomes import EXIT_FAILURE, EXIT_HARNESS_ERROR, EXIT_SUCCESS, exit_code, print_outcome
 from ..reports import SCENARIO_FILE, ReportWriteError, export_scenario, write_document
 from ..service import PreparedRun
-from ._common import add_common_options, exclusion, print_header, service_for
+from ._common import add_common_options, artifact_paths, exclusion, print_header, service_for
 
 
 def register(subparsers: Any) -> None:
     run_parser = subparsers.add_parser("run", help="Compile and run a scenario, or generated ones")
     run_parser.add_argument("file", nargs="?", help="Path to the scenario YAML file (omit with --random or --seed)")
-    add_common_options(run_parser, valkey_binary=True, artifact_dir=True, timeout=True, allow_unsupported=True)
+    add_common_options(
+        run_parser, valkey_binary=True, artifact=True, artifact_dir=True, timeout=True, allow_unsupported=True
+    )
     generated = run_parser.add_argument_group("generated scenarios")
     generated.add_argument("--random", action="store_true", help="Run a scenario generated from a random seed")
     generated.add_argument("--seed", type=int, help="Run the scenario generated from this seed")
@@ -95,6 +97,8 @@ def run_command(args: argparse.Namespace) -> int:
         reason = "give a scenario file or --random/--seed, not both"
     elif not generating and misplaced:
         reason = f"{', '.join(misplaced)} need --random or --seed"
+    elif generating and args.artifacts:
+        reason = "--artifact needs a scenario file"
     elif not generating and not args.file:
         reason = "run needs a scenario file"
     else:
@@ -127,8 +131,8 @@ def run_command(args: argparse.Namespace) -> int:
     else:
         print_header(f"Scenario: {args.file}")
         # The report records the scenario as run, including a --valkey-binary
-        # override, so it replays and minimizes on its own.
-        prepared = service.prepare_run(args.file, valkey_binary=args.valkey_binary)
+        # or --artifact override, so it replays and minimizes on its own.
+        prepared = service.prepare_run(args.file, valkey_binary=args.valkey_binary, artifacts=artifact_paths(args))
     record = service.execute(
         prepared.plan, scenario=prepared.scenario, timeout=args.timeout, generated=prepared.generated
     )

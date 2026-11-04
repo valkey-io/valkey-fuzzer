@@ -68,6 +68,41 @@ class ReplayDriftError(RunServiceError):
         self.drift = [dict(entry) for entry in drift]
 
 
+# The one artifact provider whose path ``--artifact NAME=PATH`` overrides: a binary on this host, so a run
+# recorded elsewhere (a CI batch's parent build) resolves it here.
+LOCAL_BINARY_PROVIDER = "valkey.artifact.local-binary"
+
+
+def with_artifact_paths(scenario: Mapping[str, Any], paths: Mapping[str, str]) -> dict[str, Any]:
+    """A copy of ``scenario`` whose local-binary artifacts named in ``paths`` resolve those paths."""
+
+    declared = scenario.get("artifacts")
+    overrides = {}
+    for name, path in paths.items():
+        artifact = declared.get(name) if isinstance(declared, Mapping) else None
+        if not isinstance(artifact, Mapping):
+            raise InputError(f"--artifact {name}: the scenario declares no artifact {name!r}")
+        if artifact.get("use") != LOCAL_BINARY_PROVIDER:
+            raise InputError(f"--artifact {name}: artifacts.{name} is not a {LOCAL_BINARY_PROVIDER} artifact")
+        overrides[name] = {"with": {"path": path}}
+    return merge(scenario, {"artifacts": overrides})
+
+
+def _plan_with_artifact_paths(plan: ExecutionPlan, paths: Mapping[str, str]) -> ExecutionPlan:
+    """``plan`` with its local-binary artifacts named in ``paths`` resolving those paths."""
+
+    data = to_plain_data(plan)
+    by_id = {spec["id"]: spec for spec in data["artifacts"]}
+    for name, path in paths.items():
+        spec = by_id.get(name)
+        if spec is None:
+            raise InputError(f"--artifact {name}: the recorded plan declares no artifact {name!r}")
+        if spec["provider_id"] != LOCAL_BINARY_PROVIDER:
+            raise InputError(f"--artifact {name}: artifacts.{name} is not a {LOCAL_BINARY_PROVIDER} artifact")
+        spec["config"] = {**spec["config"], "path": path}
+    return ExecutionPlan.from_data(data)
+
+
 # ---------------------------------------------------------------------------
 # Results
 # ---------------------------------------------------------------------------
@@ -271,12 +306,16 @@ class RunService:
 
     # -- compiling -----------------------------------------------------------
 
-    def prepare_run(self, path: str, *, valkey_binary: Optional[str] = None) -> PreparedRun:
-        """Read and compile one scenario file; the recorded scenario includes a ``valkey_binary`` override."""
+    def prepare_run(
+        self, path: str, *, valkey_binary: Optional[str] = None, artifacts: Optional[Mapping[str, str]] = None
+    ) -> PreparedRun:
+        """Read and compile one scenario file; the recorded scenario includes a ``valkey_binary`` override and
+        the ``artifacts`` path overrides (``--artifact NAME=PATH``)."""
 
         scenario = with_valkey_binary(
             self.catalog, plain_config(load_yaml_mapping(read_scenario(path), source_name=str(path))), valkey_binary
         )
+        scenario = with_artifact_paths(scenario, artifacts or {})
         return PreparedRun(scenario=scenario, plan=self.compile(scenario))
 
     def generate(
@@ -458,7 +497,12 @@ class RunService:
     # -- replay --------------------------------------------------------------
 
     def prepare_replay(
-        self, path: str, *, valkey_binary: Optional[str] = None, allow_drift: bool = False
+        self,
+        path: str,
+        *,
+        valkey_binary: Optional[str] = None,
+        artifacts: Optional[Mapping[str, str]] = None,
+        allow_drift: bool = False,
     ) -> ReplayPlan:
         """Load a run report (or a bare plan) and check it against this environment.
 
@@ -469,9 +513,13 @@ class RunService:
         unless ``allow_drift``. A ``valkey_binary`` override
         is intentional, so it is recorded rather than treated as drift, and
         the replay's scenario uses it, as ``run --valkey-binary`` records it.
+        ``artifacts`` (``--artifact NAME=PATH``) resolves local-binary
+        artifacts at other paths; it is recorded, and what runs is still
+        digested and compared with the recorded run after it.
         """
 
         plan, scenario, recorded = recorded_run(path)
+        artifacts = dict(artifacts or {})
         provenance: dict[str, Any] = {
             "source": path,
             "verified": recorded is not None,
@@ -479,6 +527,7 @@ class RunService:
             "drift_allowed": allow_drift,
             "not_verified": [],
             "valkey_binary_override": valkey_binary or None,
+            "artifact_overrides": artifacts,
         }
         if recorded is None:
             provenance["not_verified"].append("everything: the file holds no reproducer")
@@ -495,6 +544,10 @@ class RunService:
             # The replay report then minimizes and replays with the binary it ran.
             if scenario is not None:
                 scenario = with_valkey_binary(self.catalog, scenario, valkey_binary)
+        if artifacts:
+            plan = _plan_with_artifact_paths(plan, artifacts)
+            if scenario is not None:
+                scenario = with_artifact_paths(scenario, artifacts)
         return ReplayPlan(plan=plan, scenario=scenario, provenance=provenance, recorded=recorded)
 
     def _report_drift(

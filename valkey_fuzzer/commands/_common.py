@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from ..generator import Exclusion, GeneratorError
+from ..reports import InputError
 from ..service import RunService
 
 # ---------------------------------------------------------------------------
@@ -44,10 +45,31 @@ def exclusion(text: str) -> Exclusion:
         raise argparse.ArgumentTypeError(str(exc)) from None
 
 
+def artifact_path(text: str) -> tuple[str, str]:
+    """A ``--artifact NAME=PATH`` argument."""
+
+    name, separator, path = text.partition("=")
+    if not separator or not name or not path:
+        raise argparse.ArgumentTypeError("must be NAME=PATH")
+    return name, path
+
+
+def artifact_paths(args: argparse.Namespace) -> dict[str, str]:
+    """The ``--artifact`` overrides by artifact name; a name given twice is an error."""
+
+    paths: dict[str, str] = {}
+    for name, path in args.artifacts:
+        if name in paths:
+            raise InputError(f"--artifact {name} is given twice")
+        paths[name] = path
+    return paths
+
+
 def add_common_options(
     parser: argparse.ArgumentParser,
     *,
     valkey_binary: bool = False,
+    artifact: bool = False,
     artifact_dir: bool = False,
     timeout: bool = False,
     allow_unsupported: bool = False,
@@ -56,6 +78,17 @@ def add_common_options(
 
     if valkey_binary:
         parser.add_argument("--valkey-binary", help="Override the Valkey binary used by the deployment")
+    if artifact:
+        parser.add_argument(
+            "--artifact",
+            dest="artifacts",
+            action="append",
+            default=[],
+            type=artifact_path,
+            metavar="NAME=PATH",
+            help="Resolve the valkey.artifact.local-binary artifact NAME at PATH instead of the recorded path; "
+            "may be repeated",
+        )
     parser.add_argument(
         "--experiment-dir",
         dest="experiment_dirs",

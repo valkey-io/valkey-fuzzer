@@ -287,6 +287,93 @@ def test_replay_compares_the_valkey_binary_digest_and_a_chosen_binary_is_no_drif
     assert _cli("replay", report, "--valkey-binary", other) == 0
 
 
+UPGRADE = {
+    "scenario_id": "upgrade", "seed": 61,
+    "artifacts": {"candidate": {"use": "valkey.artifact.local-binary", "with": {"path": "/builds/candidate"}}},
+    "experiment": {"id": "valkey.rolling-upgrade", "inputs": {"to_binary": {"$ref": "artifacts.candidate.binary"}}},
+    "deployment": {"mode": "standalone", "replicas_per_primary": 1},
+}  # fmt: skip
+
+
+def _artifact_path(plan, name):
+    (spec,) = [spec for spec in plan.artifacts if spec.id == name]
+    return spec.config["path"]
+
+
+def test_an_artifact_override_resolves_a_local_binary_elsewhere_and_what_ran_is_still_compared(tmp_path, canned_runs):
+    scenario = tmp_path / "upgrade.yaml"
+    scenario.write_text(yaml.safe_dump(UPGRADE))
+
+    # What the local-binary provider records: here each path stands for a different build.
+    def acquired(plan):
+        path = _artifact_path(plan, "candidate")
+        result = {"provenance": {"sha256": hashlib.sha256(path.encode()).hexdigest()}}
+        record = {
+            "dependency": "artifacts.candidate",
+            "phase": "acquire",
+            "outcome": "succeeded",
+            "details": {"result": result},
+        }
+        return {"environment_report": {"records": [record]}}  # fmt: skip
+
+    canned_runs.diagnostics = acquired
+    report = tmp_path / "report.json"
+    assert _cli("run", scenario, "--artifact", "candidate=/elsewhere/candidate", "--output", report) == 0
+    assert _artifact_path(canned_runs.plans[0], "candidate") == "/elsewhere/candidate"
+    assert (
+        json.loads(report.read_text())["scenario"]["artifacts"]["candidate"]["with"]["path"] == "/elsewhere/candidate"
+    )
+    # The replay runs the recorded path unless told otherwise; the override is recorded, and the binary that ran
+    # is still compared with the recorded run, so another build is drift, which --allow-drift accepts.
+    assert _cli("replay", report) == 0
+    assert _artifact_path(canned_runs.plans[1], "candidate") == "/elsewhere/candidate"
+    replayed = tmp_path / "replay.json"
+    assert (
+        _cli("replay", report, "--artifact", "candidate=/third/candidate", "--output", replayed) == EXIT_HARNESS_ERROR
+    )
+    assert _artifact_path(canned_runs.plans[2], "candidate") == "/third/candidate"
+    assert (
+        _cli("replay", report, "--artifact", "candidate=/third/candidate", "--allow-drift", "--output", replayed) == 0
+    )
+    provenance = json.loads(replayed.read_text())["provenance"]
+    assert provenance["artifact_overrides"] == {"candidate": "/third/candidate"}
+    assert [entry["item"] for entry in provenance["drift"]] == ["artifacts.candidate sha256"]
+    assert json.loads(replayed.read_text())["scenario"]["artifacts"]["candidate"]["with"]["path"] == "/third/candidate"
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        (("--artifact", "nope=/x"), "the scenario declares no artifact 'nope'"),
+        (("--artifact", "candidate=/x", "--artifact", "candidate=/y"), "--artifact candidate is given twice"),
+        (("--artifact", "candidate=/x", "--seed", "1"), "give a scenario file or --random/--seed, not both"),
+    ],
+)
+def test_an_artifact_override_must_name_a_declared_local_binary_artifact_once(
+    tmp_path, canned_runs, capsys, options, message
+):
+    scenario = tmp_path / "upgrade.yaml"
+    scenario.write_text(yaml.safe_dump(UPGRADE))
+    assert _cli("run", scenario, *options) == EXIT_HARNESS_ERROR
+    assert message in capsys.readouterr().err and not canned_runs.plans
+
+    other = tmp_path / "other.yaml"
+    other.write_text(yaml.safe_dump({**UPGRADE, "artifacts": {"candidate": {"use": "other.artifact.kind"}}}))
+    assert _cli("run", other, "--artifact", "candidate=/x") == EXIT_HARNESS_ERROR
+    assert "artifacts.candidate is not a valkey.artifact.local-binary artifact" in capsys.readouterr().err
+    assert (
+        _cli("run", "--seed", "1", "--experiment", "valkey.forkless-save", "--artifact", "x=/y") == EXIT_HARNESS_ERROR
+    )
+    assert "--artifact needs a scenario file" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        _cli("run", scenario, "--artifact", "candidate")
+    report = tmp_path / "report.json"
+    assert _cli("run", scenario, "--output", report) == 0
+    assert _cli("replay", report, "--artifact", "nope=/x") == EXIT_HARNESS_ERROR
+    assert "the recorded plan declares no artifact 'nope'" in capsys.readouterr().err
+    assert len(canned_runs.plans) == 1, "a refused override runs nothing"
+
+
 @pytest.mark.parametrize(("diverges", "code"), [(False, 0), (True, EXIT_FAILURE)])
 def test_diff_passes_only_when_the_variants_evidence_agrees(tmp_path, canned_runs, diverges, code):
     def evidence(plan):

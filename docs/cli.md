@@ -48,6 +48,7 @@ rejects it:
 | Option | Commands | Meaning |
 | --- | --- | --- |
 | `--valkey-binary PATH` | `run`, `batch`, `validate`, `replay`, `diff`, `minimize` | Use this `valkey-server` for the deployment (the local deployment's `deployment.valkey_binary`; a deployment provider without a `binary_override` hook refuses it). For `batch` it applies only to scenarios that name no binary of their own; for `replay` it is an intentional override; see [replay](#replay). |
+| `--artifact NAME=PATH` | `run`, `replay` | Resolve the scenario's `valkey.artifact.local-binary` artifact `NAME` at `PATH` instead of the path it declares, so a run recorded elsewhere (a CI batch's parent build, `artifacts.parent`) runs on this host's build of it. Repeatable, once per artifact; an artifact the scenario does not declare, or of another provider, is an error. The report records the scenario with the override; see [replay](#replay) for how the binary is still compared. |
 | `--artifact-dir DIR` | `run`, `batch`, `replay`, `diff`, `minimize` | Root for report folders, which hold each run's component artifacts, and for provider directories; for `batch`, where the default batch folder goes. See [Report folders](#report-folders). |
 | `--timeout SECONDS` | `run`, `batch`, `replay`, `diff`, `minimize` | Deadline for each run. See [Deadlines and cancellation](contracts.md#deadlines-and-cancellation). |
 | `--allow-unsupported` | `run`, `batch`, `replay`, `diff` | Exit `0` instead of `3` on `SKIP_UNSUPPORTED`. |
@@ -159,8 +160,9 @@ path. The summary names why a run did not pass; for missing required
 evidence it names each item and its source, such as `required evidence was
 not observed: valkey.rdb.reload-verified from snapshot`.
 
-The report records the scenario as run, including a `--valkey-binary`
-override, so `replay` and `minimize` can use it on their own.
+The report records the scenario as run, including a `--valkey-binary` or
+`--artifact` override, so `replay` and `minimize` can use it on their own.
+`--artifact` needs a scenario file: a generated scenario declares no artifacts.
 
 ### Generated scenarios: run --random
 
@@ -536,6 +538,7 @@ Pass --allow-drift to replay anyway, or --valkey-binary to choose a binary on pu
 | --- | --- |
 | `--allow-drift` | Replay anyway. The differences are printed and recorded in the replay report's `provenance`. A different deployment provider identity still stops the run, as `ERROR`. |
 | `--valkey-binary PATH` | Run the instances that use the deployment's default binary on this binary instead. It is recorded as an intentional override, not as drift; instances with their own `instance_binaries` entry are still compared. The replay report's `scenario` carries it as `deployment.valkey_binary`, so `minimize` and `replay` of that report run it too. |
+| `--artifact NAME=PATH` | Resolve the recorded plan's `valkey.artifact.local-binary` artifact `NAME` at `PATH` (a downloaded CI batch's `artifacts.parent`, rebuilt here). Recorded under `provenance.artifact_overrides` and in the replay report's `scenario`; the binary that ran is still digested and compared with the recorded run after it, so a rebuild whose bytes differ is reported as drift, which `--allow-drift` accepts. |
 | `--output PATH` | Save a copy of the replay report. |
 
 A binary that an artifact provider supplies is only known once the replay's
@@ -758,7 +761,7 @@ Every key below is always present, and
 | `outcome` | The full outcome: `plan` (the execution plan), `status`, `summary`, `component_results`, `evidence`, `diagnostics`, `started_at`, `ended_at`, and `valkey_sha`. |
 | `coverage` | The run's coverage `key` (a digest of its `tuple`), the `tuple`, `status`, and the evidence IDs observed. |
 | `reproducer` | `python`, `platform`, `experiment` (`id`, `digest`), `fuzzer_digest`, `components` (`component_id`, `role`, `implementation`), `deployment_provider` (`provider_id`, `implementation`, `implementation_digest`), `plan_digest`, and `valkey_sha`; for a generated scenario also `generated` (`seed`, `experiment`, `attempt`, `excludes`, `boundary`, `profile`). |
-| `provenance` | For a replay: `source`, `verified`, `drift`, `drift_allowed`, `not_verified`, and `valkey_binary_override`. `null` otherwise. |
+| `provenance` | For a replay: `source`, `verified`, `drift`, `drift_allowed`, `not_verified`, `valkey_binary_override`, and `artifact_overrides` (the `--artifact` paths by artifact name). `null` otherwise. |
 
 Each entry of `outcome.component_results` has `component_id`, `status`,
 `summary`, `evidence`, `diagnostics`, `started_at`, and `ended_at`; a
