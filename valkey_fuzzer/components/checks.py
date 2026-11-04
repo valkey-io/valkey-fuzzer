@@ -44,8 +44,10 @@ _ENCODINGS = {
     "zset-max-listpack-entries": 0,
     "list-max-listpack-size": 0,
 }
-# Commands whose replies depend on the encoding or the protocol by design: variants never compare them.
-_VARIES = ("OBJECT ENCODING", "MEMORY USAGE", "DEBUG OBJECT", "CLIENT INFO", "CLIENT LIST", "HELLO", "INFO")
+# Commands whose replies depend on the encoding, the protocol or the configuration by design: variants never
+# compare them. DEBUG, OBJECT and MEMORY report internals (DEBUG HTSTATS-KEY a hashtable's buckets), and CONFIG
+# the encoding thresholds the variant changed.
+_VARIES = ("DEBUG", "OBJECT", "MEMORY", "CONFIG", "CLIENT INFO", "CLIENT LIST", "HELLO", "INFO")
 # Commands that reply with the NOPERM of the commands they run: the ACL check does not judge them.
 _RUNS_OTHERS = ("EVAL", "EVALSHA", "EVAL_RO", "EVALSHA_RO", "FCALL", "FCALL_RO")
 # A NOPERM error, as the connection records it: valkey-py drops the NOPERM (and ERR) code, so it is known by its

@@ -464,8 +464,8 @@ exits during one is a crash. `variants`: compact encodings off
 (`*-max-listpack-entries 0`, `set-max-intset-entries 0`,
 `list-max-listpack-size 0`; not with `modules`), then the other `resp`;
 replies compare as multisets of their values shaped as RESP2's, except
-`compare: skip`, `raw`, `read`, `OBJECT ENCODING`, `MEMORY USAGE`, `DEBUG
-OBJECT`, `CLIENT INFO`/`LIST`, `HELLO`, and `INFO` (`variant-mismatch`).
+`compare: skip`, `raw`, `read`, `DEBUG`, `OBJECT`, `MEMORY`, `CONFIG`,
+`CLIENT INFO`/`LIST`, `HELLO`, and `INFO` (`variant-mismatch`).
 `replica`: node 0 gets a synced replica, whose offset and `DEBUG DIGEST` must
 reach the primary's within 30 s of the sequence (`replica-diverged`). `acl`:
 as the default user with `+@all -@<category>` (from `COMMAND INFO`, the one
