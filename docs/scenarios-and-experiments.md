@@ -27,7 +27,8 @@ strings, so write `"yes"` or `yes` alike for a server config value, and
 `true` for a boolean field), numbers are plain decimals (`0o` and `0x`
 prefixes allowed), `1:30`, `1_000`, and dates are strings, and an integer
 with a leading zero such as `017400` is refused, because YAML 1.1 reads it as
-octal.
+octal. A `!!binary` scalar loads as `{$base64: ...}`, since plans and
+reports hold JSON data; `valkey.action.commands` sends one as bytes.
 
 ```yaml
 scenario_id: forkless-save-cluster
@@ -451,6 +452,18 @@ scenario for each.
 | `valkey.replication-partial-resync` | standalone or cluster, replicas ≥ 1 | | After the primary drops every replica link, the replicas resume with a partial resync (PSYNC), no full sync happens, and they converge. |
 | `valkey.rolling-upgrade` | standalone or cluster, replicas ≥ 1 | two different builds, the target as an artifact | Every instance moves to the new build under writes, replicas first with graceful failovers, and no acknowledged write is lost. |
 | `valkey.snapshot-equivalence` | standalone, cluster | | A fixed number of seeded operations, then a BGSAVE of the quiesced dataset that must reload in the `rdbcompression` codec; records dataset, RDB, and reply digests for [differential runs](cli.md#diff). |
+
+An experiment can also compare one command sequence across two builds, the
+build under test and its parent, with
+[`valkey.action.commands`](components.md#valkeyactioncommands):
+[`examples/valkey/experiments/commands-compare.yaml`](../examples/valkey/experiments/commands-compare.yaml)
+tests the fix of valkey-io/valkey#4823 that way, and
+[`examples/valkey/commands_compare.yaml`](../examples/valkey/commands_compare.yaml)
+runs it, declaring the parent build as `artifacts.parent` and passing it as the
+`parent` input. The action starts both servers itself, so the deployment's
+mode and instances do not matter; a sequence that must run under a fault the
+experiment injects leaves `compare_with` out and runs on the deployment's
+instances instead.
 
 Three differentials compare codecs:
 [`differential_rdb_codecs.yaml`](../examples/valkey/differential_rdb_codecs.yaml) (`no`, `lz4`, `zstd`:

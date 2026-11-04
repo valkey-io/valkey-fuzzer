@@ -12,6 +12,7 @@ The YAML loaders here reject duplicate keys, so every document is parsed the
 same way.
 """
 
+import base64
 import math
 import re
 from collections.abc import Mapping, Sequence
@@ -111,6 +112,18 @@ def _construct_unique_mapping(loader: _UniqueKeyLoader, node: yaml.MappingNode, 
 
 
 _UniqueKeyLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_unique_mapping)
+
+# How a plan, a report, and ``valkey.action.commands`` write bytes that are not valid UTF-8: a YAML ``!!binary``
+# scalar loads as this one-key mapping, since plans and reports hold JSON data only.
+BASE64_KEY = "$base64"
+
+
+def _construct_base64(loader: _UniqueKeyLoader, node: yaml.ScalarNode) -> dict:
+    data = loader.construct_yaml_binary(node)
+    return {BASE64_KEY: base64.b64encode(data).decode("ascii")}
+
+
+_UniqueKeyLoader.add_constructor("tag:yaml.org,2002:binary", _construct_base64)
 
 
 def load_yaml(source: Union[str, bytes, TextIO], source_name: str) -> Any:
