@@ -355,8 +355,9 @@ def check_inputs(env):
         raise SystemExit("valkey_repository must be OWNER/NAME")
     if not re.fullmatch(r"[0-9a-f]{40}", env["INPUT_VALKEY_SHA"]):
         raise SystemExit("valkey_sha must be a full 40-character lowercase commit SHA")
-    if not re.fullmatch(r"[0-9]|1[0-9]|20", env["INPUT_RANDOM_SEEDS"]):
-        raise SystemExit("random_seeds must be 0 to 20")
+    # 4 seeds of the 17 one-build experiments is 68 runs: what two workers finish inside the job's timeout.
+    if not re.fullmatch(r"[0-4]", env["INPUT_RANDOM_SEEDS"]):
+        raise SystemExit("random_seeds must be 0 to 4")
     if not re.fullmatch(r"[A-Za-z0-9_.-]{0,100}", env["INPUT_REQUEST_ID"]):
         raise SystemExit("request_id must be at most 100 letters, digits, '.', '_', or '-'")
     excluded = env["INPUT_EXCLUDE_EXPERIMENTS"].split()

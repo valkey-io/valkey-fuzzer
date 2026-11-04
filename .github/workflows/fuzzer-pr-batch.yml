@@ -47,7 +47,7 @@ on:
         required: true
         type: string
       random_seeds:
-        description: Random seeds of each one-build experiment to run beside the scenarios, 0 to 20
+        description: Random seeds of each one-build experiment to run beside the scenarios, 0 to 4
         required: false
         type: string
         default: "0"
@@ -151,6 +151,8 @@ jobs:
               random+=(--exclude "experiment=${experiment}")
             done
           fi
+          # The folder exists even when the batch exits before writing it, so the chown and the upload do not fail.
+          mkdir -p "${BATCH_DIR}"
           status=0
           sudo -E env "PATH=${PATH}" valkey-fuzzer batch --scenarios "${CANDIDATES_DIR}" "${random[@]}" \
             --profile candidate --workers 2 \

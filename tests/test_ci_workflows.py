@@ -74,12 +74,19 @@ def test_every_valkey_fuzzer_command_in_a_workflow_parses_with_the_cli(name):
     # The workflows that only run pytest or ruff name no valkey-fuzzer command.
     no_cli = ("lint.yml", "test.yml", "valkey-experiments-live.yml")
     assert any(line.startswith("valkey-fuzzer ") for line in commands) or name in no_cli
+    # A bash array ("${name[@]}") stands for the arguments its literal lists; one assigned in a loop stands
+    # for none.
+    # An array literal ends with ")" at the end of a line; a ")" inside, as in "$((16#...))", does not end it.
+    arrays = {name: shlex.split(body) for name, body in re.findall(r"^\s*(\w+)=\((.*?)\)[ \t]*$", scripts, re.M | re.S)}
     for line in commands:
         if line.startswith("valkey-fuzzer "):
             tokens = shlex.split(re.split(r"\s(?:2>&1|\|\||\||>)\s", line)[0])
-            # A bash array ("${name[@]}") is any number of arguments, none included.
-            arguments = [token for token in tokens[1:] if not re.fullmatch(r"\$\{\w+\[@\]\}", token)]
-            create_parser().parse_args(["VALUE" if "$" in token else token for token in arguments])
+            arguments = []
+            for token in tokens[1:]:
+                array = re.fullmatch(r"\$\{(\w+)\[@\]\}", token)
+                arguments += arrays.get(array.group(1), []) if array else [token]
+            # A shell variable stands in as "1", which every option type (a path, a count, a seed) accepts.
+            create_parser().parse_args(["1" if "$" in token else token for token in arguments])
 
 
 @pytest.mark.parametrize("name", WORKFLOW_NAMES)
@@ -341,7 +348,7 @@ def _check_pr_batch_inputs(tmp_path, scenarios, inputs):
 
 
 def test_the_pr_batch_runs_a_random_baseline_without_scenarios(tmp_path):
-    inputs = {"random_seeds": "5", "request_id": "replay-007-122ec7e16"}
+    inputs = {"random_seeds": "4", "request_id": "replay-007-122ec7e16"}
     inputs["exclude_experiments"] = "valkey.replication-chaos  valkey.repl-compression-full-sync"
     assert _check_pr_batch_inputs(tmp_path, {}, inputs) is None
     assert list((tmp_path / "candidates").iterdir()) == []
@@ -366,7 +373,7 @@ def test_the_pr_batch_writes_the_scenarios_and_bundles_it_is_sent(tmp_path):
         ("not json", {}, "not JSON"),
         ({}, {}, "there is nothing to run"),
         ([], {}, "must be a JSON object"),
-        ({"a": SCENARIO}, {"random_seeds": "21"}, "random_seeds must be 0 to 20"),
+        ({"a": SCENARIO}, {"random_seeds": "5"}, "random_seeds must be 0 to 4"),
         ({"a": SCENARIO}, {"request_id": "a b"}, "request_id must be"),
         ({"a": SCENARIO}, {"random_seeds": "2", "exclude_experiments": "x;rm"}, "exclude_experiments must be"),
         ({"a": SCENARIO}, {"exclude_experiments": "valkey.replication-chaos"}, "which random_seeds 0 skips"),
