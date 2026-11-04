@@ -152,6 +152,26 @@ def test_the_worker_isolates_its_run_keeps_a_zoo_build_and_refuses_a_scenario_to
     assert len(canned_runs.plans) == 2, "nothing started"
 
 
+def test_a_batch_folder_keeps_the_experiments_its_runs_load(tmp_path):
+    first, second = tmp_path / "first", tmp_path / "second"
+    for directory in (first, second):
+        directory.mkdir()
+    (first / "a.yaml").write_text("id: proposed.a\n")
+    (first / "b.yml").write_text("id: proposed.b\n")
+    (first / "notes.txt").write_text("not an experiment")
+    (second / "c.yaml").write_text("id: proposed.c\n")
+
+    runner = _batch(tmp_path, [_random(1)], experiment_directories=(str(first), str(second)))
+
+    kept = Path(runner.folder, "experiments")
+    assert sorted(path.name for path in kept.iterdir()) == ["a.yaml", "b.yml", "c.yaml"]
+    assert (kept / "c.yaml").read_text() == "id: proposed.c\n"
+    assert not Path(_batch(tmp_path, [_random(1)], name="none").folder, "experiments").exists()
+    (second / "a.yaml").write_text("id: proposed.other\n")
+    with pytest.raises(BatchError, match=r"two experiment directories hold a\.yaml"):
+        _batch(tmp_path, [_random(1)], name="clash", experiment_directories=(str(first), str(second)))
+
+
 def test_a_run_that_leaks_crashes_or_hangs_is_an_error_and_the_sweep_removes_what_it_left(
     tmp_path, workers, stub, monkeypatch
 ):

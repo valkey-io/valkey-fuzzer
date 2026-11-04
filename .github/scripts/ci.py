@@ -8,7 +8,7 @@ summarize     the job summary, the PR comment (its first line the marker the com
               and whether the workflow failed
 
 fuzzer-pr-batch.yml:
-check-inputs  check the dispatch inputs, and write the scenarios and spec bundles they carry
+check-inputs  check the dispatch inputs, and write the scenarios, spec bundles, and experiments they carry
 drop-ledgers  remove the write ledgers of a batch folder's runs that passed
 
 fuzzer-pr-batch.yml and fuzzer-run.yml:
@@ -325,6 +325,8 @@ def drop_passing_ledgers(batch_dir):
 
 # The paths a spec bundle in spec_bundles may hold.
 _FILE_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}"
+# An experiment file in experiments.
+_EXPERIMENT_FILE = r"[a-z0-9][a-z0-9_.-]{0,99}\.yaml"
 _BUNDLE_PATHS = (
     rf"(?:claims|mapping)\.yaml|model\.tla|{_FILE_NAME}\.cfg"
     rf"|negative-controls/{_FILE_NAME}\.(?:cfg|tla)|experiments/{_FILE_NAME}\.ya?ml"
@@ -503,6 +505,47 @@ def check_inputs(env):
         except SpecBundleError as exc:
             raise SystemExit(f"spec bundle {bundle} is invalid: {exc}") from None
     print(f"{len(bundles)} spec bundle(s) written to {spec_dir}")
+
+    # experiments: {file name: experiment YAML}, a proposal's own data-only experiments, written under
+    # EXPERIMENTS_DIR (only when there are any), which the batch loads with --experiment-dir.
+    raw_experiments = env["INPUT_EXPERIMENTS"]
+    if len(raw_experiments) > 20000:
+        raise SystemExit(f"experiments is {len(raw_experiments)} characters; the limit is 20,000")
+    try:
+        experiments = json.loads(raw_experiments) if raw_experiments.strip() else {}
+    except ValueError as exc:
+        raise SystemExit(f"experiments is not JSON: {exc}") from None
+    if not isinstance(experiments, dict):
+        raise SystemExit("experiments must be a JSON object mapping a file name to experiment YAML")
+    experiments_dir = Path(env["EXPERIMENTS_DIR"])
+    for name, text in experiments.items():
+        if not re.fullmatch(_EXPERIMENT_FILE, name) or ".." in name:
+            raise SystemExit(
+                f"experiment file name {name!r} must be <name>.yaml, the name lowercase letters, digits, '.', '_', "
+                "or '-'"
+            )
+        if not isinstance(text, str):
+            raise SystemExit(f"experiment {name}: the value must be YAML text")
+        document = _yaml_mapping(text, f"experiment {name}")
+        if not isinstance(document.get("id"), str) or not document["id"].startswith("proposed."):
+            raise SystemExit(f"experiment {name}: id must start with 'proposed.'")
+        experiments_dir.mkdir(parents=True, exist_ok=True)
+        (experiments_dir / name).write_text(text, encoding="utf-8")
+    # The catalog the batch builds from every directory it is given: what does not load fails here, not there.
+    directories = [str(path) for path in sorted(spec_dir.glob("*/experiments")) if path.is_dir()]
+    if experiments:
+        directories.append(str(experiments_dir))
+    if directories:
+        from valkey_fuzzer.service import RunService
+
+        try:
+            catalog = RunService(experiment_directories=tuple(directories)).catalog
+        except ValueError as exc:  # an experiment document or registration error
+            raise SystemExit(f"the experiments do not load: {exc}") from None
+        print(
+            f"the catalog loads with {len(directories)} experiment directory(ies): {len(catalog.experiments)} experiments"
+        )
+    print(f"{len(experiments)} experiment(s) written to {experiments_dir}")
 
 
 def _print_outputs(values):

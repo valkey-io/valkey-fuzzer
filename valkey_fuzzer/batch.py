@@ -753,6 +753,25 @@ class _Running:
     timed_out: bool = False
 
 
+def _copy_experiments(folder: str, directories: Sequence[str]) -> None:
+    """Copy the experiment documents of ``directories`` into ``<folder>/experiments``.
+
+    The batch folder then holds what its runs loaded with ``--experiment-dir``,
+    so a run replays from the folder alone (``replay --experiment-dir experiments``).
+    """
+
+    target = os.path.join(folder, "experiments")
+    for directory in directories:
+        for name in sorted(os.listdir(directory)):
+            source = os.path.join(directory, name)
+            if not os.path.isfile(source) or not name.lower().endswith((".yaml", ".yml")):
+                continue
+            if os.path.exists(os.path.join(target, name)):
+                raise BatchError(f"two experiment directories hold {name}; the batch folder keeps one experiments/")
+            os.makedirs(target, exist_ok=True)
+            shutil.copy2(source, os.path.join(target, name))
+
+
 class BatchRunner:
     """Runs a batch folder's jobs on its workers; see the module docstring."""
 
@@ -784,6 +803,7 @@ class BatchRunner:
         os.makedirs(folder, exist_ok=True)
         if os.path.exists(os.path.join(folder, "batch.json")):
             raise BatchError(f"{folder} already holds a batch; resume it instead")
+        _copy_experiments(folder, options.experiment_directories)
         spec = {
             "options": asdict(options),
             "sources": list(sources),

@@ -12,6 +12,8 @@ name: Valkey Fuzzer PR Batch
 # Scenarios translated from a spec bundle that brings its own data-only
 # experiments come with the bundle in spec_bundles: the batch finds the bundle
 # through VALKEY_FUZZER_SPEC_PATH and loads its experiments/ with --experiment-dir.
+# A proposal's own experiments (data-only, their IDs under proposed.) come in
+# experiments, loaded the same way; the batch folder keeps a copy at experiments/.
 # With random_seeds, the batch also draws that many seeds of every experiment
 # that needs one build, but those in exclude_experiments, so the given
 # scenarios run beside a random baseline.
@@ -33,6 +35,13 @@ on:
           JSON object mapping a spec bundle name to {path in the bundle: file text}, for bundles the
           scenarios need (claims.yaml, model.tla, mapping.yaml, *.cfg, negative-controls/, experiments/;
           at most 60,000 characters)
+        required: false
+        type: string
+        default: ""
+      experiments:
+        description: >-
+          JSON object mapping an experiment file name (<name>.yaml) to its YAML, data-only experiments whose
+          id starts with proposed., loaded with --experiment-dir (at most 20,000 characters)
         required: false
         type: string
         default: ""
@@ -93,6 +102,8 @@ jobs:
       CANDIDATES_DIR: /tmp/fuzzer-pr-batch/candidates
       # The spec bundles, one directory each: the batch looks them up here by name.
       SPEC_DIR: /tmp/fuzzer-pr-batch/spec
+      # The experiments input's documents; written only when there are any.
+      EXPERIMENTS_DIR: /tmp/fuzzer-pr-batch/experiments
       # The uploaded batch folder: summary.json lists every run and runs[].report its run report.
       BATCH_DIR: /tmp/fuzzer-pr-batch/batch
       # The parent commit's build, which check-inputs declares to every scenario as artifacts.parent.
@@ -118,6 +129,7 @@ jobs:
         env:
           INPUT_SCENARIOS: ${{ inputs.scenarios }}
           INPUT_SPEC_BUNDLES: ${{ inputs.spec_bundles }}
+          INPUT_EXPERIMENTS: ${{ inputs.experiments }}
           INPUT_VALKEY_REPOSITORY: ${{ inputs.valkey_repository }}
           INPUT_VALKEY_SHA: ${{ inputs.valkey_sha }}
           INPUT_VALKEY_PARENT_SHA: ${{ inputs.valkey_parent_sha }}
@@ -190,6 +202,10 @@ jobs:
               experiment_dirs+=(--experiment-dir "${directory}")
             fi
           done
+          # The proposal's own experiments.
+          if [ -d "${EXPERIMENTS_DIR}" ]; then
+            experiment_dirs+=(--experiment-dir "${EXPERIMENTS_DIR}")
+          fi
           # The random baseline: seeds from the commit, so a rerun of this commit draws the same scenarios.
           # The experiments that need a second build are left out: this batch has one.
           random=()

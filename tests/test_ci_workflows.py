@@ -333,6 +333,12 @@ OTHER_ARTIFACT = yaml.safe_dump(
 )
 PARENT = "b" * 40
 PARENT_BINARY = "/work/valkey-parent/src/valkey-server"
+# A proposal's own experiment: the register bundle's, under a proposed. ID.
+PROPOSED = BUNDLE["experiments/toy.register.yaml"].replace("id: toy.register\n", "id: proposed.register\n")
+
+
+def _raw(value):
+    return value if isinstance(value, str) else json.dumps(value)
 
 
 def _check_pr_batch_inputs(tmp_path, scenarios, inputs):
@@ -341,6 +347,7 @@ def _check_pr_batch_inputs(tmp_path, scenarios, inputs):
     env = {
         "INPUT_SCENARIOS": scenarios if isinstance(scenarios, str) else json.dumps(scenarios),
         "INPUT_SPEC_BUNDLES": json.dumps(inputs["bundles"]) if "bundles" in inputs else "",
+        "INPUT_EXPERIMENTS": _raw(inputs["experiments"]) if "experiments" in inputs else "",
         "INPUT_VALKEY_REPOSITORY": inputs.get("repository", "valkey-io/valkey"),
         "INPUT_VALKEY_SHA": inputs.get("sha", "a" * 40),
         "INPUT_VALKEY_PARENT_SHA": inputs.get("parent_sha", ""),
@@ -350,6 +357,7 @@ def _check_pr_batch_inputs(tmp_path, scenarios, inputs):
         "INPUT_EXCLUDE_EXPERIMENTS": inputs.get("exclude_experiments", ""),
         "CANDIDATES_DIR": str(tmp_path / "candidates"),
         "SPEC_DIR": str(tmp_path / "spec"),
+        "EXPERIMENTS_DIR": str(tmp_path / "experiments"),
         "PARENT_BINARY": PARENT_BINARY,
     }
     with patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()):
@@ -418,6 +426,23 @@ def test_the_pr_batch_builds_a_parent_commit_the_same_way_and_declares_it_to_eve
         }
 
 
+def test_the_pr_batch_writes_the_experiments_it_is_sent_and_the_batch_loads_them(tmp_path):
+    workflow = _workflow("fuzzer-pr-batch.yml")
+    experiments = workflow["on"]["workflow_dispatch"]["inputs"]["experiments"]
+    assert experiments["required"] is False and experiments["default"] == ""
+    (job,) = workflow["jobs"].values()
+    (batch,) = [step for step in job["steps"] if step.get("id") == "batch"]
+    assert '--experiment-dir "${EXPERIMENTS_DIR}"' in batch["run"] and "EXPERIMENTS_DIR" in job["env"]
+
+    inputs = {"experiments": {"register.yaml": PROPOSED}, "bundles": {"register": BUNDLE}}
+    assert _check_pr_batch_inputs(tmp_path, {"a": SCENARIO}, inputs) is None
+    assert [path.name for path in (tmp_path / "experiments").iterdir()] == ["register.yaml"]
+    assert (tmp_path / "experiments" / "register.yaml").read_text(encoding="utf-8") == PROPOSED
+    # Without experiments there is no directory, and the batch step passes none.
+    assert _check_pr_batch_inputs(tmp_path / "none", {"a": SCENARIO}, {}) is None
+    assert not (tmp_path / "none" / "experiments").exists()
+
+
 def test_the_batch_summary_names_the_parent_commit_and_the_build(tmp_path):
     (tmp_path / "summary.json").write_text(json.dumps({"status": "PASS", "counts": {}, "runs": [], "signatures": []}))
 
@@ -465,6 +490,18 @@ def test_the_batch_summary_names_the_parent_commit_and_the_build(tmp_path):
         ({"a": SCENARIO}, {"bundles": {"register": {"model.tla": "x"}}}, "has no claims.yaml"),
         ({"a": SCENARIO}, {"bundles": {"register": {**BUNDLE, "../evil.cfg": "x"}}}, "must be claims.yaml"),
         ({"a": SCENARIO}, {"bundles": {"register": {**BUNDLE, "model.tla": "---- MODULE x ----\n===="}}}, "is invalid"),
+        ({"a": SCENARIO}, {"experiments": "x" * 20001}, "experiments is 20001 characters; the limit is 20,000"),
+        ({"a": SCENARIO}, {"experiments": "not json"}, "experiments is not JSON"),
+        ({"a": SCENARIO}, {"experiments": []}, "experiments must be a JSON object"),
+        ({"a": SCENARIO}, {"experiments": {"Register.yaml": PROPOSED}}, "must be <name>.yaml"),
+        ({"a": SCENARIO}, {"experiments": {"register.yml": PROPOSED}}, "must be <name>.yaml"),
+        ({"a": SCENARIO}, {"experiments": {"../up.yaml": PROPOSED}}, "must be <name>.yaml"),
+        ({"a": SCENARIO}, {"experiments": {"r.yaml": 3}}, "experiment r.yaml: the value must be YAML text"),
+        ({"a": SCENARIO}, {"experiments": {"r.yaml": "[1]"}}, "experiment r.yaml must be a mapping"),
+        ({"a": SCENARIO}, {"experiments": {"r.yaml": "id: toy.x\n"}}, "id must start with 'proposed.'"),
+        ({"a": SCENARIO}, {"experiments": {"r.yaml": "name: x\n"}}, "id must start with 'proposed.'"),
+        ({"a": SCENARIO}, {"experiments": {"r.yaml": "id: proposed.x\nextends: [nope]\n"}}, "do not load"),
+        ({"a": SCENARIO}, {"experiments": {"a.yaml": PROPOSED, "b.yaml": PROPOSED}}, "do not load"),
     ],
 )
 def test_the_pr_batch_refuses_bad_inputs(tmp_path, scenarios, inputs, message):
@@ -555,8 +592,8 @@ def test_the_batch_workflows_summarize_through_the_ci_script():
     (env,) = _step_env("fuzzer-pr-batch.yml", "check-inputs")
     names = {"INPUT_SCENARIOS", "INPUT_SPEC_BUNDLES", "INPUT_VALKEY_REPOSITORY", "INPUT_VALKEY_SHA"}
     names |= {"INPUT_VALKEY_PARENT_SHA", "INPUT_BUILD", "INPUT_RANDOM_SEEDS", "INPUT_REQUEST_ID"}
-    names |= {"INPUT_EXCLUDE_EXPERIMENTS"}
-    assert names | {"CANDIDATES_DIR", "SPEC_DIR", "PARENT_BINARY"} <= set(env)
+    names |= {"INPUT_EXCLUDE_EXPERIMENTS", "INPUT_EXPERIMENTS"}
+    assert names | {"CANDIDATES_DIR", "SPEC_DIR", "EXPERIMENTS_DIR", "PARENT_BINARY"} <= set(env)
 
 
 def test_the_pr_batch_drops_the_write_ledgers_of_the_runs_that_passed(tmp_path):

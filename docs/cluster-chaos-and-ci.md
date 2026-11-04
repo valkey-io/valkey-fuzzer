@@ -299,7 +299,7 @@ The full output is also in the **Execute fuzzer run** step of each
 | Workflow | Trigger | Does |
 | --- | --- | --- |
 | [Valkey Fuzzer Cluster Chaos Every 4 Hours](../.github/workflows/fuzzer-run.yml) | every four hours, manual | A [batch](cli.md#batch) of three fresh `valkey.cluster-chaos` seeds under the `nightly-soak` profile (`batch --random valkey.cluster-chaos --seeds 3`), on a build of Valkey `unstable` that the workflow makes and passes with `--valkey-binary`. Uploads `fuzzer-run-artifacts-<run id>`, which holds the batch folder `batch/`, and writes the batch status, each run's scenario, seed, status, summary, Valkey SHA, failed components, and rerun command, and the failure signatures to the job summary. |
-| [Valkey Fuzzer PR Batch](../.github/workflows/fuzzer-pr-batch.yml) | dispatch (valkey-ci-agent) | Takes `scenarios` (a JSON object mapping a name to scenario YAML, at most 60,000 characters), optional `spec_bundles` (below), `valkey_repository`, `valkey_ref`, and `valkey_sha`, which must be a full commit SHA: 40 lowercase hex characters, never a short or uppercase one; optional `valkey_parent_sha` and `build` (below); optional `random_seeds` (0 to 4; 4 seeds of the 17 one-build experiments is what the job's timeout fits), `exclude_experiments` (experiment IDs separated by spaces, left out of the random baseline; it needs `random_seeds` above 0, and the three two-build experiments are always left out), and `request_id` (shown in the run's title, so the caller can find the run it dispatched); builds exactly `valkey_sha`, with zstd; runs the scenarios through `batch --scenarios` with the `candidate` profile on two workers, as root so the tmpfs and iptables experiments run, plus `random_seeds` seeds of every experiment that needs one build (`--random all`, first seed from the commit), a random baseline beside the scenarios; and uploads the batch folder as `fuzzer-batch-<run id>`, less the write ledgers (`ledger.jsonl`, `preload.jsonl`) of the runs that passed. A scenario that names a binary of its own (`deployment.valkey_binary`, `deployment.instance_binaries`, or `artifacts`) is refused. The token is read-only, and inputs reach the scripts only through environment variables. |
+| [Valkey Fuzzer PR Batch](../.github/workflows/fuzzer-pr-batch.yml) | dispatch (valkey-ci-agent) | Takes `scenarios` (a JSON object mapping a name to scenario YAML, at most 60,000 characters), optional `spec_bundles` and `experiments` (below), `valkey_repository`, `valkey_ref`, and `valkey_sha`, which must be a full commit SHA: 40 lowercase hex characters, never a short or uppercase one; optional `valkey_parent_sha` and `build` (below); optional `random_seeds` (0 to 4; 4 seeds of the 17 one-build experiments is what the job's timeout fits), `exclude_experiments` (experiment IDs separated by spaces, left out of the random baseline; it needs `random_seeds` above 0, and the three two-build experiments are always left out), and `request_id` (shown in the run's title, so the caller can find the run it dispatched); builds exactly `valkey_sha`, with zstd; runs the scenarios through `batch --scenarios` with the `candidate` profile on two workers, as root so the tmpfs and iptables experiments run, plus `random_seeds` seeds of every experiment that needs one build (`--random all`, first seed from the commit), a random baseline beside the scenarios; and uploads the batch folder as `fuzzer-batch-<run id>`, less the write ledgers (`ledger.jsonl`, `preload.jsonl`) of the runs that passed. A scenario that names a binary of its own (`deployment.valkey_binary`, `deployment.instance_binaries`, or `artifacts`) is refused. The token is read-only, and inputs reach the scripts only through environment variables. |
 | [Valkey Experiments Live](../.github/workflows/valkey-experiments-live.yml) | daily, manual | Builds Valkey `unstable` and 8.1 and runs `tests/test_live_valkey_experiments.py` and `tests/test_live_spec_register.py` as the runner user, with java and the pinned `tla2tools.jar`, so the spec bridge's conformance checks run too. Only the tmpfs and iptables tests run as root, in a separate step that fails if either skips. |
 | [Tests](../.github/workflows/test.yml) | push and PR to `main` | Unit tests on Python 3.9 to 3.14, a check that the wheel ships every file under `formal/`, and in a parallel job on Python 3.12 the server tests and a live experiment subset (with the spec bridge's register bundle end to end) against the Valkey commit in `zoo/valkey-commit`, with java and the pinned `tla2tools.jar` for the tests backed by TLC. |
 | [Lint](../.github/workflows/lint.yml) | push and PR to `main` | `ruff check` and `ruff format --check`. |
@@ -317,6 +317,17 @@ The workflow writes each bundle to its own directory, runs the batch with
 `VALKEY_FUZZER_SPEC_PATH` naming their parent, so a component's `spec:` finds
 the bundle by name, and passes `--experiment-dir <bundle>/experiments` for each
 bundle that has experiments.
+
+`experiments` carries a proposal's own data-only experiments: a JSON object
+mapping a file name to experiment YAML, at most 20,000 characters. A file
+name is `<name>.yaml` (the name lowercase letters, digits, `.`, `_`, `-`, at
+most 100 characters), and each document is a mapping whose `id` starts with
+`proposed.`; the input step then loads the installed catalog with every
+experiment directory the batch will be given, so an experiment that does not
+load (an unknown fragment, a duplicate ID) is refused before anything is
+built. The documents are written to `EXPERIMENTS_DIR`, the batch loads them
+with `--experiment-dir`, and the batch folder keeps a copy at `experiments/`,
+so a downloaded batch replays with `--experiment-dir experiments`.
 
 `valkey_parent_sha` (a full lowercase SHA, or empty) names a second commit,
 the change's parent, that the workflow checks out at `valkey-parent/` and
@@ -375,6 +386,15 @@ root, and that every action is pinned.
 
    ```bash
    valkey-fuzzer replay batch/runs/<id>/report.json --valkey-binary /path/to/valkey-server
+   ```
+
+   A PR batch run of a proposal's own experiment, compared with a parent
+   build, also needs the folder's `experiments/` and a build of the parent
+   commit (`valkey_parent_sha` in the step summary):
+
+   ```bash
+   valkey-fuzzer replay runs/<id>/report.json --experiment-dir experiments \
+     --valkey-binary /path/to/valkey-server --artifact parent=/path/to/parent/valkey-server
    ```
 
    Instance logs are in the run folder's `logs/`.

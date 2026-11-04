@@ -354,6 +354,7 @@ removed, the batch refuses to start. Dead runs' directories stay.
   results/<id>.json   one finished job
   runs/<id>/          the job's run folder: plan.json, report.json, scenario.yaml,
                       components/, logs/ (instance logs), console.log (or error.json)
+  experiments/        a copy of every --experiment-dir's documents (only with one)
   summary.json        the summary, rewritten when the batch stops
   batch.log           one line per finished job
   workers.json, work/ the jobs running now and the workers' scratch (while running)
@@ -361,7 +362,11 @@ removed, the batch refuses to start. Dead runs' directories stay.
 
 Each `runs/<id>/report.json` is an ordinary [run report](#run-reports):
 `replay`, `minimize`, and `spec conform` read it, and `valkey-fuzzer run
-runs/<id>/scenario.yaml` runs the job again without the batch.
+runs/<id>/scenario.yaml` runs the job again without the batch. A batch given
+`--experiment-dir` copies the directories' `*.yaml` and `*.yml` documents
+into `experiments/` (two directories holding the same file name are refused),
+so `replay runs/<id>/report.json --experiment-dir experiments` reruns a job
+from the folder alone.
 
 `summary.json` has:
 
