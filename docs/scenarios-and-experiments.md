@@ -511,7 +511,12 @@ build under test and its parent, with
 tests the fix of valkey-io/valkey#4823 that way, and
 [`examples/valkey/commands_compare.yaml`](../examples/valkey/commands_compare.yaml)
 runs it, declaring the parent build as `artifacts.parent` and passing it as the
-`parent` input. The action starts both servers itself, so the deployment's
+`parent` input.
+[`commands-compare-cluster.yaml`](../examples/valkey/experiments/commands-compare-cluster.yaml)
+runs each side on two cluster nodes (valkey-io/valkey#5140), and
+[`commands-compare-restart.yaml`](../examples/valkey/experiments/commands-compare-restart.yaml)
+restarts each server from the config file it rewrote (valkey-io/valkey#5176);
+`commands_compare_cluster.yaml` and `commands_compare_restart.yaml` run them. The action starts both servers itself, so the deployment's
 mode and instances do not matter; a sequence that must run under a fault the
 experiment injects leaves `compare_with` out and runs on the deployment's
 instances instead.

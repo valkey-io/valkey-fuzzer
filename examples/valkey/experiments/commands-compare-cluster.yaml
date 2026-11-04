@@ -1,0 +1,45 @@
+# Compare one command sequence on two-node clusters of the build under test
+# and of its parent, as commands-compare.yaml does on one server.
+#
+# This sequence tests valkey-io/valkey#5140 (RESET on a slot migration client
+# crashed the server). Each side runs two nodes (`nodes: 2`): node 0 serves
+# every slot and node 1 joins as an empty primary. `<node.0.id>` is replaced
+# by each side's own node ID, and node IDs and ports in replies are named back
+# the same way, so the two sides compare equal. CLUSTER SYNCSLOTS ESTABLISH
+# turns node 1 into the target of a slot import and turns that connection's
+# replies off, so it runs on a connection of its own (`connection: job`). The
+# fixed build fails the job and closes the connection without a reply,
+# recorded as `{closed: true}`, which `{exists: false}` expects; the parent
+# hits an assertion and exits, which reaches the change. The main connection
+# to node 1 then shows the node still answers.
+#
+# The scenario declares the parent build as an artifact and passes it as the
+# `parent` input: {$ref: artifacts.parent.binary}.
+extends: [valkey.liveness]
+id: example.commands-compare-cluster
+deployment:
+  modes: [standalone, cluster]
+metadata:
+  description: One command sequence on two-node clusters of the build under test and its parent, replies compared
+inputs:
+  required: [parent]
+  properties:
+    parent:
+      type: environment_reference
+      reference_kinds: [artifacts]
+      description: "The parent commit's build, {$ref: artifacts.parent.binary}"
+components:
+  - use: valkey.action.commands
+    id: reset
+    config:
+      compare_with: {$ref: inputs.parent}
+      cluster: true
+      nodes: 2
+      commands:
+        - {command: [CLUSTER, SYNCSLOTS, ESTABLISH, SOURCE, "<node.0.id>", NAME, aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,
+                     SLOTSRANGE, 16383, 16383], node: 1, connection: job, expect: {equals: OK}}
+        - {command: [RESET], node: 1, connection: job, expect_difference: true, expect: {exists: false}}
+        - {command: [PING], node: 1, expect: {equals: PONG}}
+        - {command: [CLUSTER, SLOTS], node: 1}
+required_evidence:
+  - {evidence_id: valkey.command.sequence, source: reset}
