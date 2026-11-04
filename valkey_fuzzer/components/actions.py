@@ -240,6 +240,8 @@ _EXIT_WAIT_S = 5.0
 _WAIT_INTERVAL_S = 0.1
 # How long raw bytes wait for a reply before they are recorded as answered by none.
 _NO_REPLY_S = 1.0
+# How much of a reply the client could not parse is recorded as its bytes.
+_UNPARSED_BYTES = 4096
 # How long a restart waits for the server to stop (it waits for lagging replicas up to shutdown-timeout, 10s).
 _STOP_TIMEOUT_S = 30.0
 # The files of a private server's directory the harness writes itself.
@@ -448,12 +450,18 @@ class RawConnection:
 
     def __init__(self, connection: Any):
         self.connection = connection
+        # The database a SELECT on it chose, for a reply read again unparsed (see _unparsed).
+        self.db: Any = None
 
     def send(self, command: Sequence[Any]) -> dict[str, Any]:
-        """``{"reply": ...}``, the server's error as ``{"error": ...}``, or a lost connection or a reply that
-        timed out as ``{"error": ..., "unanswered": True}``."""
+        """``{"reply": ...}``, the server's error as ``{"error": ...}``, a reply the client could not parse as
+        ``{"protocol_error": ...}``, or a lost connection or a reply that timed out as ``{"error": ...,
+        "unanswered": True}``."""
 
-        return self._exchange(lambda: self.connection.send_command(*[_argument(item) for item in command]))
+        record = self._exchange(lambda: self.connection.send_command(*[_argument(item) for item in command]))
+        if str(command[0]).upper() == "SELECT" and record.get("reply") == "OK":
+            self.db = command[1]
+        return record
 
     def send_raw(self, data: bytes) -> dict[str, Any]:
         """Send ``data`` as it is and read one reply, as :meth:`send`; ``{"no_reply": True}`` when none began
@@ -487,8 +495,31 @@ class RawConnection:
             return {"reply": raw_reply(self.connection.read_response(push_request=True))}
         except valkey.exceptions.ResponseError as exc:
             return {"error": str(exc)}
+        except valkey.exceptions.InvalidResponse as exc:
+            return {"protocol_error": str(exc)}
         except (valkey.exceptions.ConnectionError, valkey.exceptions.TimeoutError, OSError) as exc:
             return _lost(exc)
+
+    def unparsed(self, request: Any) -> bytes:
+        """Send ``request`` (a command, or bytes as they are) and return the bytes that come back as they are: up
+        to 4 KB, until none come for a second or the server closes the connection."""
+
+        if isinstance(request, bytes):
+            self.connection.send_packed_command([request])
+        else:
+            self.connection.send_command(*[_argument(item) for item in request])
+        sock = self.connection._sock
+        sock.settimeout(_NO_REPLY_S)
+        received = b""
+        try:
+            while len(received) < _UNPARSED_BYTES:
+                chunk = sock.recv(_UNPARSED_BYTES - len(received))
+                if not chunk:
+                    break
+                received += chunk
+        except OSError:
+            pass
+        return received
 
     def close(self) -> None:
         try:
@@ -555,16 +586,45 @@ def _run_step(target: Any, item: Mapping[str, Any], context: Any) -> dict[str, A
         return target.mask(connection.read_waiting())
     if item["raw"] is not None:
         raw = item["raw"]
-        return target.mask(connection.send_raw(_argument(raw) if _is_binary(raw) else target.substitute(raw).encode()))
-    command = [target.substitute(argument) for argument in item["command"]]
-    if item["wait_s"] is None:
-        return target.mask(connection.send(command))
+        request = _argument(raw) if _is_binary(raw) else target.substitute(raw).encode()
+        record = target.mask(connection.send_raw(request))
+    elif item["wait_s"] is None:
+        request = [target.substitute(argument) for argument in item["command"]]
+        record = target.mask(connection.send(request))
+    else:
+        request = [target.substitute(argument) for argument in item["command"]]
 
-    def attempt() -> tuple[bool, dict[str, Any]]:
-        record = target.mask(connection.send(command))
-        return bool(record.get("unanswered")) or _sequence_matches(item["expect"], record, item["compare"]), record
+        def attempt() -> tuple[bool, dict[str, Any]]:
+            record = target.mask(connection.send(request))
+            done = bool(record.get("unanswered")) or "protocol_error" in record
+            return done or _sequence_matches(item["expect"], record, item["compare"]), record
 
-    return poll_until(attempt, timeout_s=item["wait_s"], interval_s=_WAIT_INTERVAL_S, context=context)[1]
+        record = poll_until(attempt, timeout_s=item["wait_s"], interval_s=_WAIT_INTERVAL_S, context=context)[1]
+    if "protocol_error" in record:
+        received = target.mask(_unparsed(target, item, connection.db, request).decode("latin-1"))
+        record["raw"] = received.encode("unicode_escape").decode("ascii")
+    return record
+
+
+def _unparsed(target: Any, item: Mapping[str, Any], db: Any, request: Any) -> bytes:
+    """The bytes the server replies to ``request`` on a fresh connection to the node of ``item`` (the same RESP,
+    and ``db`` SELECTed), for a reply the client could not parse. The connection the reply broke is closed
+    first, and the fresh one after, so the next command opens one anew."""
+
+    node, name = item["node"], item["connection"]
+    target.forget(node, name)
+    try:
+        connection = target.connection(node, name)
+    except (valkey.exceptions.ValkeyError, OSError):
+        return b""
+    try:
+        if db is not None:
+            connection.send(["SELECT", db])
+        return connection.unparsed(request)
+    except (valkey.exceptions.ValkeyError, OSError):
+        return b""
+    finally:
+        target.forget(node, name)
 
 
 def _json_value(item: Any) -> Any:
@@ -683,6 +743,9 @@ class _Instance:
         stays a command without a reply."""
 
         return False
+
+    def forget(self, node: int, name: str) -> None:
+        self.connections.pop(name).close()
 
     def close(self) -> None:
         for connection in self.connections.values():
@@ -951,11 +1014,11 @@ class CommandsAction:
     ``cluster-enabled yes`` with ``cluster``), one side of the deployment's binary (the candidate) and one of
     ``compare_with`` (the parent); the deployment's instances are never touched. An option the parent rejects
     is dropped on both sides and recorded. Only the candidate is judged: a reply that violates its ``expect``,
-    or a candidate node that exits, is FAIL. A difference between the builds is never a FAIL by itself: a
-    marked command whose replies are equal leaves the run ERROR ``unreached-change``, an unmarked command whose
-    replies differ ERROR ``unexplained-difference``; a parent that dies on a marked command reached the
-    change. Without ``compare_with`` the sequence runs on each selected instance, and ``expect`` alone judges
-    it.
+    a reply the client cannot parse, or a candidate node that exits, is FAIL. A difference between the builds is
+    never a FAIL by itself: a marked command whose replies are equal leaves the run ERROR ``unreached-change``, an
+    unmarked command whose replies differ ERROR ``unexplained-difference``; a parent that dies on a marked command
+    reached the change. Without ``compare_with`` the sequence runs on each selected instance, and ``expect`` alone
+    judges it.
     """
 
     def run(self, context: Any, spec: ComponentSpec):
@@ -966,7 +1029,7 @@ class CommandsAction:
 
     def _run_on_instances(self, context: Any, spec: ComponentSpec, config: Mapping[str, Any]):
         handle = deployment(context)
-        evidence, problems, unanswered = [], [], []
+        evidence, problems, unanswered, broken = [], [], [], []
         for instance_id in select_instances(handle, config["instances"]):
             instance = handle.instance(instance_id)
             try:
@@ -983,9 +1046,20 @@ class CommandsAction:
                 target.close()
             problems.extend(f"{instance_id}: {text}" for text in _violations(config["commands"], replies))
             unanswered.extend(f"{instance_id}: {text}" for text in _unanswered(config["commands"], replies))
+            broken.extend(
+                {"instance_id": instance_id, **item} for item in _protocol_errors(config["commands"], replies)
+            )
             record = _record(config, _side(replies, config["commands"]), None, None, [], [], [])
             record["instance_id"] = instance_id
             evidence.append(make_evidence(spec, "valkey.command.sequence", "action.completed", record))
+        if broken:
+            return make_result(
+                spec,
+                ComponentStatus.FAIL,
+                "; ".join(f"{item['instance_id']}: {_protocol_error_text(item)}" for item in broken),
+                evidence=evidence,
+                diagnostics={"reason": "protocol-error", "commands": broken},
+            )
         status = ComponentStatus.FAIL if problems else ComponentStatus.ERROR if unanswered else ComponentStatus.PASS
         summary = (
             "; ".join([*problems, *unanswered]) or f"{len(config['commands'])} commands on {len(evidence)} instance(s)"
@@ -1111,6 +1185,16 @@ class CommandsAction:
                 evidence=evidence,
                 diagnostics={"crashes": {"candidate": cause}},
                 crash=True,
+            )
+        # A reply the client cannot parse is a protocol bug, a FAIL even where the parent gives the same one.
+        broken = _protocol_errors(commands, candidate.replies)
+        if broken:
+            return make_result(
+                spec,
+                ComponentStatus.FAIL,
+                "; ".join(map(_protocol_error_text, broken)),
+                evidence=evidence,
+                diagnostics={"reason": "protocol-error", "commands": broken},
             )
         if violations:
             return make_result(spec, ComponentStatus.FAIL, "; ".join(violations), evidence=evidence)
@@ -1249,6 +1333,26 @@ def _same_on_parent(commands: Sequence[Mapping[str, Any]], index: int, candidate
     return canonical_json(_compared({**mine, "index": index}, mode)) == canonical_json(
         _compared({**theirs, "index": index}, mode)
     )
+
+
+def _protocol_errors(commands: Sequence[Mapping[str, Any]], replies: Sequence[Mapping[str, Any]]) -> list[dict]:
+    """The commands whose reply the client could not parse: each with its index, the client's message, and the
+    reply's bytes."""
+
+    return [
+        {
+            "index": record["index"],
+            "command": _step_text(commands[record["index"]]),
+            "protocol_error": record["protocol_error"],
+            "raw": record["raw"],
+        }
+        for record in replies
+        if "protocol_error" in record
+    ]
+
+
+def _protocol_error_text(item: Mapping[str, Any]) -> str:
+    return f"command {item['index']} ({item['command']}) got a reply the client cannot parse: {item['protocol_error']}"
 
 
 def _unanswered(commands: Sequence[Mapping[str, Any]], replies: Sequence[Mapping[str, Any]]) -> list[str]:
@@ -2149,6 +2253,9 @@ _SEQUENCE_REPLY = mapping_of(
         "no_reply": optional(bool),
         # The server closed the connection without a reply, its node living on.
         "closed": optional(bool),
+        # A reply the client could not parse: its message, and the reply's bytes, escaped (the first 4 KB).
+        "protocol_error": optional(str),
+        "raw": optional(str),
     }
 )
 # One side of a sequence: its replies, the digest of the compared ones, and the exit status of a node that exited,

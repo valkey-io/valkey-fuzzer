@@ -424,7 +424,11 @@ later: an `expect` sees a null reply (`{exists: false}` expects it), it
 compares unequal to any reply, and the sequence goes on, the connection opening
 anew on its next use. When the node exited, the connection was lost to a
 crash; on a deployment instance, a closed connection is a command without a
-reply.
+reply. A reply the client cannot parse (a RESP3 double `,abc`) is recorded as
+`{protocol_error, raw}`, the client's message and the first 4 KB of the bytes
+the command gets again on a fresh connection (same RESP and `SELECT`),
+escaped; it is a `FAIL` with `diagnostics: {reason: protocol-error, commands:
+[...]}`, even where the parent gives the same, and without `compare_with`.
 
 The outcome, with `compare_with`:
 
@@ -498,7 +502,7 @@ allowed and simply crash the server they are sent to (a candidate crash is a
 deployment's instances.
 
 Evidence: `valkey.command.sequence`, `{candidate: {replies: [{index, reply |
-error | no_reply | closed, unanswered?}], digest, exited?, exited_node?}, parent: {...} | null, modules:
+error | no_reply | closed | protocol_error and raw, unanswered?}], digest, exited?, exited_node?}, parent: {...} | null, modules:
 {candidate: [paths], parent: [paths]} | null, cluster, nodes, dropped_config,
 reached: [indexes], unexplained: [indexes], checks?}` (and
 `instance_id` without `compare_with`, one item per instance). `checks` has

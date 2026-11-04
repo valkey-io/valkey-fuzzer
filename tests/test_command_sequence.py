@@ -7,9 +7,10 @@ import shutil
 import subprocess
 import tempfile
 
+import libvalkey
 import pytest
 from valkey.exceptions import ConnectionError as ValkeyConnectionError
-from valkey.exceptions import ResponseError
+from valkey.exceptions import InvalidResponse, ResponseError
 from valkey.exceptions import TimeoutError as ValkeyTimeoutError
 
 from tests.valkey_experiments_support import registration_for, resolved, unit_plan
@@ -32,12 +33,16 @@ class ByResp(dict):
     """A reply by the protocol of the connection it goes to: ``{2: ..., 3: ...}``."""
 
 
+class Wire(bytes):
+    """A reply's bytes as the server sends them, which the client parses as valkey-py does, with libvalkey."""
+
+
 class Build:
     """A fake valkey-server build: the options it rejects at start, and its reply to each command, keyed by
     the arguments as sent (strings, or bytes for a binary argument; raw bytes as they are); an unlisted command
     gets ``OK`` (CLUSTER MYID the server's ID, CLUSTER INFO a state ok knowing every server of the build;
     SUBSCRIBE and PUBLISH work, on the connections of one server). A
-    reply may be an :class:`Error`, :data:`DIE` (the server exits without answering), :data:`CLOSE` (it closes the
+    reply may be an :class:`Error`, a :class:`Wire`, :data:`DIE` (the server exits without answering), :data:`CLOSE` (it closes the
     connection without answering), :data:`TIMEOUT`,
     :data:`SILENT` (no reply begins), or a function of the :class:`FakeServer` that returns the reply."""
 
@@ -122,10 +127,11 @@ class FakeServer:
 
 class FakeWire:
     """A valkey-py connection to one fake server: ``send_command``, ``send_packed_command``, ``can_read``,
-    ``read_response``, ``disconnect``."""
+    ``read_response``, ``disconnect``, and its own ``_sock``, which ``recv`` a :class:`Wire` reply's bytes."""
 
     def __init__(self, server, resp=2):
         self.server, self.pending, self.resp = server, None, resp
+        self._sock = self
         # Its channels, and the messages published to them, waiting to be read.
         self.channels: set[str] = set()
         self.waiting: list = []
@@ -178,7 +184,18 @@ class FakeWire:
             raise ValkeyConnectionError("Connection closed by server.")
         if isinstance(reply, Error):
             raise ResponseError(str(reply))
+        if isinstance(reply, Wire):
+            reader = libvalkey.Reader(protocolError=InvalidResponse, replyError=ResponseError)
+            reader.feed(reply)
+            return reader.gets()
         return reply
+
+    def settimeout(self, timeout):
+        pass
+
+    def recv(self, size):
+        pending, self.pending = self.pending, None
+        return bytes(self.server.build.replies.get(pending, b""))[:size] if pending is not None else b""
 
     def disconnect(self):
         pass
@@ -732,6 +749,29 @@ def test_a_connection_a_live_server_closed_is_its_answer_and_opens_anew(builds, 
     assert BUILDS[builds["candidate"]].connections == 3
 
 
+def test_a_reply_the_client_cannot_parse_is_a_protocol_error_with_its_bytes_on_either_build(builds):
+    BUILDS[builds["candidate"]].replies = {("ZSCORE", "z", "m"): Wire(b",abc\r\n")}
+    commands = [{"command": ["SELECT", 3]}, {"command": ["ZSCORE", "z", "m"]}, {"command": ["PING"]}]
+    result, value = run(builds, commands, resp=3)
+
+    assert result.status.value == "FAIL", result.summary
+    assert result.summary == "command 1 (ZSCORE z m) got a reply the client cannot parse: Bad double value"
+    broken = {"protocol_error": "Bad double value", "raw": ",abc\\r\\n"}
+    assert to_plain_data(result.diagnostics) == {
+        "reason": "protocol-error",
+        "commands": [{"index": 1, "command": "ZSCORE z m", **broken}],
+    }
+    assert _replies(value["candidate"]) == [{"reply": "OK"}, broken, {"reply": "OK"}]
+    # Sent again on a fresh connection in the same database, then the next command on another one.
+    assert BUILDS[builds["candidate"]].sent[-3:] == [("SELECT", "3"), ("ZSCORE", "z", "m"), ("PING",)]
+    assert BUILDS[builds["candidate"]].connections == 3
+
+    # The same malformed reply on the parent is still a finding.
+    BUILDS[builds["parent"]].replies = dict(BUILDS[builds["candidate"]].replies)
+    result, _ = run(builds, commands, resp=3)
+    assert result.status.value == "FAIL" and result.diagnostics["reason"] == "protocol-error"
+
+
 # ---------------------------------------------------------------------------
 # Connections and Pub/Sub
 # ---------------------------------------------------------------------------
@@ -879,6 +919,30 @@ def test_without_compare_with_a_wrong_reply_fails_and_no_reply_is_untested(build
     assert actions.CommandsAction().run(context, spec).status.value == "FAIL"
     spec = _spec(commands=[{"command": ["PING"]}])
     assert actions.CommandsAction().run(context, spec).status.value == "ERROR"
+
+
+def test_without_compare_with_a_reply_the_client_cannot_parse_fails(builds):
+    handle = FakeHandle()
+    SERVERS["127.0.0.1:7000"] = FakeServer(builds["candidate"])
+    BUILDS[builds["candidate"]].replies = {("ZSCORE", "z", "m"): Wire(b",abc\r\n")}
+    spec = _spec(resp=3, commands=[{"command": ["ZSCORE", "z", "m"]}, {"command": ["PING"]}])
+    context = FakeContext(spec, services={"valkey.deployment": handle})
+    result = actions.CommandsAction().run(context, spec)
+
+    assert result.status.value == "FAIL", result.summary
+    assert to_plain_data(result.diagnostics) == {
+        "reason": "protocol-error",
+        "commands": [
+            {
+                "instance_id": "valkey-0",
+                "index": 0,
+                "command": "ZSCORE z m",
+                "protocol_error": "Bad double value",
+                "raw": ",abc\\r\\n",
+            }
+        ],
+    }
+    assert to_plain_data(result.evidence[0].value)["candidate"]["replies"][1] == {"index": 1, "reply": "OK"}
 
 
 # ---------------------------------------------------------------------------
