@@ -161,6 +161,22 @@ def test_raw_bytes_are_answered_or_left_unanswered():
     assert value["candidate"]["replies"][-1] == {"index": 4, "no_reply": True}
 
 
+@pytest.mark.parametrize("resp", [2, 3])
+def test_a_subscriber_on_its_own_connection_reads_what_was_published(resp):
+    commands = [
+        {"command": ["SUBSCRIBE", "news"], "connection": "sub", "expect": {"equals": ["subscribe", "news", 1]}},
+        {"command": ["PUBLISH", "news", "hi"], "expect": {"equals": 1}},
+        {"read": True, "connection": "sub", "expect": {"equals": [["message", "news", "hi"]]}},
+        # Bytes the server holds stay on their own connection; the main one goes on.
+        {"raw": "*2\r\n$4\r\nECHO\r\n", "connection": "raw"},
+        {"command": ["PING"], "expect": {"equals": "PONG"}},
+    ]
+    result, value = run(BINARY, commands, compare_with=BINARY, resp=resp)
+
+    assert result.status.value == "PASS", result.summary
+    assert value["candidate"]["replies"][3] == {"index": 3, "no_reply": True}
+
+
 @needs_lset_builds
 @pytest.mark.parametrize("resp", [2, 3])
 def test_the_lset_example_reaches_the_change_on_the_fix_and_its_parent(tmp_path, resp):

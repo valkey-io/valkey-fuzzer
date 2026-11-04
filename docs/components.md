@@ -343,7 +343,8 @@ record per reply.
 ### `valkey.action.commands`
 
 Sends a command sequence on one connection, so `MULTI`/`EXEC`, `WATCH`,
-`SELECT`, and client state span the commands, and with `compare_with`
+`SELECT`, and client state span the commands (a command may name another
+connection, for a subscriber or a second client), and with `compare_with`
 compares every reply with the same sequence on another build; with `modules`
 and `modules_parent`, on another build of a module.
 
@@ -381,8 +382,10 @@ Each command has:
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `command` | list of strings, numbers, or `!!binary` values | | A `!!binary` argument is sent as bytes (it loads as `{$base64: ...}`). A string argument may hold placeholders, below. |
-| `raw` | string or `!!binary` value | | Instead of `command`: bytes sent as they are, a string as UTF-8 (placeholders replaced), for the inline protocol and malformed requests: `raw: "SET k v\0 EX 100\r\n"`. One reply is read; when none begins within a second (the bytes are not a whole request, or the server holds them), the command is recorded as `{no_reply: true}`: an `expect` sees a null reply, and it compares unequal to any reply. A further reply stays on the connection for the next command to read, and bytes the server left unanswered stay in its buffer, so send raw bytes last on their connection. |
+| `raw` | string or `!!binary` value | | Instead of `command`: bytes sent as they are, a string as UTF-8 (placeholders replaced), for the inline protocol and malformed requests: `raw: "SET k v\0 EX 100\r\n"`. One reply is read; when none begins within a second (the bytes are not a whole request, or the server holds them), the command is recorded as `{no_reply: true}`: an `expect` sees a null reply, and it compares unequal to any reply. A further reply stays on the connection for the next command (or a `read`), and bytes the server left unanswered stay in its buffer, so send raw bytes on a `connection` of their own. |
+| `read` | boolean | `false` | Instead of `command`: read the replies waiting on the connection, and each that begins within a second of the last, as one list (an error among them as `{$error: ...}`); for Pub/Sub messages and RESP3 pushes such as client-side caching invalidations. An empty list when none came. |
 | `node` | integer | 0 | The node the command goes to, by index; less than `nodes`. |
+| `connection` | string | `main` | The connection to the node it goes on. Every other name opens a connection of its own on first use, which keeps its state (a `SUBSCRIBE`, a `CLIENT TRACKING`, bytes `raw` left unanswered) apart from the main one. `SUBSCRIBE`, `PSUBSCRIBE`, and `SSUBSCRIBE` go on a named connection, one channel each, and so do their unsubscribing commands (one channel each, on any connection): every channel is confirmed by a reply of its own. |
 | `wait_s` | number, 0.1 to 3600, or null | `null` | Send the command again every 0.1 s until its reply meets `expect`, for this long at most: for asynchronous work the sequence started, such as `[GET, k]` on the target node until a slot migration (`CLUSTER MIGRATESLOTS`) finished, or `[INFO, replication]` until `master_link_status:up`. Its last reply is recorded, judged, and compared like any other, so a candidate that never meets `expect` violates it. Needs `expect`. |
 | `expect` | mapping or null | `null` | A [predicate](#predicates) on the reply (`equals` also takes a list or a mapping, compared as JSON data), or `{error: true}`, `{error: false}`, or `{error: "<substring>"}`. `null` accepts any reply that is not an error. |
 | `expect_difference` | boolean | `false` | The change under test means this reply to differ from the parent's: the command the change is in, or a later read it carries into. Needs `expect` and `compare_with`. |
@@ -443,7 +446,9 @@ violated reply, `ERROR` on a command with no reply.
 Refused when the scenario compiles, naming the command: `SHUTDOWN`; `DEBUG
 RESTART`, `DEBUG CRASH-AND-RECOVER`, `DEBUG RELOAD`, and `DEBUG SLEEP` longer
 than `timeout_s`; `MODULE LOAD`, `LOADEX`, `UNLOAD`; `CONFIG SET` of an option
-the deployment manages; `MONITOR`, `SUBSCRIBE`, `PSUBSCRIBE`, `SSUBSCRIBE`.
+the deployment manages; `MONITOR`; `SUBSCRIBE`, `PSUBSCRIBE`, and
+`SSUBSCRIBE` on the main connection, and those and their unsubscribing
+commands with other than one channel.
 The private servers are disposable, so `DEBUG SEGFAULT` and friends are
 allowed and simply crash the server they are sent to (a candidate crash is a
 `FAIL`, which is what such a test means); `REPLICAOF`, `CLUSTER`, `SYNC`,

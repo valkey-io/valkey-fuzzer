@@ -30,7 +30,8 @@ class Error(str):
 class Build:
     """A fake valkey-server build: the options it rejects at start, and its reply to each command, keyed by
     the arguments as sent (strings, or bytes for a binary argument; raw bytes as they are); an unlisted command
-    gets ``OK`` (CLUSTER MYID the server's ID, CLUSTER INFO a state ok knowing every server of the build). A
+    gets ``OK`` (CLUSTER MYID the server's ID, CLUSTER INFO a state ok knowing every server of the build;
+    SUBSCRIBE and PUBLISH work, on the connections of one server). A
     reply may be an :class:`Error`, :data:`DIE` (the server exits without answering), :data:`TIMEOUT`,
     :data:`SILENT` (no reply begins), or a function of the :class:`FakeServer` that returns the reply."""
 
@@ -67,6 +68,7 @@ class FakeServer:
         self.id = hashlib.sha1(self.workdir.encode()).hexdigest()
         self.port = int(self.option("port") or 0)
         self.sent: list[tuple] = []
+        self.wires: list[FakeWire] = []
         self.socket_path = os.path.join(self.workdir, "s.sock")
         self.log_path = os.path.join(self.workdir, "server.log")
         self.output_path = os.path.join(self.workdir, "output.log")
@@ -99,11 +101,16 @@ class FakeServer:
 
 
 class FakeWire:
-    """A valkey-py connection to one fake server: ``send_command``, ``read_response``, ``disconnect``."""
+    """A valkey-py connection to one fake server: ``send_command``, ``send_packed_command``, ``can_read``,
+    ``read_response``, ``disconnect``."""
 
     def __init__(self, server):
         self.server, self.pending = server, None
+        # Its channels, and the messages published to them, waiting to be read.
+        self.channels: set[str] = set()
+        self.waiting: list = []
         server.build.connections += 1
+        server.wires.append(self)
 
     def send_command(self, *args):
         self.pending = tuple(item if isinstance(item, bytes) else str(item) for item in args)
@@ -116,15 +123,28 @@ class FakeWire:
         self.server.sent.append(self.pending)
 
     def can_read(self, timeout=0):
+        if self.pending is None:
+            return bool(self.waiting)
         return self.server.build.replies.get(self.pending) != SILENT
 
-    def read_response(self):
+    def read_response(self, push_request=False):
+        if self.pending is None:
+            return self.waiting.pop(0)
+        pending, self.pending = self.pending, None
         known = len(_nodes(self.server.build))
         defaults = {
             ("CLUSTER", "MYID"): self.server.id.encode(),
             ("CLUSTER", "INFO"): f"cluster_state:ok\r\ncluster_known_nodes:{known}\r\n".encode(),
         }
-        reply = self.server.build.replies.get(self.pending, defaults.get(self.pending, b"OK"))
+        if pending[0] == "SUBSCRIBE":
+            self.channels.add(pending[1])
+            defaults[pending] = [b"subscribe", pending[1].encode(), len(self.channels)]
+        if pending[0] == "PUBLISH":
+            receivers = [wire for wire in self.server.wires if pending[1] in wire.channels]
+            for wire in receivers:
+                wire.waiting.append([b"message", pending[1].encode(), pending[2].encode()])
+            defaults[pending] = len(receivers)
+        reply = self.server.build.replies.get(pending, defaults.get(pending, b"OK"))
         if callable(reply):
             reply = reply(self.server)
         if reply == DIE:
@@ -639,6 +659,43 @@ def test_raw_bytes_no_reply_answers_violate_the_candidates_expect(builds):
 
 
 # ---------------------------------------------------------------------------
+# Connections and Pub/Sub
+# ---------------------------------------------------------------------------
+
+
+def test_a_named_connection_opens_on_first_use_and_a_read_takes_what_waits_on_it(builds):
+    commands = [
+        {"command": ["SUBSCRIBE", "news"], "connection": "sub", "expect": {"equals": ["subscribe", "news", 1]}},
+        {"command": ["PUBLISH", "news", "hi"], "expect": {"equals": 1}},
+        {"command": ["PUBLISH", "news", "again"]},
+        {
+            "read": True,
+            "connection": "sub",
+            "expect": {"equals": [["message", "news", "hi"], ["message", "news", "again"]]},
+        },
+        {"read": True, "connection": "sub", "expect": {"equals": []}},
+        {"read": True, "connection": "idle"},
+    ]
+    result, value = run(builds, commands)
+
+    assert result.status.value == "PASS", result.summary
+    for build in BUILDS.values():
+        assert build.connections == 3
+        (server,) = _nodes(build)
+        main, sub, _ = server.wires
+        assert sub.channels == {"news"} and not main.channels
+    assert _replies(value["candidate"])[5] == {"reply": []}
+
+
+def test_a_summary_names_a_commands_connection_and_node(builds):
+    BUILDS[builds["candidate"]].replies = {("SUBSCRIBE", "news"): Error("ERR no")}
+    result, _ = run(builds, [{"command": ["SUBSCRIBE", "news"], "connection": "sub", "node": 1}], nodes=2)
+
+    assert result.status.value == "FAIL"
+    assert result.summary.startswith("command 0 (SUBSCRIBE news on connection sub on node 1) replied")
+
+
+# ---------------------------------------------------------------------------
 # Without compare_with: the deployment's instances
 # ---------------------------------------------------------------------------
 
@@ -667,14 +724,15 @@ def test_without_compare_with_the_sequence_runs_on_each_selected_instance(builds
     for instance in handle.instances:
         SERVERS[f"{instance.host}:{instance.port}"] = FakeServer(builds["candidate"])
     BUILDS[builds["candidate"]].replies = {("DBSIZE",): 3}
-    spec = _spec(instances="all", commands=[{"command": ["PING"]}, {"command": ["DBSIZE"], "expect": {"min": 1}}])
+    commands = [{"command": ["PING"]}, {"command": ["DBSIZE"], "expect": {"min": 1}, "connection": "other"}]
+    spec = _spec(instances="all", commands=commands)
     context = FakeContext(spec, services={"valkey.deployment": handle})
     result = actions.CommandsAction().run(context, spec)
 
     assert result.status.value == "PASS", result.summary
     assert [item.value["instance_id"] for item in result.evidence] == ["valkey-0", "valkey-1"]
     assert all(item.value["parent"] is None and item.value["cluster"] is False for item in result.evidence)
-    assert BUILDS[builds["candidate"]].connections == 2
+    assert BUILDS[builds["candidate"]].connections == 4
     assert not BUILDS[builds["candidate"]].starts
 
 
@@ -702,11 +760,11 @@ _PARENT = {"compare_with": "/opt/parent/valkey-server"}
     [
         ({"commands": []}, "at least one command"),
         ({"commands": [{"command": []}]}, r"commands\[0\]\.command must be a non-empty list"),
-        ({"commands": [{"expect": {"equals": 1}}]}, r"commands\[0\] needs one of command and raw"),
-        ({"commands": [{"command": ["PING"], "raw": "PING\r\n"}]}, r"commands\[0\] needs one of command and raw"),
+        ({"commands": [{"expect": {"equals": 1}}]}, r"commands\[0\] needs one of command, raw, and read"),
+        ({"commands": [{"command": ["PING"], "raw": "PING\r\n"}]}, r"commands\[0\] needs one of command, raw, and read"),
         ({"commands": [{"raw": ""}]}, r"commands\[0\]\.raw must be a non-empty string or a !!binary value"),
         ({"commands": [{"raw": {"x": 1}}]}, r"commands\[0\]\.raw must be a non-empty string"),
-        ({"commands": [{"raw": "PING\r\n", "wait_s": 1, "expect": {"equals": "PONG"}}]}, "wait_s sends a command again; raw bytes are sent once"),
+        ({"commands": [{"raw": "PING\r\n", "wait_s": 1, "expect": {"equals": "PONG"}}]}, "wait_s sends a command again; raw bytes and a read happen once"),
         ({**_PARENT, "commands": [{"raw": "CLUSTER SETSLOT 1 NODE <node.0.id>\r\n"}]}, r"<node\.0\.id> needs cluster"),
         ({"commands": [{"command": ["SET", "k", True]}]}, r"commands\[0\]\.command must be a non-empty list"),
         ({"commands": [{"command": ["PING"], "expect": {}}]}, "needs one predicate"),
@@ -737,9 +795,14 @@ _PARENT = {"compare_with": "/opt/parent/valkey-server"}
         ({**_PARENT, "commands": [{"command": ["MODULE", "UNLOAD", "x"]}]}, "MODULE UNLOAD is refused"),
         ({**_PARENT, "commands": [{"command": ["CONFIG", "SET", "maxmemory", "1mb", "Dir", "/x"]}]}, "CONFIG SET is refused: dir is an option the harness manages"),
         ({**_PARENT, "commands": [{"command": ["MONITOR"]}]}, "MONITOR is refused: it holds the connection"),
-        ({**_PARENT, "commands": [{"command": ["SUBSCRIBE", "c"]}]}, "SUBSCRIBE is refused"),
-        ({**_PARENT, "commands": [{"command": ["PSUBSCRIBE", "c*"]}]}, "PSUBSCRIBE is refused"),
-        ({**_PARENT, "commands": [{"command": ["SSUBSCRIBE", "c"]}]}, "SSUBSCRIBE is refused"),
+        ({**_PARENT, "commands": [{"command": ["SUBSCRIBE", "c"]}]}, "SUBSCRIBE is refused on the main connection, which it would hold; send it on a connection of its own"),
+        ({**_PARENT, "commands": [{"command": ["PSUBSCRIBE", "c*"], "connection": "main"}]}, "PSUBSCRIBE is refused on the main connection"),
+        ({**_PARENT, "commands": [{"command": ["SSUBSCRIBE", "c"]}]}, "SSUBSCRIBE is refused on the main connection"),
+        ({**_PARENT, "commands": [{"command": ["SUBSCRIBE", "a", "b"], "connection": "sub"}]}, r"commands\[0\]: SUBSCRIBE takes one channel: each is confirmed by a reply of its own"),
+        ({**_PARENT, "commands": [{"command": ["UNSUBSCRIBE"]}]}, "UNSUBSCRIBE takes one channel"),
+        ({"commands": [{"read": True, "command": ["PING"]}]}, r"commands\[0\] needs one of command, raw, and read"),
+        ({"commands": [{"read": True, "wait_s": 1, "expect": {"equals": 1}}]}, "wait_s sends a command again"),
+        ({"commands": [{"command": ["PING"], "connection": ""}]}, r"commands\[0\]\.connection must name a connection"),
         ({"commands": [{"command": ["REPLICAOF", "NO", "ONE"]}]}, "REPLICAOF is refused: it changes the deployment's topology"),
         ({"commands": [{"command": ["CLUSTER", "RESET"]}]}, "CLUSTER RESET is refused"),
         ({"commands": [{"command": ["REPLCONF", "ACK", 0]}]}, "REPLCONF is refused"),

@@ -154,11 +154,15 @@ _SEQUENCE_EXPECT = {
 }
 _SEQUENCE_COMMAND = mapping_of(
     {
-        # A command, or raw: bytes sent as they are (a string as UTF-8, or !!binary), for the protocol parser.
+        # A command; or raw: bytes sent as they are (a string as UTF-8, or !!binary), for the protocol parser; or
+        # read: the replies waiting on the connection (Pub/Sub messages, pushes).
         "command": ConfigField(list, allow_none=True, default=None),
         "raw": ConfigField((str, dict), allow_none=True, default=None),
-        # The node it goes to, by index (see nodes).
+        "read": ConfigField(bool, default=False),
+        # The node it goes to, by index (see nodes), and the connection to it, opened on first use; main is the one
+        # every command takes unless it names another.
         "node": ConfigField(int, default=0, minimum=0, maximum=_MAX_NODES - 1),
+        "connection": ConfigField(str, default="main"),
         "expect": mapping_of(_SEQUENCE_EXPECT, allow_none=True, default=None),
         # Send the command again until its reply meets expect, for this long at most: for asynchronous work the
         # sequence started (a slot migration, a replica's sync). Its last reply is the one recorded.
@@ -193,13 +197,11 @@ _COMMANDS_FIELDS = {
 }
 
 # Refused in every sequence: they end or restart the server the sequence talks to, or hold its connection.
-_REFUSED = {
-    "SHUTDOWN": "it stops the server",
-    "MONITOR": "it holds the connection",
-    "SUBSCRIBE": "it holds the connection",
-    "PSUBSCRIBE": "it holds the connection",
-    "SSUBSCRIBE": "it holds the connection",
-}
+_REFUSED = {"SHUTDOWN": "it stops the server", "MONITOR": "it holds the connection"}
+# Refused on the main connection, which they would hold; allowed on a named one. Each channel of these and of the
+# unsubscribing commands is confirmed by a reply of its own, so they take one each.
+_SUBSCRIBE = ("SUBSCRIBE", "PSUBSCRIBE", "SSUBSCRIBE")
+_UNSUBSCRIBE = ("UNSUBSCRIBE", "PUNSUBSCRIBE", "SUNSUBSCRIBE")
 _REFUSED_DEBUG = ("RESTART", "CRASH-AND-RECOVER", "RELOAD")
 _REFUSED_MODULE = ("LOAD", "LOADEX", "UNLOAD")
 # Refused on the deployment's instances, whose topology the deployment owns; allowed on the private servers.
@@ -314,19 +316,28 @@ def _validate_commands(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -
         raise ConfigError("commands must list at least one command")
     for index, item in enumerate(config["commands"]):
         where = f"commands[{index}]"
-        if (item["command"] is None) == (item["raw"] is None):
-            raise ConfigError(f"{where} needs one of command and raw")
+        if [item["command"] is not None, item["raw"] is not None, item["read"]].count(True) != 1:
+            raise ConfigError(f"{where} needs one of command, raw, and read")
+        if not item["connection"]:
+            raise ConfigError(f"{where}.connection must name a connection")
+        if item["wait_s"] is not None and item["command"] is None:
+            raise ConfigError(f"{where}: wait_s sends a command again; raw bytes and a read happen once")
         if item["raw"] is not None:
             if not item["raw"] or not (isinstance(item["raw"], str) or _is_binary(item["raw"])):
                 raise ConfigError(f"{where}.raw must be a non-empty string or a !!binary value")
-            if item["wait_s"] is not None:
-                raise ConfigError(f"{where}: wait_s sends a command again; raw bytes are sent once")
-        else:
+        elif item["command"] is not None:
             words = _validate_sequence_command(item["command"], f"{where}.command")
             refused = _refusal(words, config["timeout_s"], not compared)
             if refused is not None:
                 named = " ".join(words[:2]) if words[0] in _CONTAINER_COMMANDS and len(words) > 1 else words[0]
                 raise ConfigError(f"{where}: {named} is refused: {refused}")
+            if words[0] in _SUBSCRIBE and item["connection"] == "main":
+                raise ConfigError(
+                    f"{where}: {words[0]} is refused on the main connection, which it would hold; "
+                    "send it on a connection of its own (connection: <name>)"
+                )
+            if words[0] in (*_SUBSCRIBE, *_UNSUBSCRIBE) and len(words) != 2:
+                raise ConfigError(f"{where}: {words[0]} takes one channel: each is confirmed by a reply of its own")
         if item["node"] >= config["nodes"]:
             raise ConfigError(f"{where}.node is {item['node']}, but each side runs on {config['nodes']} node(s)")
         _validate_placeholders(item["command"] or [item["raw"]], where, config, compared)
@@ -403,12 +414,29 @@ class RawConnection:
 
         return self._exchange(lambda: self.connection.send_packed_command([data]), wait_s=_NO_REPLY_S)
 
+    def read_waiting(self) -> dict[str, Any]:
+        """Every reply waiting on the connection, and each that begins within a second of the last (Pub/Sub
+        messages, RESP3 pushes): ``{"reply": [...]}``, an error among them as ``{"$error": ...}``; or a lost
+        connection as :meth:`send` records it."""
+
+        replies: list[Any] = []
+        try:
+            while self.connection.can_read(timeout=_NO_REPLY_S):
+                try:
+                    replies.append(raw_reply(self.connection.read_response(push_request=True)))
+                except valkey.exceptions.ResponseError as exc:
+                    replies.append(raw_reply(exc))
+        except (valkey.exceptions.ConnectionError, valkey.exceptions.TimeoutError, OSError) as exc:
+            return {"error": f"{type(exc).__name__}: {exc}", "unanswered": True}
+        return {"reply": replies}
+
     def _exchange(self, write: Any, wait_s: Optional[float] = None) -> dict[str, Any]:
         try:
             write()
             if wait_s is not None and not self.connection.can_read(timeout=wait_s):
                 return {"no_reply": True}
-            return {"reply": raw_reply(self.connection.read_response())}
+            # A RESP3 push (a SUBSCRIBE's confirmation) is a reply too, not one for valkey-py to handle.
+            return {"reply": raw_reply(self.connection.read_response(push_request=True))}
         except valkey.exceptions.ResponseError as exc:
             return {"error": str(exc)}
         except (valkey.exceptions.ConnectionError, valkey.exceptions.TimeoutError, OSError) as exc:
@@ -454,7 +482,12 @@ def _run_sequence(target: Any, commands: Sequence[Mapping[str, Any]], context: A
 def _run_step(target: Any, item: Mapping[str, Any], context: Any) -> dict[str, Any]:
     """One command of a sequence on ``target``: its record, with ``wait_s`` the last of its attempts."""
 
-    connection = target.connection(item["node"])
+    try:
+        connection = target.connection(item["node"], item["connection"])
+    except (valkey.exceptions.ValkeyError, OSError) as exc:
+        return {"error": f"cannot connect: {type(exc).__name__}: {exc}", "unanswered": True}
+    if item["read"]:
+        return target.mask(connection.read_waiting())
     if item["raw"] is not None:
         raw = item["raw"]
         return target.mask(connection.send_raw(_argument(raw) if _is_binary(raw) else target.substitute(raw).encode()))
@@ -536,21 +569,33 @@ def _command_text(command: Sequence[Any]) -> str:
 def _step_text(item: Mapping[str, Any]) -> str:
     """A command of a sequence as a summary names it."""
 
-    if item["raw"] is not None:
+    if item["read"]:
+        text = "read"
+    elif item["raw"] is not None:
         text = "raw <binary>" if _is_binary(item["raw"]) else f"raw {json.dumps(item['raw'])}"
     else:
         text = _command_text(item["command"])
+    if item["connection"] != "main":
+        text += f" on connection {item['connection']}"
     return text + (f" on node {item['node']}" if item["node"] else "")
 
 
 class _Instance:
-    """A deployment instance a sequence runs on: one connection, and no placeholders."""
+    """A deployment instance a sequence runs on: its connections by name, opened on first use, and no
+    placeholders."""
 
-    def __init__(self, connection: RawConnection):
-        self.main = connection
+    def __init__(self, connect: Any):
+        self.connect = connect
+        self.connections = {"main": connect()}
 
-    def connection(self, node: int) -> RawConnection:
-        return self.main
+    def connection(self, node: int, name: str) -> RawConnection:
+        if name not in self.connections:
+            self.connections[name] = self.connect()
+        return self.connections[name]
+
+    def close(self) -> None:
+        for connection in self.connections.values():
+            connection.close()
 
     def substitute(self, argument: Any) -> Any:
         return argument
@@ -560,7 +605,7 @@ class _Instance:
 
 
 class _Node:
-    """One private server of a side: its address options, the server, its connection, its kept logs."""
+    """One private server of a side: its address options, the server, its connections by name, its kept logs."""
 
     def __init__(self, name: str):
         # The prefix of its kept logs: the side's label, with the node's index when the side has several.
@@ -568,7 +613,7 @@ class _Node:
         self.options: dict[str, Any] = {}
         self.server: Any = None
         self.owned: Any = None
-        self.connection: Optional[RawConnection] = None
+        self.connections: dict[str, RawConnection] = {}
         # Its cluster node ID, with cluster.
         self.id: Optional[str] = None
         self.logs: list[str] = []
@@ -578,8 +623,10 @@ class _Side:
     """One build's side of a compared sequence: its private servers (nodes), started, owned until stopped, their
     logs kept, and the placeholders that name them."""
 
-    def __init__(self, label: str, binary: str, nodes: int):
+    def __init__(self, label: str, binary: str, nodes: int, resp: int, timeout_s: float):
         self.label, self.binary = label, binary
+        # The protocol and client timeout of every connection.
+        self.resp, self.timeout_s = resp, timeout_s
         # The server options of this side's nodes (cluster mode, modules), beside the shared server_config.
         self.options: dict[str, Any] = {}
         self.nodes = [_Node(label if nodes == 1 else f"{label}.node{index}") for index in range(nodes)]
@@ -593,13 +640,11 @@ class _Side:
         self.names: dict[str, str] = {}
         self.pattern: Optional[re.Pattern] = None
 
-    def start(
-        self, context: Any, spec: ComponentSpec, server_config: Mapping[str, Any], resp: int, timeout_s: float
-    ) -> str:
-        """Start every node with ``server_config`` and its options, and connect; what went wrong, or an empty
-        string."""
+    def start(self, context: Any, spec: ComponentSpec, server_config: Mapping[str, Any]) -> str:
+        """Start every node with ``server_config`` and its options, and open its main connection; what went wrong,
+        or an empty string."""
 
-        for node in self.nodes:
+        for index, node in enumerate(self.nodes):
             arguments = server_arguments({**server_config, **self.options, **node.options})
             node.server = PrivateServer(self.binary, arguments, timeout_s=_START_TIMEOUT_S, prefix="vfc-")
             node.owned = context.obligations.open(spec, "process.private-server", node.server.workdir, node.server.stop)
@@ -611,9 +656,9 @@ class _Side:
             if exit_output is not None:
                 return f"the {node.name} server exited at startup: {exit_output[-500:]}"
             try:
-                node.connection = open_raw_connection(resp, timeout_s, path=node.server.socket_path)
+                self.connection(index, "main")
             except (valkey.exceptions.ValkeyError, OSError) as exc:
-                return f"cannot connect to the {node.name} server with RESP{resp}: {type(exc).__name__}: {exc}"
+                return f"cannot connect to the {node.name} server with RESP{self.resp}: {type(exc).__name__}: {exc}"
         return ""
 
     def form_cluster(self, context: Any, timeout_s: float) -> Optional[str]:
@@ -621,16 +666,16 @@ class _Side:
         its state ok; why that did not happen, or None. Each node's ID is recorded."""
 
         first = self.nodes[0]
-        added = first.connection.send(["CLUSTER", "ADDSLOTSRANGE", "0", "16383"])
+        added = first.connections["main"].send(["CLUSTER", "ADDSLOTSRANGE", "0", "16383"])
         if "reply" not in added:
             return f"the {first.name} server: CLUSTER ADDSLOTSRANGE failed: {added.get('error')}"
         for node in self.nodes:
-            myid = node.connection.send(["CLUSTER", "MYID"])
+            myid = node.connections["main"].send(["CLUSTER", "MYID"])
             if "reply" not in myid:
                 return f"the {node.name} server: CLUSTER MYID failed: {myid.get('error')}"
             node.id = str(myid["reply"])
         for node in self.nodes[1:]:
-            met = node.connection.send(
+            met = node.connections["main"].send(
                 ["CLUSTER", "MEET", "127.0.0.1", first.options["port"], first.options["cluster-port"]]
             )
             if "reply" not in met:
@@ -638,7 +683,7 @@ class _Side:
         for node in self.nodes:
 
             def formed(node: _Node = node) -> tuple[bool, Any]:
-                info = node.connection.send(["CLUSTER", "INFO"])
+                info = node.connections["main"].send(["CLUSTER", "INFO"])
                 fields = dict(line.split(":", 1) for line in str(info.get("reply", "")).split() if ":" in line)
                 ready = fields.get("cluster_state") == "ok" and fields.get("cluster_known_nodes") == str(
                     len(self.nodes)
@@ -673,10 +718,11 @@ class _Side:
             alternatives = "|".join(re.escape(value) for value in sorted(self.names, key=len, reverse=True))
             self.pattern = re.compile(f"(?<![0-9A-Za-z])(?:{alternatives})(?![0-9A-Za-z])")
 
-    def connection(self, node: int) -> RawConnection:
-        connection = self.nodes[node].connection
-        assert connection is not None
-        return connection
+    def connection(self, node: int, name: str) -> RawConnection:
+        connections = self.nodes[node].connections
+        if name not in connections:
+            connections[name] = open_raw_connection(self.resp, self.timeout_s, path=self.nodes[node].server.socket_path)
+        return connections[name]
 
     def substitute(self, argument: Any) -> Any:
         """``argument`` with every placeholder in it replaced by this side's value."""
@@ -705,8 +751,8 @@ class _Side:
         """Note whether a node exited (a lost connection waits for its node), keep every node's logs, stop them."""
 
         for node in self.nodes:
-            if node.connection is not None:
-                node.connection.close()
+            for connection in node.connections.values():
+                connection.close()
         if self.replies and self.replies[-1].get("unanswered"):
             lost = self.nodes[commands[self.replies[-1]["index"]]["node"]].server
             if lost is not None and lost.process is not None:
@@ -783,15 +829,17 @@ class CommandsAction:
         for instance_id in select_instances(handle, config["instances"]):
             instance = handle.instance(instance_id)
             try:
-                connection = open_raw_connection(
-                    config["resp"], config["timeout_s"], host=instance.host, port=instance.port
+                target = _Instance(
+                    functools.partial(
+                        open_raw_connection, config["resp"], config["timeout_s"], host=instance.host, port=instance.port
+                    )
                 )
             except (valkey.exceptions.ValkeyError, OSError) as exc:
                 return make_result(spec, ComponentStatus.ERROR, f"cannot connect to {instance_id}: {exc}")
             try:
-                replies = _run_sequence(_Instance(connection), config["commands"], context)
+                replies = _run_sequence(target, config["commands"], context)
             finally:
-                connection.close()
+                target.close()
             problems.extend(f"{instance_id}: {text}" for text in _violations(config["commands"], replies))
             unanswered.extend(f"{instance_id}: {text}" for text in _unanswered(config["commands"], replies))
             record = _record(config, _side(replies, config["commands"]), None, None, [], [], [])
@@ -813,8 +861,8 @@ class CommandsAction:
             )
         except OSError as exc:
             return make_result(spec, ComponentStatus.ERROR, str(exc))
-        candidate = _Side("candidate", candidate_binary, config["nodes"])
-        parent = _Side("parent", parent_binary, config["nodes"])
+        candidate = _Side("candidate", candidate_binary, config["nodes"], config["resp"], config["timeout_s"])
+        parent = _Side("parent", parent_binary, config["nodes"], config["resp"], config["timeout_s"])
         server_config = {**_PRIVATE_SERVER_DEFAULTS, **canonicalize_server_config(config["server_config"])}
         # Every node listens on a loopback port of its own (and a cluster bus port), so nodes can meet and replicate;
         # the sequence talks to it over its unix socket.
@@ -862,7 +910,7 @@ class CommandsAction:
 
         try:
             for server in (candidate, parent):
-                failed = server.start(context, spec, server_config, config["resp"], config["timeout_s"])
+                failed = server.start(context, spec, server_config)
                 if not failed and config["cluster"]:
                     failed = server.form_cluster(context, config["timeout_s"]) or ""
                 if failed:
