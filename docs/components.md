@@ -1,6 +1,6 @@
 # Valkey component reference
 
-The Valkey components in `valkey_fuzzer.components` are the 34 components,
+The Valkey components in `valkey_fuzzer.components` are the 35 components,
 9 generator hooks, and 3 providers on this page. Experiments configure them; how is in
 [Scenarios and experiments](scenarios-and-experiments.md#components).
 `valkey-fuzzer list components` and `valkey-fuzzer list generators` print what

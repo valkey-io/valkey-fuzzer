@@ -1,5 +1,5 @@
 """``valkey.action.tools`` without Valkey builds: two fake builds whose tools are one script that runs the
-steps its arguments name, and fake private servers behind the real ``_Server``, and the verdicts."""
+steps its arguments name, and fake private servers behind the real private-server side, and the verdicts."""
 
 import os
 import sys
@@ -224,7 +224,7 @@ def test_a_candidate_server_that_exits_is_a_fail(builds, monkeypatch):
     def run_then_die(side, index, item, timeout_s):
         ran(side, index, item, timeout_s)
         if side.label == "candidate":
-            side.server.server.die()
+            side.server.nodes[0].server.die()
 
     monkeypatch.setattr(tools._Side, "run", run_then_die)
     result, value, _ = run(builds, [cli("-p", "$port", "out:OK")], server=True)

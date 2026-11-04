@@ -21,7 +21,8 @@ from valkey_fuzzer.protocols import component_artifact_dir
 from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
 from valkey_fuzzer.schema import BASE64_KEY, ConfigError, ConfigField, plain_config
 
-from .actions import _PRIVATE_SERVER_DEFAULTS, _cluster_ready, _free_ports, _is_binary, _Server, _text
+from .actions import _PRIVATE_SERVER_DEFAULTS, _free_ports, _is_binary, _text
+from .actions import _Side as _ServerSide
 from .capabilities import resolve_binary
 from .oracles import CRASH_PATTERNS, crash_cause
 from .predicates import PREDICATE_FIELDS, compare, validate_predicate
@@ -125,7 +126,8 @@ class _Side:
 
     def __init__(self, label: str, binary: str, workdir: str):
         self.label, self.binary, self.workdir = label, binary, workdir
-        self.server: Optional[_Server] = None
+        # Its private server: a side of valkey.action.commands with one node.
+        self.server: Optional[_ServerSide] = None
         self.port: Optional[int] = None
         self.runs: list[dict[str, Any]] = []
         # Per run: (stdout, stderr) as bytes with the placeholders written back, for comparing.
@@ -140,7 +142,7 @@ class _Side:
 
         if self.server is None:
             return {}
-        return {"$port": str(self.port), "$socket": self.server.server.socket_path}
+        return {"$port": str(self.port), "$socket": self.server.nodes[0].server.socket_path}
 
     def run(self, index: int, run: Mapping[str, Any], timeout_s: float) -> None:
         values = self.values()
@@ -252,16 +254,16 @@ class ToolsAction:
                 ports = iter(_free_ports(4 if config["cluster"] else 2))
                 for side in sides:
                     side.port = next(ports)
-                    side.server = _Server(side.label, side.binary)
+                    side.server = _ServerSide(side.label, side.binary, 1, 2, config["timeout_s"])
                     # The loopback addresses, ::1 only where the host has it.
                     options = {"port": side.port, "bind": "127.0.0.1 -::1", "dir": side.workdir}
                     if config["cluster"]:
-                        options.update({"cluster-enabled": "yes", "cluster-port": next(ports)})
-                    side.server.options = options
-                    failed = side.server.start(context, spec, _PRIVATE_SERVER_DEFAULTS, 2, config["timeout_s"])
+                        options["cluster-port"] = next(ports)
+                        side.server.options["cluster-enabled"] = "yes"
+                    side.server.nodes[0].options = options
+                    failed = side.server.start(context, spec, _PRIVATE_SERVER_DEFAULTS, {})
                     if not failed and config["cluster"]:
-                        failed = _cluster_ready(side.server.connection, context, config["timeout_s"])
-                        failed = failed and f"the {side.label} server: {failed}"
+                        failed = side.server.form_cluster(context, config["timeout_s"]) or ""
                     if failed:
                         return make_result(spec, ComponentStatus.ERROR, failed)
             for side in sides:
@@ -272,7 +274,7 @@ class ToolsAction:
         finally:
             for side in sides:
                 if side.server is not None:
-                    side.server.finish(context, spec)
+                    side.server.finish(context, spec, ())
 
         reached, unexplained, unreached, disputed, violations = [], [], [], [], []
         for index, run in enumerate(runs[: min(len(candidate.runs), len(parent.runs))]):
