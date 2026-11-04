@@ -5,6 +5,11 @@ captured in a private server and checks that each is a consistent cut of the
 workload ledger's history;
 ``valkey.oracle.dataset-digest`` records a canonical digest of the live dataset
 for differential comparison.
+
+Both load the modules the deployment loads (its ``loadmodule``): a module's
+values are digested from their DUMP payloads (:func:`canonical_value`), which
+the digest oracle first checks the module writes the same way in every
+process.
 """
 
 import functools
@@ -27,15 +32,25 @@ from valkey_fuzzer.schema import ConfigError, ConfigField, plain_config
 from .compression import LOADED_COMPRESSED, RDB_STREAM_CODECS, rdb_format
 from .files import read_jsonl, write_jsonl
 from .instances import deployment, instance_at, is_cluster, stopped_on_purpose, unreachable_instances
-from .keyspace import keyspace_digest, keyspace_snapshot
+from .keyspace import BUILTIN_TYPES, dump_body, keyspace_digest, keyspace_snapshot
 from .ledger import LedgerModel, load_ledger, target_slot_ranges
 from .observers import read_log
 from .oracles import CRASH_PATTERNS
 from .polling import poll_each, poll_until, read_retrying
 from .registration import component_registration
-from .schemas import INTEGER, MAPPING, TEXT, declared, mapping_of
+from .schemas import INTEGER, LIST, MAPPING, TEXT, declared, mapping_of
 from .server import PrivateServer, server_arguments
 from .workloads import is_stable_key, list_digest
+
+
+def instance_modules(context: Any, instance_id: str) -> dict[str, Any]:
+    """``{"loadmodule": ...}`` as the deployment starts ``instance_id`` (its server config in the plan), or empty:
+    a private server that holds the instance's data needs its modules."""
+
+    instance = context.plan.instances.get(instance_id) or {}
+    modules = plain_config(instance.get("server_config") or {}).get("loadmodule")
+    return {} if modules is None else {"loadmodule": modules}
+
 
 # ---------------------------------------------------------------------------
 # valkey.oracle.rdb-snapshot — every captured RDB reloads with plausible data
@@ -319,7 +334,6 @@ class RdbSnapshotOracle:
         errors = []
         per_instance: dict[str, Any] = {}
         codec = RDB_STREAM_CODECS.get(config["expect_codec"])
-        load_options = {"arguments": server_arguments(config["load_config"])} if config["load_config"] else {}
         for result in results:
             instance_id = result["instance_id"]
             if result.get("capture_error"):
@@ -337,6 +351,9 @@ class RdbSnapshotOracle:
                 per_instance[instance_id] = {"loaded": False, "error": reason}
                 continue
             binary = config["load_binary"] or handle.binary(instance_id)
+            # The saving instance's modules, unless load_config loads its own.
+            load_config = {**instance_modules(context, instance_id), **config["load_config"]}
+            load_options = {"arguments": server_arguments(load_config)} if load_config else {}
             try:
                 content, error = load_rdb(
                     context, spec, binary, result["rdb_artifact"], config["timeout_s"], **load_options
@@ -462,6 +479,41 @@ class RdbSnapshotOracle:
 # valkey.oracle.dataset-digest — canonical digest of the live dataset
 # ---------------------------------------------------------------------------
 
+NONDETERMINISTIC = "this module's serialization is not deterministic across processes"
+# How long each private server of the determinism probe may take to start.
+_PROBE_START_TIMEOUT_S = 15.0
+
+
+def serialization_problem(
+    context: Any, spec: ComponentSpec, binary: str, server_config: Mapping[str, Any], payload: bytes
+) -> Optional[str]:
+    """Why a module type cannot be compared by its DUMP payload, or None.
+
+    ``payload`` is RESTOREd on two private servers of ``binary`` started with ``server_config`` (the
+    deployment's modules), and each DUMPs it: a module whose save writes, say, a hash table in iteration order
+    writes differently in each process, whose hash seed differs, and its digests would differ between replicas
+    holding the same data. Two different DUMPs are :data:`NONDETERMINISTIC`; a server that could not do it is
+    described. Each server is owned until it is stopped.
+    """
+
+    bodies = []
+    for _ in range(2):
+        server = PrivateServer(binary, server_arguments(server_config), timeout_s=_PROBE_START_TIMEOUT_S, prefix="vfd-")
+        owned = context.obligations.open(spec, "process.private-server", server.workdir, server.stop)
+        try:
+            # PrivateServer.start polls with time.sleep: not cancellable, but bounded by its timeout.
+            exit_output = server.start()
+            if exit_output is not None:
+                return f"the determinism probe's server exited at startup: {exit_output[-300:]}"
+            server.client.restore("probe", 0, payload)
+            bodies.append(dump_body(server.client.dump("probe")))
+        except (OSError, TimeoutError, valkey.exceptions.ValkeyError) as exc:
+            return f"the determinism probe could not RESTORE and DUMP a value: {type(exc).__name__}: {exc}"
+        finally:
+            owned.discharge()
+    return None if bodies[0] == bodies[1] else NONDETERMINISTIC
+
+
 _DIGEST_FIELDS = {
     "match": ConfigField(str, allow_none=True, default=None),
     "include_replicas": ConfigField(bool, default=False),
@@ -511,16 +563,25 @@ class DatasetDigestOracle:
             with handle.new_client(instance_id, timeout=10.0) as client:
                 return keyspace_snapshot(client, config["match"])
 
+        # One key of each module type, and the primary holding it: the determinism probe's sample.
+        samples: dict[str, tuple[str, str]] = {}
         for instance_id in primaries:
             snapshot, error = read_retrying(context, functools.partial(read_primary, instance_id), timeout_s=timeout_s)
             if error is not None:
                 errors.append(f"{instance_id}: {error}")
                 continue
+            for key, (kind, _) in sorted(snapshot.items()):
+                if kind not in BUILTIN_TYPES:
+                    samples.setdefault(kind, (instance_id, key))
             per_instance[instance_id] = {"keys": len(snapshot), "digest": keyspace_digest(snapshot)}
             duplicate = set(snapshot) & set(combined)
             if duplicate and cluster:
                 problems.append(f"{len(duplicate)} key(s) are held by more than one primary")
             combined.update(snapshot)
+        if not problems and not errors:
+            # Before any digest of a module type is judged: its values compare by digest only if every process
+            # serializes them the same way. One that does not is ERROR, never a FAIL across replicas.
+            errors.extend(self._module_problems(context, spec, handle, samples))
         replica_report = {}
         if config["include_replicas"] and not problems and not errors:
 
@@ -573,6 +634,8 @@ class DatasetDigestOracle:
             "primaries": per_instance,
             "replicas": replica_report,
             "listing": listing_path,
+            # The module types digested by their DUMP payloads, each probed deterministic.
+            "module_types": sorted(samples),
         }
         if problems:
             return make_result(
@@ -591,6 +654,31 @@ class DatasetDigestOracle:
             ),
         )
 
+    @staticmethod
+    def _module_problems(
+        context: Any, spec: ComponentSpec, handle: Any, samples: Mapping[str, tuple[str, str]]
+    ) -> list[str]:
+        """Why the module types in ``samples`` cannot be compared by digest: one key of each, DUMPed from its
+        primary, is probed with :func:`serialization_problem` on the primary's binary and modules."""
+
+        found = []
+        for kind, (instance_id, key) in sorted(samples.items()):
+            try:
+                with handle.new_client(instance_id, timeout=10.0) as client:
+                    payload = client.dump(key)
+            except (valkey.exceptions.ValkeyError, OSError) as exc:
+                found.append(f"{kind}: cannot DUMP {key!r} on {instance_id}: {type(exc).__name__}: {exc}")
+                continue
+            if payload is None:
+                found.append(f"{kind}: {key!r} was gone from {instance_id} before its DUMP could be probed")
+                continue
+            problem = serialization_problem(
+                context, spec, handle.binary(instance_id), instance_modules(context, instance_id), payload
+            )
+            if problem is not None:
+                found.append(f"{kind}: {problem}, so its values cannot be compared by digest")
+        return found
+
 
 _RDB_DECLARES = Declarations(
     evidence={
@@ -603,9 +691,19 @@ _RDB_DECLARES = Declarations(
 _DIGEST_DECLARES = Declarations(
     evidence={
         "valkey.dataset.digest": declared(
-            mapping_of({"digest": TEXT, "keys": INTEGER, "primaries": MAPPING, "replicas": MAPPING, "listing": TEXT})
+            mapping_of(
+                {
+                    "digest": TEXT,
+                    "keys": INTEGER,
+                    "primaries": MAPPING,
+                    "replicas": MAPPING,
+                    "listing": TEXT,
+                    "module_types": LIST,
+                }
+            )
         )
-    }
+    },
+    changes=("process.private-server",),
 )
 
 REGISTRATIONS = (

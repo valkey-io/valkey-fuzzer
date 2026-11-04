@@ -173,7 +173,7 @@ schemas.
 | `valkey.observer.log-trigger` | `{config.rules[].publish}` | `{config.rules[].evidence_id}` | none |
 | `valkey.oracle.binary-check` | none | `valkey.binary.verified` | none |
 | `valkey.oracle.cluster-election-safety` | none | `valkey.cluster.election-safety.verified`<br>`valkey.cluster.vote.unsaved-at-crash` | none |
-| `valkey.oracle.dataset-digest` | none | `valkey.dataset.digest` | none |
+| `valkey.oracle.dataset-digest` | none | `valkey.dataset.digest` | `process.private-server` |
 | `valkey.oracle.deployment-state` | none | `valkey.deployment.validated` | none |
 | `valkey.oracle.evidence` | none | none | none |
 | `valkey.oracle.ledger` | none | `valkey.data.ledger-verified` | none |
@@ -1111,7 +1111,9 @@ replica does not converge. Evidence: `valkey.data.ledger-verified`, with
 ### `valkey.oracle.rdb-snapshot`
 
 Loads every RDB a `valkey.action.bgsave` captured into a private server
-running that instance's binary. Every bgsave target must have produced an RDB.
+running that instance's binary and loading its modules (the `loadmodule` of
+its server config, unless `load_config` sets one). Every bgsave target must
+have produced an RDB.
 With `workload`, each RDB must hold only keys the workload wrote, every stable
 key must hold its value, the RDB must be a consistent cut of the write
 history taken while `BGSAVE` ran, and each of the workload's lists it holds
@@ -1267,6 +1269,18 @@ Reads are retried within `converge_timeout_s`; an instance that stays
 unreachable or unreadable makes it `ERROR`, since a digest that left it out
 would compare as a different (or the same) dataset.
 
+A value of a module's type is digested from its `DUMP` payload, less the
+trailing 2-byte RDB version and 8-byte CRC64, so the same value written by two
+builds digests the same. This compares the module's serialization, not its
+logical data: a module that changes its format between builds changes the
+digest without a bug. A module's save may write a hash table in iteration
+order, which differs between processes, so before judging any digest the
+oracle probes each module type it found: one key's payload is `RESTORE`d on
+two private servers of its primary's binary, started with the deployment's
+`loadmodule`, and the two `DUMP`s must be the same. A type that serializes
+differently is `ERROR` ("this module's serialization is not deterministic
+across processes"), never a `FAIL` across replicas.
+
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `match` | string or null | `null` | A `SCAN` pattern. |
@@ -1274,7 +1288,8 @@ would compare as a different (or the same) dataset.
 | `converge_timeout_s` | number, 0 to 600 | 30 | |
 | `max_keys_listed` | integer, at least 0 | 100,000 | Keys written to the listing. |
 
-Evidence: `valkey.dataset.digest` (`digest`, key count, per-instance digests).
+Evidence: `valkey.dataset.digest` (`digest`, key count, per-instance digests,
+and `module_types`, the module types it digested and probed).
 
 ### `valkey.oracle.evidence`
 
