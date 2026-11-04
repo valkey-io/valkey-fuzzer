@@ -29,8 +29,10 @@ class Error(str):
 
 class Build:
     """A fake valkey-server build: the options it rejects at start, and its reply to each command, keyed by
-    the arguments as sent (strings, or bytes for a binary argument); an unlisted command gets ``OK``. A reply
-    may be an :class:`Error`, :data:`DIE` (the server exits without answering) or :data:`TIMEOUT`."""
+    the arguments as sent (strings, or bytes for a binary argument); an unlisted command gets ``OK`` (CLUSTER
+    MYID the server's ID, CLUSTER INFO a state ok knowing every server of the build). A reply may be an
+    :class:`Error`, :data:`DIE` (the server exits without answering), :data:`TIMEOUT`, or a function of the
+    :class:`FakeServer` that returns the reply."""
 
     def __init__(self, replies=None, rejects=()):
         self.replies, self.rejects = dict(replies or {}), set(rejects)
@@ -60,6 +62,11 @@ class FakeServer:
     def __init__(self, binary, arguments=(), *, timeout_s=15.0, prefix="x-"):
         self.binary, self.arguments, self.build = binary, list(arguments), BUILDS[binary]
         self.workdir = tempfile.mkdtemp(prefix=prefix)
+        # A node of a side, not a probe of whether the build starts.
+        self.node = prefix == "vfc-"
+        self.id = hashlib.sha1(self.workdir.encode()).hexdigest()
+        self.port = int(self.option("port") or 0)
+        self.sent: list[tuple] = []
         self.socket_path = os.path.join(self.workdir, "s.sock")
         self.log_path = os.path.join(self.workdir, "server.log")
         self.output_path = os.path.join(self.workdir, "output.log")
@@ -81,6 +88,10 @@ class FakeServer:
         self.stopped = True
         shutil.rmtree(self.workdir, ignore_errors=True)
 
+    def option(self, name):
+        names = self.arguments[::2]
+        return self.arguments[names.index(f"--{name}") * 2 + 1] if f"--{name}" in names else None
+
     def die(self):
         with open(self.log_path, "a") as log:
             log.write("1:M 03 Nov 2026 10:00:01.000 # Valkey 9.0.0 crashed by signal: 11, si_code: 0\n")
@@ -97,9 +108,17 @@ class FakeWire:
     def send_command(self, *args):
         self.pending = tuple(item if isinstance(item, bytes) else str(item) for item in args)
         self.server.build.sent.append(self.pending)
+        self.server.sent.append(self.pending)
 
     def read_response(self):
-        reply = self.server.build.replies.get(self.pending, b"OK")
+        known = len(_nodes(self.server.build))
+        defaults = {
+            ("CLUSTER", "MYID"): self.server.id.encode(),
+            ("CLUSTER", "INFO"): f"cluster_state:ok\r\ncluster_known_nodes:{known}\r\n".encode(),
+        }
+        reply = self.server.build.replies.get(self.pending, defaults.get(self.pending, b"OK"))
+        if callable(reply):
+            reply = reply(self.server)
         if reply == DIE:
             self.server.die()
             raise ValkeyConnectionError("Connection closed by server.")
@@ -421,19 +440,21 @@ def test_a_build_that_does_not_start_leaves_the_run_untested(builds):
 
 def test_cluster_starts_both_servers_as_one_node_clusters_serving_every_slot(builds):
     for build in BUILDS.values():
-        build.replies = {("CLUSTER", "INFO"): b"cluster_state:ok\r\ncluster_slots_assigned:16384\r\n"}
+        build.replies = {("CLUSTER", "INFO"): b"cluster_state:ok\r\ncluster_known_nodes:1\r\n"}
     result, value = run(builds, [{"command": ["SET", "k", "v"], "expect": {"equals": "OK"}}], cluster=True)
 
     assert result.status.value == "PASS", result.summary
-    assert value["cluster"] is True
+    assert (value["cluster"], value["nodes"]) == (True, 1)
     ports = set()
     for build in BUILDS.values():
         running = build.starts[-1]
         assert running[running.index("--cluster-enabled") + 1] == "yes"
         ports.add(running[running.index("--cluster-port") + 1])
-        assert build.sent[:2] == [("CLUSTER", "ADDSLOTSRANGE", "0", "16383"), ("CLUSTER", "INFO")]
+        ports.add(running[running.index("--port") + 1])
+        assert running[running.index("--bind") + 1] == "127.0.0.1"
+        assert build.sent[:3] == [("CLUSTER", "ADDSLOTSRANGE", "0", "16383"), ("CLUSTER", "MYID"), ("CLUSTER", "INFO")]
         assert build.sent[-1] == ("SET", "k", "v")
-    assert len(ports) == 2
+    assert len(ports) == 4
     assert _replies(value["candidate"]) == [{"reply": "OK"}]
 
 
@@ -443,7 +464,90 @@ def test_a_cluster_that_never_reaches_ok_leaves_the_run_untested(builds):
     result, value = run(builds, [{"command": ["PING"]}], cluster=True, timeout_s=0.2)
 
     assert result.status.value == "ERROR" and value is None
-    assert result.summary.startswith("the candidate server: cluster_state is not ok within 0.2s")
+    assert result.summary.startswith("the candidate server: cluster_state is not ok with 1 known node(s) within 0.2s")
+
+
+# ---------------------------------------------------------------------------
+# Several nodes, and placeholders
+# ---------------------------------------------------------------------------
+
+
+def _nodes(build):
+    """The fake servers of ``build`` in the order they started: its nodes."""
+
+    return [server for server in SERVERS.values() if server.build is build and server.node]
+
+
+def test_several_nodes_form_one_cluster_and_each_command_goes_to_its_node(builds):
+    commands = [{"command": ["SET", "k", "v"]}, {"command": ["CLUSTER", "COUNTKEYSINSLOT", 1], "node": 2}]
+    result, value = run(builds, commands, cluster=True, nodes=3)
+
+    assert result.status.value == "PASS", result.summary
+    assert value["nodes"] == 3
+    ports = set()
+    for build in BUILDS.values():
+        first, *others = nodes = _nodes(build)
+        assert len(nodes) == 3 and all(node.option("cluster-enabled") == "yes" for node in nodes)
+        ports |= {(node.option("port"), node.option("cluster-port")) for node in nodes}
+        # Node 0 serves every slot, and the others meet it.
+        assert ("CLUSTER", "ADDSLOTSRANGE", "0", "16383") in first.sent
+        for node in others:
+            assert ("CLUSTER", "MEET", "127.0.0.1", first.option("port"), first.option("cluster-port")) in node.sent
+        assert first.sent[-1] == ("SET", "k", "v") and nodes[2].sent[-1] == ("CLUSTER", "COUNTKEYSINSLOT", "1")
+    assert len(ports) == 6
+
+
+def test_placeholders_name_each_sides_own_nodes_and_replies_name_them_back(builds):
+    def nodes_line(server):
+        return f"{server.id} 127.0.0.1:{server.port}@{server.option('cluster-port')} myself,master".encode()
+
+    for build in BUILDS.values():
+        build.replies = {
+            ("CLUSTER", "NODES"): nodes_line,
+            ("CLUSTER", "SLOTS"): lambda server: [[0, 1, [b"127.0.0.1", server.port, server.id.encode()]]],
+        }
+    commands = [
+        {"command": ["CLUSTER", "SETSLOT", 1, "NODE", "<node.1.id>"]},
+        {"command": ["CLUSTER", "MEET", "<node.1.host>", "<node.1.port>", "<node.1.cluster-port>"]},
+        {"command": ["CLUSTER", "NODES"], "node": 1, "expect": {"contains": "<node.1.id> 127.0.0.1:<node.1.port>@"}},
+        {"command": ["CLUSTER", "SLOTS"], "node": 1},
+    ]
+    result, value = run(builds, commands, cluster=True, nodes=2)
+
+    assert result.status.value == "PASS", result.summary
+    for build in BUILDS.values():
+        first, second = _nodes(build)
+        assert ("CLUSTER", "SETSLOT", "1", "NODE", second.id) in first.sent
+        assert ("CLUSTER", "MEET", "127.0.0.1", str(second.port), second.option("cluster-port")) in first.sent
+    # Each side's own IDs and ports, named back, so the sides compare equal.
+    assert value["candidate"]["digest"] == value["parent"]["digest"]
+    assert _replies(value["candidate"])[2:] == [
+        {"reply": "<node.1.id> 127.0.0.1:<node.1.port>@<node.1.cluster-port> myself,master"},
+        {"reply": [[0, 1, ["127.0.0.1", "<node.1.port>", "<node.1.id>"]]]},
+    ]
+
+
+def test_standalone_nodes_take_their_topology_from_the_sequence(builds):
+    result, _ = run(builds, [{"command": ["REPLICAOF", "<node.0.host>", "<node.0.port>"], "node": 1}], nodes=2)
+
+    assert result.status.value == "PASS", result.summary
+    for build in BUILDS.values():
+        first, second = _nodes(build)
+        assert first.option("cluster-enabled") is None and first.sent == []
+        assert second.sent == [("REPLICAOF", "127.0.0.1", str(first.port))]
+
+
+def test_a_node_that_dies_fails_the_candidate_with_its_own_logs_kept(builds):
+    BUILDS[builds["candidate"]].replies = {("DEBUG", "SEGFAULT"): DIE}
+    result, value = run(builds, [{"command": ["PING"]}, {"command": ["DEBUG", "SEGFAULT"], "node": 1}], nodes=2)
+
+    assert result.status.value == "FAIL" and result.crash
+    assert (
+        result.summary == "the candidate's node 1 exited on command 1 (DEBUG SEGFAULT on node 1): crashed by signal: 11"
+    )
+    assert (value["candidate"]["exited"], value["candidate"]["exited_node"]) == (-11, 1)
+    kept = {os.path.basename(path) for path in result.evidence[0].artifacts}
+    assert {"candidate.node0.server.log", "candidate.node1.server.log", "parent.node1.output.log"} <= kept
 
 
 # ---------------------------------------------------------------------------
@@ -515,6 +619,14 @@ _PARENT = {"compare_with": "/opt/parent/valkey-server"}
         ({"commands": [{"command": ["PING"], "expect": {"error": True, "equals": 1}}]}, "cannot be combined"),
         ({"commands": [{"command": ["PING"], "compare": "sorted"}]}, "must be one of"),
         ({"commands": [{"command": ["PING"], "expect_difference": True}]}, "needs compare_with"),
+        ({"nodes": 2, "commands": [{"command": ["PING"]}]}, "nodes needs compare_with or modules_parent"),
+        ({**_PARENT, "nodes": 7, "commands": [{"command": ["PING"]}]}, "nodes"),
+        ({**_PARENT, "nodes": 2, "commands": [{"command": ["PING"], "node": 2}]}, r"commands\[0\]\.node is 2, but each side runs on 2 node\(s\)"),
+        ({"commands": [{"command": ["PING"], "node": 1}]}, r"commands\[0\]\.node is 1, but each side runs on 1 node\(s\)"),
+        ({**_PARENT, "nodes": 2, "cluster": True, "commands": [{"command": ["ECHO", "<node.2.id>"]}]}, r"commands\[0\]: <node\.2\.id> names node 2, but each side runs on 2 node\(s\)"),
+        ({**_PARENT, "commands": [{"command": ["ECHO", "<node.0.ip>"]}]}, "<node.0.ip> names no field of a node; the fields are id, host, port, cluster-port"),
+        ({**_PARENT, "commands": [{"command": ["ECHO", "<node.0.id>"]}]}, r"<node\.0\.id> needs cluster"),
+        ({"commands": [{"command": ["ECHO", "x<node.0.port>"]}]}, "needs compare_with or modules_parent: it names a private server"),
         ({**_PARENT, "commands": [{"command": ["PING"], "expect_difference": True}]}, "marked expect_difference needs an expect"),
         ({"cluster": True, "commands": [{"command": ["PING"]}]}, "cluster needs compare_with"),
         ({**_PARENT, "server_config": {"dir": "/x"}, "commands": [{"command": ["PING"]}]}, "server_config: .*'dir' is managed"),

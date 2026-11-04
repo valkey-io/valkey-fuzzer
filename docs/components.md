@@ -369,7 +369,8 @@ and `modules_parent`, on another build of a module.
 | `modules` | list of paths or references | `[]` | Modules both private servers load (`--loadmodule` each, a bare path: see [`valkey.artifact.local-module`](#valkeyartifactlocal-module)), usually `[{$ref: artifacts.module.path}]`; recorded in the evidence. Needs `compare_with` or `modules_parent`: the deployment's instances load modules through `deployment.server_config.loadmodule`, which `server_config` here refuses. |
 | `modules_parent` | list of paths or references, or null | `null` | The parent server loads these instead of `modules`, usually `[{$ref: artifacts.module_parent.path}]`. Without `compare_with`, both servers run the deployment's binary, so the sequence compares two builds of a module on one Valkey build; with it (a core change to the module API), each Valkey build loads its own commit's modules. Needs `modules`. |
 | `instances` | selector | `primaries` | Without `compare_with`: the instances the sequence runs on, one connection each. |
-| `cluster` | boolean | `false` | With `compare_with`: both private servers run as a one-node cluster serving every slot (`cluster-enabled yes`, `CLUSTER ADDSLOTSRANGE 0 16383`, `cluster_state:ok` awaited within `timeout_s`), so a sequence can test `CLUSTER` subcommands and slot-keyed replies. Without `compare_with` it is a config error: the deployment decides the mode. |
+| `cluster` | boolean | `false` | With `compare_with`: every private server runs in cluster mode (`cluster-enabled yes`); node 0 serves every slot (`CLUSTER ADDSLOTSRANGE 0 16383`), every other node meets it (`CLUSTER MEET`) as an empty primary, and each node's `cluster_state:ok`, knowing every node, is awaited within `timeout_s`, so a sequence can test `CLUSTER` subcommands, slot-keyed replies, and, with `nodes`, slot migration and replication it sets up itself. Without `compare_with` it is a config error: the deployment decides the mode. |
+| `nodes` | integer, 1 to 6 | 1 | With `compare_with`: each side runs on this many private servers, its nodes, and a command names its node with `node`. Without `cluster` they are standalone primaries; the sequence sends `REPLICAOF` itself. |
 | `server_config` | mapping | `{}` | Server options both private servers start with, as the deployment's `server_config`; the options the deployment manages (`dir`, `port`, `cluster-enabled`, ...) are refused. `sanitize-dump-payload yes` and `enable-debug-command yes` unless set. An option the parent rejects is dropped on both sides and recorded as `dropped_config`; test an option the change adds with `CONFIG SET` inside the sequence, marked `expect_difference`. |
 | `resp` | 2 or 3 | 2 | The protocol of every connection. |
 | `timeout_s` | number, 0.1 to 3600 | 10 | Per command: a reply that takes longer is `unanswered`, and the sequence stops there. |
@@ -379,10 +380,27 @@ Each command has:
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `command` | list of strings, numbers, or `!!binary` values | | A `!!binary` argument is sent as bytes (it loads as `{$base64: ...}`). |
+| `command` | list of strings, numbers, or `!!binary` values | | A `!!binary` argument is sent as bytes (it loads as `{$base64: ...}`). A string argument may hold placeholders, below. |
+| `node` | integer | 0 | The node the command goes to, by index; less than `nodes`. |
 | `expect` | mapping or null | `null` | A [predicate](#predicates) on the reply (`equals` also takes a list or a mapping, compared as JSON data), or `{error: true}`, `{error: false}`, or `{error: "<substring>"}`. `null` accepts any reply that is not an error. |
 | `expect_difference` | boolean | `false` | The change under test means this reply to differ from the parent's: the command the change is in, or a later read it carries into. Needs `expect` and `compare_with`. |
 | `compare` | `equal`, `unordered`, `unordered-pairs`, `json`, `skip` | `equal` | How the two builds' replies compare: as sent; a flat reply with its items sorted; a flat field-value reply with its pairs sorted (values swapped between fields still differ; a RESP3 map compares as a map); the JSON value a bulk string (or each item of an array) holds, for valkey-json's `JSON.GET` and `JSON.MGET` (key order, spacing, and `1.0` against `1` do not count; `true` is not `1`; a reply that is not JSON compares as itself); or recorded and never compared (`TIME`, `TTL`, `INFO`, `CLIENT ID`, `SCAN` cursors, `OBJECT ENCODING`, `MEMORY USAGE`, `DEBUG OBJECT`). Avoid commands that also change state at random (`SPOP`, `SRANDMEMBER`, `HRANDFIELD`, `RANDOMKEY`) in a compared sequence: Valkey seeds its hash function per process. |
+
+With `compare_with`, a string argument may name a node of the side it runs
+on: `<node.1.id>` (its cluster node ID, with `cluster`), `<node.1.host>`,
+`<node.1.port>`, and `<node.1.cluster-port>` (with `cluster`) are replaced by
+each side's own values, for example `[CLUSTER, SETSLOT, 7, NODE, <node.1.id>]`
+or `[REPLICAOF, <node.0.host>, <node.0.port>]`. Angle brackets, not braces:
+YAML reads `{node.1.id}` as a mapping, and Valkey braces as a hash tag. Every
+node listens on its own loopback port (and cluster bus port), so the nodes can
+meet and replicate; the sequence itself talks to each over its unix socket.
+Before the two sides are compared, each side's node IDs and ports in its replies
+and errors (a port also as an integer, as `CLUSTER SLOTS` replies it) are
+replaced back by their placeholders, so `CLUSTER NODES` and `MOVED` errors
+compare equal when the builds behave the same, and an `expect` names them the
+same way (`{contains: "<node.1.id>"}`); the evidence records the replies so
+named. Other random values (`CLUSTER SHARDS` shard IDs, replication IDs) still
+differ: compare those with `skip`.
 
 Replies are recorded as the server sent them, over a raw connection without
 valkey-py's response callbacks: `SET` replies `OK`, not `true`; `HGETALL` a
@@ -394,7 +412,7 @@ No timestamps, so two runs' replies compare equal.
 The outcome, with `compare_with`:
 
 - `FAIL`: a candidate reply that violates its `expect` where the parent
-  replied otherwise, or the candidate exiting (a crash, a sanitizer abort);
+  replied otherwise, or a node of the candidate exiting (a crash, a sanitizer abort);
   its cause is `crashes` in the diagnostics. Nothing else: a difference
   between builds is never, by itself, a Valkey failure.
 - `ERROR` with `diagnostics: {reason: expect-disputed, commands: [...]}`: an
@@ -431,13 +449,16 @@ allowed and simply crash the server they are sent to (a candidate crash is a
 deployment's instances.
 
 Evidence: `valkey.command.sequence`, `{candidate: {replies: [{index, reply |
-error, unanswered?}], digest, exited?}, parent: {...} | null, modules:
-{candidate: [paths], parent: [paths]} | null, cluster, dropped_config,
+error, unanswered?}], digest, exited?, exited_node?}, parent: {...} | null, modules:
+{candidate: [paths], parent: [paths]} | null, cluster, nodes, dropped_config,
 reached: [indexes], unexplained: [indexes]}` (and
 `instance_id` without `compare_with`, one item per instance). `digest` is the
-SHA-256 of the canonical JSON of the compared replies. Both private servers'
+SHA-256 of the canonical JSON of the compared replies. `exited` is the exit
+status of a side's node that exited, and `exited_node` that node; any node of
+the candidate that exits is a `FAIL`. Every private server's
 `server.log` and `output.log` are copied into the run's component folder
-before they are stopped, so a crash or sanitizer report survives, and are the
+before they are stopped (`candidate.server.log`, or `candidate.node1.server.log`
+with several nodes), so a crash or sanitizer report survives, and are the
 evidence's artifacts.
 
 ### `valkey.action.bgsave`

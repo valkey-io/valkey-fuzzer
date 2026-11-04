@@ -1,6 +1,6 @@
 """``valkey.action.commands`` against real builds: one build on both sides replies equal (RESP2 and RESP3), a
 marked command with equal replies is unreached, a candidate crash is a FAIL with its logs kept, the private
-servers run as one-node clusters, and the LSET example reaches valkey-io/valkey#4823 on builds of the fix
+servers run as one-node and two-node clusters, and the LSET example reaches valkey-io/valkey#4823 on builds of the fix
 (``VALKEY_FUZZER_LSET_FIX_BINARY``, commit e50b62d0b) and its parent (``VALKEY_FUZZER_LSET_PARENT_BINARY``).
 
 Needs a valkey-server (``VALKEY_FUZZER_BINARY`` or ``PATH``); the LSET rows need the two builds above.
@@ -116,6 +116,21 @@ def test_cluster_runs_both_servers_as_one_node_clusters():
 
     assert result.status.value == "PASS", result.summary
     assert value["cluster"] is True
+
+
+def test_two_node_clusters_compare_equal_through_their_placeholders():
+    commands = [
+        {"command": ["CLUSTER", "MYID"], "node": 1, "expect": {"equals": "<node.1.id>"}},
+        {"command": ["CLUSTER", "SLOTS"], "node": 1},
+        {"command": ["SET", "k", "v"], "node": 1, "expect": {"error": "MOVED 7629 127.0.0.1:<node.0.port>"}},
+        {"command": ["CLUSTER", "COUNT-FAILURE-REPORTS", "<node.0.id>"], "node": 1, "expect": {"equals": 0}},
+    ]
+    result, value = run(BINARY, commands, compare_with=BINARY, cluster=True, nodes=2)
+
+    assert result.status.value == "PASS", result.summary
+    assert value["candidate"]["digest"] == value["parent"]["digest"]
+    (first, last, primary), *_ = value["candidate"]["replies"][1]["reply"]
+    assert (first, last, primary[:3]) == (0, 16383, ["127.0.0.1", "<node.0.port>", "<node.0.id>"])
 
 
 @needs_lset_builds
