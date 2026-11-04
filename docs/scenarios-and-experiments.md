@@ -521,6 +521,15 @@ mode and instances do not matter; a sequence that must run under a fault the
 experiment injects leaves `compare_with` out and runs on the deployment's
 instances instead.
 
+A change to one of Valkey's tools (`valkey-cli`, `valkey-benchmark`,
+`valkey-check-rdb`, `valkey-check-aof`) compares the same way with
+[`valkey.action.tools`](components.md#valkeyactiontools), which runs the tool
+of each build:
+[`examples/valkey/experiments/tools-compare.yaml`](../examples/valkey/experiments/tools-compare.yaml)
+tests the fix of valkey-io/valkey#5177, and
+[`examples/valkey/tools_compare.yaml`](../examples/valkey/tools_compare.yaml)
+runs it.
+
 Three differentials compare codecs:
 [`differential_rdb_codecs.yaml`](../examples/valkey/differential_rdb_codecs.yaml) (`no`, `lz4`, `zstd`:
 equal dataset, reloaded RDB, and reply digests; different `rdb_format.codec`),

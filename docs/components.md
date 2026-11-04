@@ -1,6 +1,6 @@
 # Valkey component reference
 
-The Valkey components in `valkey_fuzzer.components` are the 33 components,
+The Valkey components in `valkey_fuzzer.components` are the 34 components,
 9 generator hooks, and 3 providers on this page. Experiments configure them; how is in
 [Scenarios and experiments](scenarios-and-experiments.md#components).
 `valkey-fuzzer list components` and `valkey-fuzzer list generators` print what
@@ -102,6 +102,7 @@ a retry succeeded makes the fault, and the run, `ERROR`.
 | [`valkey.workload.key-value`](#valkeyworkloadkey-value) | workload | any | writes keys and records every client-visible result |
 | [`valkey.action.command`](#valkeyactioncommand) | action | any | sends a command and checks the reply |
 | [`valkey.action.commands`](#valkeyactioncommands) | action | any | sends a command sequence on one connection, and compares the replies of two builds |
+| [`valkey.action.tools`](#valkeyactiontools) | action | any | runs a Valkey tool of two builds and compares what they do |
 | [`valkey.action.bgsave`](#valkeyactionbgsave) | action | any | runs BGSAVE to completion |
 | [`valkey.action.failover`](#valkeyactionfailover) | action | cluster | fails over one shard |
 | [`valkey.action.restart-instance`](#valkeyactionrestart-instance) | action | any | restarts one instance |
@@ -159,6 +160,7 @@ schemas.
 | `valkey.action.restart-instance` | none | `valkey.instance.restarted` | `process.stopped` |
 | `valkey.action.rolling-upgrade` | `<id>.failed-over`<br>`<id>.instance-upgraded` | `valkey.upgrade.completed` | `process.stopped` |
 | `valkey.action.sleep` | none | none | none |
+| `valkey.action.tools` | none | `valkey.tool.runs` | `process.private-server` |
 | `valkey.action.wait-event` | none | `valkey.wait.event-observed` | none |
 | `valkey.capability.build-probe` | none | `valkey.capability.supported` | `process.private-server` |
 | `valkey.capability.host-probe` | none | `valkey.host.supported` | none |
@@ -476,6 +478,90 @@ the candidate that exits is a `FAIL`. Every private server's
 before they are stopped (`candidate.server.log`, or `candidate.node1.server.log`
 with several nodes), so a crash or sanitizer report survives, and are the
 evidence's artifacts.
+
+### `valkey.action.tools`
+
+Runs Valkey's own tools (`valkey-cli`, `valkey-benchmark`,
+`valkey-check-rdb`, `valkey-check-aof`) of two builds with the same
+arguments, stdin, and files, and compares their exit status, stdout, and
+stderr: a test of a change to a tool. Each build's tools are the ones beside
+its `valkey-server`: the deployment's binary (the candidate) and
+`compare_with` (the parent). The deployment's instances are never touched.
+
+```yaml
+- use: valkey.action.tools
+  id: check-rdb
+  config:
+    compare_with: {$ref: artifacts.parent.binary}   # the parent commit's build
+    files:
+      empty-db2.rdb: !!binary UkVESVMwMDA5/gL/AAAAAAAAAAA=   # SELECTDB 2, then EOF
+    ignore: ['^\d+:[A-Z] .*\n']                        # Valkey log lines: pid and time
+    runs:
+      - {tool: valkey-check-rdb, args: [empty-db2.rdb, --stats, --format, info],
+         expect_difference: true, expect: {exit: {equals: 0}, stdout: {contains: "db.2.type.string.keys.total:0"}}}
+- use: valkey.action.tools
+  id: cli
+  config:
+    compare_with: {$ref: artifacts.parent.binary}
+    server: true                                      # each side's own private server
+    runs:
+      - {tool: valkey-cli, args: [-p, $port, SET, k, v], expect: {stdout: {equals: "OK\n"}}}
+      - {tool: valkey-cli, args: [-p, $port, PING], env: {VALKEYCLI_AUTH: secret}}
+```
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `compare_with` | binary path | | The parent's `valkey-server`, usually `{$ref: artifacts.parent.binary}`; its tools sit beside it. A build without a tool a run names is `ERROR`. |
+| `server` | boolean | `false` | Each side starts a private server of its own build, from an empty dataset, on a free loopback TCP port (`127.0.0.1`, and `::1` where the host has it) and a unix socket, with `enable-debug-command yes` and `sanitize-dump-payload yes`, and the side's working directory as its `dir`, so a `SAVE` writes `dump.rdb` where `valkey-check-rdb` reads it, and a `dump.rdb` in `files` is what the server loads. A run's arguments name it as `$port` and `$socket`. |
+| `cluster` | boolean | `false` | Both private servers run as a one-node cluster serving every slot, for `valkey-cli --cluster`. Needs `server`. |
+| `files` | mapping | `{}` | `{name: text or !!binary}`, written into each side's working directory before the first run. A name is a plain file name. |
+| `ignore` | list of regular expressions | `[]` | Removed from stdout and stderr (`^` and `$` match at line ends) before the two sides compare, for what differs between processes: the pid and time of a Valkey log line, a benchmark's throughput. Recorded output keeps them. |
+| `timeout_s` | number, 0.1 to 3600 | 30 | Per run: a tool still running then is killed and recorded `timed_out`; also how long a private server may take to start. |
+| `runs` | list of mappings | | The runs, below, in order; each side runs them all. |
+
+Each run has:
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `tool` | `valkey-cli`, `valkey-benchmark`, `valkey-check-rdb`, `valkey-check-aof` | | Run with its bare name as `argv[0]`, never through a shell, in the side's working directory. |
+| `args` | list of strings or numbers | `[]` | `$port` and `$socket` (also inside an argument, as in `[::1]:$port`) become the side's own; they need `server`. An argument that could name a path outside the working directory (it starts with `/` or `~`, or has a `..` part) is refused. |
+| `stdin` | text, `!!binary`, or null | `null` | What the tool reads; null is an empty stdin. |
+| `env` | mapping | `{}` | Environment variables for this run. The fuzzer's own environment is passed on without `VALKEYCLI_*` and `REDISCLI_*`, with `HOME` the working directory. |
+| `expect` | mapping or null | `null` | `{exit, stdout, stderr}`, each optional, each a [predicate](#predicates): `exit` on the exit status (null when a signal ended the tool), `stdout` and `stderr` on the output as recorded. `null` accepts any run. |
+| `expect_difference` | boolean | `false` | The change under test means this run to differ from the parent's. Needs `expect`. |
+| `compare` | `equal`, `unordered`, `skip` | `equal` | How the two sides' runs compare: exit status, signal, `timed_out`, stdout, and stderr as recorded (after `ignore`); the same with stdout's and stderr's lines sorted; or recorded and never compared. |
+
+Output is recorded with the side's port, socket path, and working directory
+written back as `$port`, `$socket`, and `$dir`, so the two sides compare
+equal; output that is not valid UTF-8 is recorded as `{$base64: ...}`.
+
+The outcome, as for [`valkey.action.commands`](#valkeyactioncommands):
+
+- `FAIL`: a candidate tool that crashes (a signal ends it, or its output
+  has a crash or sanitizer report) or a candidate private server that exits;
+  their causes are `crashes` in the diagnostics. Also a candidate run that
+  violates its `expect` where the parent ran otherwise.
+- `ERROR` with `diagnostics: {reason: expect-disputed, runs: [...]}`: an
+  `expect` the candidate violates but the parent ran the same.
+- `ERROR` with `diagnostics: {reason: unreached-change}`: a marked run the
+  same on both builds.
+- `ERROR` with `diagnostics: {reason: unexplained-difference, runs: [...]}`:
+  an unmarked run that differs, both sides given.
+- A parent tool that crashes or times out where the candidate does not
+  differs: reached on a marked run, unexplained on an unmarked one.
+- `ERROR` for a candidate run that does not exit within `timeout_s`, a
+  missing tool, or a private server that does not start.
+
+Hints and other interactive features need a terminal; `valkey-cli
+--test_hint` and `--test_hint_file` print a hint without one.
+
+Evidence: `valkey.tool.runs`, `{candidate: {runs: [{index, tool, exit,
+signal?, timed_out?, stdout, stderr}], digest, server_exited?}, parent:
+{...}, server, reached: [indexes], unexplained: [indexes]}`. `digest` is the
+SHA-256 of the canonical JSON of the compared runs. Each side's working
+directory, with its files and what the tools wrote, stays in the run's
+component folder as `candidate/` and `parent/`; with `server`, both private
+servers' `server.log` and `output.log` are the evidence's artifacts.
 
 ### `valkey.action.bgsave`
 

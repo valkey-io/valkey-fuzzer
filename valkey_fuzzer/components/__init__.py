@@ -33,6 +33,7 @@ from . import (
     replication_chaos,
     snapshots,
     storage,
+    tools,
     workloads,
 )
 from .generators import GENERATORS
@@ -46,6 +47,7 @@ _MODULES = (
     storage,
     workloads,
     actions,
+    tools,
     cluster_chaos,
     faults,
     network,
