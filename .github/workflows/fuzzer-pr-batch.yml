@@ -9,6 +9,14 @@ name: Valkey Fuzzer PR Batch
 # scenario gets an artifacts.parent declaration of it, so a scenario can
 # compare the two builds ({$ref: artifacts.parent.binary}); build chooses a
 # plain or a sanitizer build for both.
+# With module_repository, a module is built at module_sha (and at
+# module_parent_sha, the same way) against the Valkey build under test, and
+# every scenario gets artifacts.module (and artifacts.module_parent) of it, a
+# valkey.artifact.local-module to load ({$ref: artifacts.module.path}); a
+# module change then needs no valkey_parent_sha: one Valkey build, two module
+# builds. The batch knows how to build the modules in the "Build the modules"
+# step's table, by repository name: valkey-json, and valkey, whose
+# tests/modules it builds at both commits (module_file names the one).
 # Scenarios translated from a spec bundle that brings its own data-only
 # experiments come with the bundle in spec_bundles: the batch finds the bundle
 # through VALKEY_FUZZER_SPEC_PATH and loads its experiments/ with --experiment-dir.
@@ -75,6 +83,33 @@ on:
           - asan
           - ubsan
         default: default
+      module_repository:
+        description: >-
+          Repository of a module to build at module_sha against the Valkey build and declare to every scenario as
+          artifacts.module: valkey-json, or valkey for its tests/modules (a fork builds as its upstream); empty for
+          none
+        required: false
+        type: string
+        default: ""
+      module_sha:
+        description: Full SHA of the module commit to build (40 lowercase hex characters); needs module_repository
+        required: false
+        type: string
+        default: ""
+      module_parent_sha:
+        description: >-
+          Full SHA of a second module commit (the change's parent), built the same way and declared as
+          artifacts.module_parent; empty for none
+        required: false
+        type: string
+        default: ""
+      module_file:
+        description: >-
+          The built module to declare, relative to its checkout; empty for the module's own (valkey-json:
+          build/src/libjson.so); valkey's tests/modules needs one, such as tests/modules/datatype.so
+        required: false
+        type: string
+        default: ""
       random_seeds:
         description: Random seeds of each one-build experiment to run beside the scenarios, 0 to 4
         required: false
@@ -108,6 +143,9 @@ jobs:
       BATCH_DIR: /tmp/fuzzer-pr-batch/batch
       # The parent commit's build, which check-inputs declares to every scenario as artifacts.parent.
       PARENT_BINARY: ${{ github.workspace }}/valkey-parent/src/valkey-server
+      # The module checkouts, whose builds check-inputs declares as artifacts.module and artifacts.module_parent.
+      MODULE_DIR: ${{ github.workspace }}/module-src
+      MODULE_PARENT_DIR: ${{ github.workspace }}/module-parent
     steps:
       - name: Checkout valkey-fuzzer
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -134,6 +172,10 @@ jobs:
           INPUT_VALKEY_SHA: ${{ inputs.valkey_sha }}
           INPUT_VALKEY_PARENT_SHA: ${{ inputs.valkey_parent_sha }}
           INPUT_BUILD: ${{ inputs.build }}
+          INPUT_MODULE_REPOSITORY: ${{ inputs.module_repository }}
+          INPUT_MODULE_SHA: ${{ inputs.module_sha }}
+          INPUT_MODULE_PARENT_SHA: ${{ inputs.module_parent_sha }}
+          INPUT_MODULE_FILE: ${{ inputs.module_file }}
           INPUT_RANDOM_SEEDS: ${{ inputs.random_seeds }}
           INPUT_REQUEST_ID: ${{ inputs.request_id }}
           INPUT_EXCLUDE_EXPERIMENTS: ${{ inputs.exclude_experiments }}
@@ -180,6 +222,51 @@ jobs:
           build valkey-src "${INPUT_VALKEY_SHA}"
           if [ -n "${INPUT_VALKEY_PARENT_SHA}" ]; then
             build valkey-parent "${INPUT_VALKEY_PARENT_SHA}"
+          fi
+
+      - name: Checkout the module
+        if: inputs.module_repository != ''
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ inputs.module_repository }}
+          ref: ${{ inputs.module_sha }}
+          fetch-depth: 1
+          path: module-src
+          persist-credentials: false
+
+      - name: Checkout the module's parent commit
+        if: inputs.module_parent_sha != ''
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ inputs.module_repository }}
+          ref: ${{ inputs.module_parent_sha }}
+          fetch-depth: 1
+          path: module-parent
+          persist-credentials: false
+
+      # The modules the batch builds, by repository name, both commits the same way; ci.py's MODULE_FILES names
+      # the file each leaves. valkey-json builds against the Valkey build under test (its valkeymodule.h, so its
+      # build clones no Valkey); valkey's tests/modules against its own commit's header.
+      - name: Build the modules
+        if: inputs.module_repository != ''
+        env:
+          INPUT_MODULE_REPOSITORY: ${{ inputs.module_repository }}
+          INPUT_MODULE_SHA: ${{ inputs.module_sha }}
+          INPUT_MODULE_PARENT_SHA: ${{ inputs.module_parent_sha }}
+        run: |
+          build_module() {
+            test "$(git -C "$1" rev-parse HEAD)" = "$2"
+            case "${INPUT_MODULE_REPOSITORY#*/}" in
+              valkey-json)
+                command -v cmake > /dev/null || sudo apt-get install -y cmake
+                (cd "$1" && SERVER_VERSION=unstable VALKEY_MODULE_H_PATH="${GITHUB_WORKSPACE}/valkey-src/src/valkeymodule.h" ./build.sh) ;;
+              valkey) make -C "$1/tests/modules" -j"$(nproc)" ;;
+              *) echo "no module build for '${INPUT_MODULE_REPOSITORY}'" >&2; exit 1 ;;
+            esac
+          }
+          build_module module-src "${INPUT_MODULE_SHA}"
+          if [ -n "${INPUT_MODULE_PARENT_SHA}" ]; then
+            build_module module-parent "${INPUT_MODULE_PARENT_SHA}"
           fi
 
       - name: Run the scenarios through batch
@@ -239,6 +326,9 @@ jobs:
           VALKEY_SHA: ${{ inputs.valkey_sha }}
           VALKEY_PARENT_SHA: ${{ inputs.valkey_parent_sha }}
           BUILD: ${{ inputs.build }}
+          MODULE_REPOSITORY: ${{ inputs.module_repository }}
+          MODULE_SHA: ${{ inputs.module_sha }}
+          MODULE_PARENT_SHA: ${{ inputs.module_parent_sha }}
         run: python .github/scripts/ci.py summary
 
       - name: Upload the batch folder

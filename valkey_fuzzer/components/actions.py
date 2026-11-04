@@ -9,6 +9,7 @@ component (``<id>.save-started``), so they never collide.
 import base64
 import functools
 import hashlib
+import json
 import math
 import os
 import shutil
@@ -141,7 +142,7 @@ class CommandAction:
 # valkey.action.commands
 # ---------------------------------------------------------------------------
 
-_COMPARE_MODES = ("equal", "unordered", "unordered-pairs", "skip")
+_COMPARE_MODES = ("equal", "unordered", "unordered-pairs", "json", "skip")
 
 # The predicates of valkey.action.command; ``equals`` also takes a list or a mapping, compared as JSON data.
 _SEQUENCE_EXPECT = {
@@ -163,6 +164,13 @@ _COMMANDS_FIELDS = {
     # A parent build, usually {$ref: artifacts.parent.binary}: the sequence then runs on two private servers,
     # one of the deployment's binary and one of this, never on the deployment's instances.
     "compare_with": ConfigField(str, allow_none=True, default=None, reference=True),
+    # Module builds both private servers load (--loadmodule each), usually artifact references; the parent
+    # loads modules_parent instead when it is given. modules_parent alone, without compare_with, compares two
+    # builds of a module on one Valkey build: both servers run the deployment's binary.
+    "modules": ConfigField(list, default=list, reference=True, items=ConfigField(str, reference=True)),
+    "modules_parent": ConfigField(
+        list, allow_none=True, default=None, reference=True, items=ConfigField(str, reference=True)
+    ),
     # Both private servers run as a one-node cluster serving every slot.
     "cluster": ConfigField(bool, default=False),
     # Both private servers start with it; an option the parent rejects is dropped on both sides.
@@ -239,14 +247,31 @@ def _refusal(words: list[str], timeout_s: float, on_instances: bool) -> Optional
     return None
 
 
+def _two_servers(config: Mapping[str, Any]) -> bool:
+    """Whether the sequence runs on two private servers: with a parent build, or a parent build of the modules."""
+
+    return config["compare_with"] is not None or config["modules_parent"] is not None
+
+
 def _validate_commands(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -> None:
-    compared = config["compare_with"] is not None
+    compared = _two_servers(config)
     if config["cluster"] and not compared:
-        raise ConfigError("cluster needs compare_with: on the deployment's instances the deployment decides the mode")
+        raise ConfigError(
+            "cluster needs compare_with or modules_parent: on the deployment's instances the deployment decides the mode"
+        )
+    if config["modules"] and not compared:
+        raise ConfigError(
+            "modules needs compare_with or modules_parent: the deployment's instances load modules through "
+            "deployment.server_config.loadmodule"
+        )
+    if config["modules_parent"] is not None and not config["modules"]:
+        raise ConfigError("modules_parent needs modules: it replaces the candidate's modules on the parent")
     try:
-        canonicalize_server_config(config["server_config"])
+        server_config = canonicalize_server_config(config["server_config"])
     except (TypeError, ValueError) as exc:
         raise ConfigError(f"server_config: {exc}") from exc
+    if "loadmodule" in server_config:
+        raise ConfigError("server_config.loadmodule: list the modules in modules (and modules_parent)")
     if not config["commands"]:
         raise ConfigError("commands must list at least one command")
     for index, item in enumerate(config["commands"]):
@@ -264,7 +289,7 @@ def _validate_commands(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -
                 validate_predicate(item["expect"], f"{where}.expect")
         if item["expect_difference"]:
             if not compared:
-                raise ConfigError(f"{where}: expect_difference needs compare_with")
+                raise ConfigError(f"{where}: expect_difference needs compare_with or modules_parent")
             if item["expect"] is None:
                 raise ConfigError(f"{where}: a command marked expect_difference needs an expect")
 
@@ -362,14 +387,41 @@ def _run_sequence(connection: RawConnection, commands: Sequence[Mapping[str, Any
     return replies
 
 
+def _json_value(item: Any) -> Any:
+    """A bulk string of JSON text as the canonical JSON of the value it holds (``{"$json": ...}``), else ``item``.
+
+    Canonical text, not the parsed data, so ``true`` and ``1`` stay different (Python's ``True == 1``); a number
+    with a fraction or an exponent compares by its value (``1.0`` as ``1``), and one too large for a float, or
+    NaN, stays its text.
+    """
+
+    if not isinstance(item, str):
+        return item
+
+    def number(text: str) -> Any:
+        value = float(text)
+        if not math.isfinite(value):
+            return text
+        return int(value) if value.is_integer() and abs(value) < 2**53 else value
+
+    try:
+        return {"$json": canonical_json(json.loads(item, parse_float=number, parse_constant=str))}
+    except ValueError:
+        return item
+
+
 def _compared(record: Mapping[str, Any], mode: str) -> Any:
-    """What a reply record compares as under ``mode``: the reply, its items sorted (``unordered``), or its
-    field-value pairs sorted (``unordered-pairs``; a RESP3 map compares as a map); an error as itself."""
+    """What a reply record compares as under ``mode``: the reply, its items sorted (``unordered``), its
+    field-value pairs sorted (``unordered-pairs``; a RESP3 map compares as a map), or the JSON a bulk string (or
+    each item of an array) holds (``json``, so two JSON texts of the same value compare equal); an error as
+    itself."""
 
     if "reply" not in record:
         return {key: value for key, value in record.items() if key != "index"}
     reply = record["reply"]
-    if isinstance(reply, list):
+    if mode == "json":
+        reply = [_json_value(item) for item in reply] if isinstance(reply, list) else _json_value(reply)
+    elif isinstance(reply, list):
         if mode == "unordered":
             reply = sorted(reply, key=canonical_json)
         elif mode == "unordered-pairs" and len(reply) % 2 == 0:
@@ -511,7 +563,7 @@ class CommandsAction:
 
     def run(self, context: Any, spec: ComponentSpec):
         config = spec.config
-        if config["compare_with"] is None:
+        if not _two_servers(config):
             return self._run_on_instances(context, spec, config)
         return self._run_compared(context, spec, config)
 
@@ -532,7 +584,7 @@ class CommandsAction:
                 connection.close()
             problems.extend(f"{instance_id}: {text}" for text in _violations(config["commands"], replies))
             unanswered.extend(f"{instance_id}: {text}" for text in _unanswered(config["commands"], replies))
-            record = _record(config, _side(replies, config["commands"]), None, [], [], [])
+            record = _record(config, _side(replies, config["commands"]), None, None, [], [], [])
             record["instance_id"] = instance_id
             evidence.append(make_evidence(spec, "valkey.command.sequence", "action.completed", record))
         status = ComponentStatus.FAIL if problems else ComponentStatus.ERROR if unanswered else ComponentStatus.PASS
@@ -545,7 +597,10 @@ class CommandsAction:
         commands = config["commands"]
         try:
             candidate_binary = resolve_binary(plain_config(context.plan.deployment).get("valkey_binary") or "")
-            parent_binary = resolve_binary(config["compare_with"])
+            # Without compare_with, both servers run the deployment's binary and differ by their modules.
+            parent_binary = (
+                candidate_binary if config["compare_with"] is None else resolve_binary(config["compare_with"])
+            )
         except OSError as exc:
             return make_result(spec, ComponentStatus.ERROR, str(exc))
         candidate, parent = _Server("candidate", candidate_binary), _Server("parent", parent_binary)
@@ -555,26 +610,38 @@ class CommandsAction:
             ports = iter(_free_ports(2))
             for server in (candidate, parent):
                 server.options = {"cluster-enabled": "yes", "cluster-port": next(ports)}
+        modules = {
+            "candidate": list(config["modules"]),
+            "parent": list(config["modules"] if config["modules_parent"] is None else config["modules_parent"]),
+        }
+        for server in (candidate, parent):
+            if modules[server.label]:
+                server.options["loadmodule"] = modules[server.label]
 
-        def starts(server: _Server, options: Mapping[str, Any]) -> ComponentStatus:
+        def starts(server: _Server, options: Mapping[str, Any]) -> tuple[ComponentStatus, str]:
             probed = {**options, **server.options}
-            return starts_with(context, spec, server.binary, probed, _START_TIMEOUT_S)[0]
+            status, summary, _ = starts_with(context, spec, server.binary, probed, _START_TIMEOUT_S)
+            return status, summary
 
         # Configuration both builds accept: an option the parent rejects is dropped on both sides.
         dropped: list[str] = []
-        if starts(parent, server_config) is ComponentStatus.SKIP:
+        if starts(parent, server_config)[0] is ComponentStatus.SKIP:
             dropped = [
-                name for name, value in server_config.items() if starts(parent, {name: value}) is ComponentStatus.SKIP
+                name
+                for name, value in server_config.items()
+                if starts(parent, {name: value})[0] is ComponentStatus.SKIP
             ]
             server_config = {name: value for name, value in server_config.items() if name not in dropped}
         for server in (parent, candidate):
-            status = starts(server, server_config)
+            status, summary = starts(server, server_config)
             if status is not ComponentStatus.PASS:
                 return make_result(
                     spec,
                     ComponentStatus.ERROR,
                     f"the {server.label} build ({server.binary}) does not start with {server_config}"
-                    + ("" if status is ComponentStatus.SKIP else ": the probe could not run"),
+                    + (f" and modules {modules[server.label]}" if modules[server.label] else "")
+                    + ("" if status is ComponentStatus.SKIP else ": the probe could not run")
+                    + (f": {summary}" if modules[server.label] else ""),
                 )
 
         try:
@@ -593,7 +660,13 @@ class CommandsAction:
 
         reached, unexplained, unreached, uncompared = _compare(commands, candidate, parent)
         record = _record(
-            config, _side(candidate.replies, commands), _side(parent.replies, commands), dropped, reached, unexplained
+            config,
+            _side(candidate.replies, commands),
+            _side(parent.replies, commands),
+            modules,
+            dropped,
+            reached,
+            unexplained,
         )
         for server in (candidate, parent):
             if server.exited is not None:
@@ -667,6 +740,7 @@ def _record(
     config: Mapping[str, Any],
     candidate: dict[str, Any],
     parent: Optional[dict[str, Any]],
+    modules: Optional[Mapping[str, list[str]]],
     dropped: Sequence[str],
     reached: Sequence[int],
     unexplained: Sequence[int],
@@ -674,6 +748,7 @@ def _record(
     return {
         "candidate": candidate,
         "parent": parent,
+        "modules": None if modules is None else dict(modules),
         "cluster": config["cluster"],
         "dropped_config": list(dropped),
         "reached": list(reached),
@@ -1601,6 +1676,14 @@ _COMMANDS_DECLARES = Declarations(
                     "candidate": _SEQUENCE_SIDE,
                     # The parent's side with compare_with; null on a deployment instance.
                     "parent": ConfigField(dict, allow_none=True, schema=_SEQUENCE_SIDE.schema),
+                    # The modules each private server loaded; null on a deployment instance.
+                    "modules": ConfigField(
+                        dict,
+                        allow_none=True,
+                        schema=mapping_of(
+                            {"candidate": ConfigField(list, items=TEXT), "parent": ConfigField(list, items=TEXT)}
+                        ).schema,
+                    ),
                     "cluster": FLAG,
                     "dropped_config": ConfigField(list, items=TEXT),
                     # Marked commands whose replies differ, and unmarked ones whose replies differ, by index.

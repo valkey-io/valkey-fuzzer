@@ -1,0 +1,58 @@
+# Send one command sequence to two private servers of the build under test
+# (deployment.valkey_binary), one loading the module build under test and one
+# the parent commit's build of the module, and judge the replies as
+# commands-compare.yaml does: the module under test must meet every `expect`,
+# each command marked `expect_difference` must reply differently with the
+# parent's module, and an unmarked command that replies differently is
+# recorded as an unexplained difference, never filed by itself.
+#
+# The commands are those of Valkey's own test module tests/modules/datatype.so
+# (a module type holding an integer and a string). For a pull request to a
+# module, copy it, write the module's commands, and mark every reply the change
+# means to alter. For valkey-json, compare JSON.GET with `compare: json`: both
+# replies are parsed and compared as JSON values, so key order and spacing do
+# not count. For a core pull request that changes the module API, add
+# `compare_with: {$ref: artifacts.parent.binary}`: the parent server then runs
+# the parent Valkey build with the parent commit's tests/modules.
+#
+# The scenario declares both module builds as artifacts
+# (valkey.artifact.local-module) and passes them as the `module` and
+# `module_parent` inputs; the PR batch declares them as artifacts.module and
+# artifacts.module_parent when it is given module_repository.
+extends: [valkey.liveness]
+id: example.module-commands-compare
+deployment:
+  modes: [standalone, cluster]
+metadata:
+  description: One command sequence on two builds of a module loaded into one Valkey build, replies compared
+inputs:
+  required: [module, module_parent]
+  properties:
+    module:
+      type: environment_reference
+      reference_kinds: [artifacts]
+      description: "The module build under test, {$ref: artifacts.module.path}"
+    module_parent:
+      type: environment_reference
+      reference_kinds: [artifacts]
+      description: "The parent commit's build of the module, {$ref: artifacts.module_parent.path}"
+    resp: {type: integer, enum: [2, 3], default: 2}
+components:
+  - use: valkey.action.commands
+    id: module
+    config:
+      modules: [{$ref: inputs.module}]
+      modules_parent: [{$ref: inputs.module_parent}]
+      resp: {$ref: inputs.resp}
+      commands:
+        - {command: [datatype.set, k, 1, one], expect: {equals: OK}}
+        - {command: [datatype.get, k], expect: {equals: [1, one]}}
+        - {command: [TYPE, k], expect: {equals: test___dt}}
+        - {command: [datatype.set, k2, 2, two], expect: {equals: OK}}
+        - {command: [datatype.swap, k, k2], expect: {equals: OK}}
+        - {command: [datatype.get, k], expect: {equals: [2, two]}}
+        # The module's own serialization: a pull request that changes its format marks this one.
+        - {command: [datatype.dump, k]}
+        - {command: [datatype.get, missing]}
+required_evidence:
+  - {evidence_id: valkey.command.sequence, source: module}

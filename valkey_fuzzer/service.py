@@ -68,13 +68,13 @@ class ReplayDriftError(RunServiceError):
         self.drift = [dict(entry) for entry in drift]
 
 
-# The one artifact provider whose path ``--artifact NAME=PATH`` overrides: a binary on this host, so a run
-# recorded elsewhere (a CI batch's parent build) resolves it here.
-LOCAL_BINARY_PROVIDER = "valkey.artifact.local-binary"
+# The artifact providers whose path ``--artifact NAME=PATH`` overrides: a binary or a module build on this host,
+# so a run recorded elsewhere (a CI batch's parent build, its module builds) resolves it here.
+LOCAL_PATH_PROVIDERS = ("valkey.artifact.local-binary", "valkey.artifact.local-module")
 
 
 def with_artifact_paths(scenario: Mapping[str, Any], paths: Mapping[str, str]) -> dict[str, Any]:
-    """A copy of ``scenario`` whose local-binary artifacts named in ``paths`` resolve those paths."""
+    """A copy of ``scenario`` whose local-binary or local-module artifacts named in ``paths`` resolve those paths."""
 
     declared = scenario.get("artifacts")
     overrides = {}
@@ -82,14 +82,16 @@ def with_artifact_paths(scenario: Mapping[str, Any], paths: Mapping[str, str]) -
         artifact = declared.get(name) if isinstance(declared, Mapping) else None
         if not isinstance(artifact, Mapping):
             raise InputError(f"--artifact {name}: the scenario declares no artifact {name!r}")
-        if artifact.get("use") != LOCAL_BINARY_PROVIDER:
-            raise InputError(f"--artifact {name}: artifacts.{name} is not a {LOCAL_BINARY_PROVIDER} artifact")
+        if artifact.get("use") not in LOCAL_PATH_PROVIDERS:
+            raise InputError(
+                f"--artifact {name}: artifacts.{name} is not a {' or '.join(LOCAL_PATH_PROVIDERS)} artifact"
+            )
         overrides[name] = {"with": {"path": path}}
     return merge(scenario, {"artifacts": overrides})
 
 
 def _plan_with_artifact_paths(plan: ExecutionPlan, paths: Mapping[str, str]) -> ExecutionPlan:
-    """``plan`` with its local-binary artifacts named in ``paths`` resolving those paths."""
+    """``plan`` with its local-binary or local-module artifacts named in ``paths`` resolving those paths."""
 
     data = to_plain_data(plan)
     by_id = {spec["id"]: spec for spec in data["artifacts"]}
@@ -97,8 +99,10 @@ def _plan_with_artifact_paths(plan: ExecutionPlan, paths: Mapping[str, str]) -> 
         spec = by_id.get(name)
         if spec is None:
             raise InputError(f"--artifact {name}: the recorded plan declares no artifact {name!r}")
-        if spec["provider_id"] != LOCAL_BINARY_PROVIDER:
-            raise InputError(f"--artifact {name}: artifacts.{name} is not a {LOCAL_BINARY_PROVIDER} artifact")
+        if spec["provider_id"] not in LOCAL_PATH_PROVIDERS:
+            raise InputError(
+                f"--artifact {name}: artifacts.{name} is not a {' or '.join(LOCAL_PATH_PROVIDERS)} artifact"
+            )
         spec["config"] = {**spec["config"], "path": path}
     return ExecutionPlan.from_data(data)
 
@@ -513,7 +517,7 @@ class RunService:
         unless ``allow_drift``. A ``valkey_binary`` override
         is intentional, so it is recorded rather than treated as drift, and
         the replay's scenario uses it, as ``run --valkey-binary`` records it.
-        ``artifacts`` (``--artifact NAME=PATH``) resolves local-binary
+        ``artifacts`` (``--artifact NAME=PATH``) resolves local-binary and local-module
         artifacts at other paths; it is recorded, and what runs is still
         digested and compared with the recorded run after it.
         """

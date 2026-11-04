@@ -236,6 +236,14 @@ def test_one_connection_per_server_carries_the_whole_sequence(builds):
         ("unordered-pairs", [b"f1", b"v1", b"f2", b"v2"], [b"f1", b"v2", b"f2", b"v1"], "ERROR"),
         ("unordered-pairs", {b"f1": b"v1", b"f2": b"v2"}, {b"f2": b"v2", b"f1": b"v1"}, "PASS"),
         ("skip", [b"a"], [b"b"], "PASS"),
+        # JSON text compares by the value it holds: key order, spacing, and 1.0 against 1 do not matter ...
+        ("json", b'{"a":1,"b":[1,2]}', b'{"b": [1, 2], "a": 1.0}', "PASS"),
+        ("equal", b'{"a":1,"b":[1,2]}', b'{"b": [1, 2], "a": 1.0}', "ERROR"),
+        ("json", [b'{"a":"x"}', None], [b'{ "a" : "x" }', None], "PASS"),
+        # ... but every value does, true is not 1, and text that is not JSON compares as itself.
+        ("json", b'{"a":[1,2]}', b'{"a":[2,1]}', "ERROR"),
+        ("json", b"[true]", b"[1]", "ERROR"),
+        ("json", b"not json", b"not json", "PASS"),
     ],
 )
 def test_compare_modes(builds, mode, candidate, parent, status):
@@ -494,6 +502,9 @@ _PARENT = {"compare_with": "/opt/parent/valkey-server"}
         ({"commands": [{"command": ["CLUSTER", "RESET"]}]}, "CLUSTER RESET is refused"),
         ({"commands": [{"command": ["REPLCONF", "ACK", 0]}]}, "REPLCONF is refused"),
         ({"commands": [{"command": ["PSYNC", "?", -1]}]}, "PSYNC is refused"),
+        ({"modules": ["/m.so"], "commands": [{"command": ["PING"]}]}, "modules needs compare_with or modules_parent: the deployment's instances load modules through deployment.server_config.loadmodule"),
+        ({"modules_parent": ["/m.so"], "commands": [{"command": ["PING"]}]}, "modules_parent needs modules"),
+        ({**_PARENT, "server_config": {"loadmodule": "/m.so"}, "commands": [{"command": ["PING"]}]}, r"server_config\.loadmodule: list the modules in modules"),
     ],
 )  # fmt: skip
 def test_a_bad_sequence_config_fails_to_compile(config, error):
@@ -510,6 +521,8 @@ def test_a_bad_sequence_config_fails_to_compile(config, error):
         {**_PARENT, "commands": [{"command": ["CONFIG", "SET", "maxmemory", "1mb"]}]},
         {**_PARENT, "cluster": True, "commands": [{"command": ["RESTORE", "k", 0, {"$base64": "AA4="}]}]},
         {"commands": [{"command": ["PING"], "expect": {"equals": ["a", "b"]}}]},
+        # Two module builds on the deployment's binary: private servers, so what they take is allowed.
+        {"modules": ["/n.so"], "modules_parent": ["/o.so"], "commands": [{"command": ["REPLICAOF", "NO", "ONE"]}]},
     ],
 )
 def test_the_private_servers_take_what_the_deployment_refuses(config):
@@ -521,3 +534,48 @@ def test_the_private_servers_take_what_the_deployment_refuses(config):
 def test_a_yaml_binary_argument_loads_as_base64_data():
     document = load_yaml('command: [RESTORE, k, 0, !!binary "AA4BAgMEBQ=="]', "x")
     assert document == {"command": ["RESTORE", "k", 0, {"$base64": "AA4BAgMEBQ=="}]}
+
+
+# ---------------------------------------------------------------------------
+# Modules
+# ---------------------------------------------------------------------------
+
+
+def _loaded(arguments):
+    return [value for name, value in zip(arguments[::2], arguments[1::2]) if name == "--loadmodule"]
+
+
+def test_both_servers_load_the_modules_and_the_parent_loads_modules_parent_when_given(builds):
+    result, value = run(builds, [{"command": ["PING"]}], modules=["/m/a.so", "/m/b.so"])
+
+    assert result.status.value == "PASS", result.summary
+    assert value["modules"] == {"candidate": ["/m/a.so", "/m/b.so"], "parent": ["/m/a.so", "/m/b.so"]}
+    # Every start loads them, the probes' included, so an option is judged with the modules loaded.
+    for build in BUILDS.values():
+        assert build.starts and all(_loaded(arguments) == ["/m/a.so", "/m/b.so"] for arguments in build.starts)
+
+    result, value = run(builds, [{"command": ["PING"]}], modules=["/m/new.so"], modules_parent=["/m/old.so"])
+
+    assert result.status.value == "PASS", result.summary
+    assert value["modules"] == {"candidate": ["/m/new.so"], "parent": ["/m/old.so"]}
+    assert _loaded(BUILDS[builds["candidate"]].starts[-1]) == ["/m/new.so"]
+    assert _loaded(BUILDS[builds["parent"]].starts[-1]) == ["/m/old.so"]
+
+
+def test_modules_parent_without_compare_with_compares_two_module_builds_on_the_deployments_binary(builds):
+    BUILDS[builds["candidate"]].replies = {("M.GET", "k"): b"fixed"}
+    spec = _spec(
+        modules=["/m/new.so"],
+        modules_parent=["/m/old.so"],
+        commands=[{"command": ["M.GET", "k"], "expect_difference": True, "expect": {"equals": "fixed"}}],
+    )
+    context = FakeContext(spec, deployment={"valkey_binary": builds["candidate"]})
+
+    result = actions.CommandsAction().run(context, spec)
+
+    # Both servers ran the candidate build, one per module build; the parent build never started.
+    assert result.status.value == "ERROR", result.summary
+    assert result.diagnostics["reason"] == "unreached-change", "one fake build answers both the same"
+    candidate = BUILDS[builds["candidate"]]
+    assert {tuple(_loaded(arguments)) for arguments in candidate.starts} == {("/m/new.so",), ("/m/old.so",)}
+    assert candidate.connections == 2 and not BUILDS[builds["parent"]].starts

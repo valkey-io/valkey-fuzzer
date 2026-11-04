@@ -360,7 +360,10 @@ def test_an_artifact_override_must_name_a_declared_local_binary_artifact_once(
     other = tmp_path / "other.yaml"
     other.write_text(yaml.safe_dump({**UPGRADE, "artifacts": {"candidate": {"use": "other.artifact.kind"}}}))
     assert _cli("run", other, "--artifact", "candidate=/x") == EXIT_HARNESS_ERROR
-    assert "artifacts.candidate is not a valkey.artifact.local-binary artifact" in capsys.readouterr().err
+    assert (
+        "artifacts.candidate is not a valkey.artifact.local-binary or valkey.artifact.local-module artifact"
+        in capsys.readouterr().err
+    )
     assert (
         _cli("run", "--seed", "1", "--experiment", "valkey.forkless-save", "--artifact", "x=/y") == EXIT_HARNESS_ERROR
     )

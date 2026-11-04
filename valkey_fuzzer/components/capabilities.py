@@ -17,7 +17,10 @@ a rejected configuration is ``SKIP`` only when the build starts without those
 settings, and ``ERROR`` otherwise, so a typo in any other setting never skips.
 It never judges whether that configuration is what the experiment wants: a
 scenario that turns a feature off runs, and lacks the experiment's path
-evidence.
+evidence. ``commands`` are checked there, on a server started as the
+instances are, instead of on the probe's own server: a module the deployment
+loads (``deployment.server_config.loadmodule``) brings its commands only
+there, so a deployment that does not load it is ``SKIP``.
 
 ``valkey.capability.host-probe`` makes a run ``SKIP_UNSUPPORTED`` on a host
 that cannot run it: not Linux, not root (or root, for permission faults), no
@@ -29,8 +32,8 @@ import os
 import platform
 import shutil
 import socket
-from collections.abc import Mapping
-from typing import Any, Callable
+from collections.abc import Mapping, Sequence
+from typing import Any, Callable, Optional
 
 import valkey
 
@@ -64,6 +67,8 @@ _PROBE_FIELDS = {
     "config_set": mapping_of(additional=ConfigField(list), default=dict),
     # {section: [field names]}: INFO must report each.
     "info_fields": mapping_of(additional=ConfigField(list, items=TEXT), default=dict),
+    # Checked on the deployment config's starts when deployment_config is set (a module the deployment loads),
+    # else on the probe's own server.
     "commands": ConfigField(list, default=list, items=TEXT),
     "min_version": ConfigField(str, allow_none=True, default=None),
     "min_distinct_builds": ConfigField(int, default=1, minimum=1, maximum=64),
@@ -253,13 +258,27 @@ def starts_with(
 
 
 def starts_with_named(
-    context: Any, spec: ComponentSpec, binary: str, server_config: Mapping[str, Any], named: Any, timeout_s: float
+    context: Any,
+    spec: ComponentSpec,
+    binary: str,
+    server_config: Mapping[str, Any],
+    named: Any,
+    timeout_s: float,
+    commands: Sequence[str] = (),
 ) -> Probed:
-    """Whether ``binary`` starts with ``server_config``: a rejection is SKIP only when it starts without the
-    ``named`` settings, the ones the experiment says the build may lack, and ERROR otherwise."""
+    """Whether ``binary`` starts with ``server_config`` and then implements ``commands``: a rejection is SKIP only
+    when it starts without the ``named`` settings, the ones the experiment says the build may lack, and ERROR
+    otherwise; a server that started and lacks a command is SKIP."""
 
-    status, summary, facts = starts_with(context, spec, binary, server_config, timeout_s)
-    if status is not ComponentStatus.SKIP:
+    def implements(client: Any, facts: dict[str, Any]) -> Probed:
+        missing = _missing_command(client, commands)
+        if missing is not None:
+            return ComponentStatus.SKIP, f"started with it, the build does not implement command {missing!r}", facts
+        return ComponentStatus.PASS, "the build starts with it", facts
+
+    status, summary, facts = _run_private_server(context, spec, binary, server_config, timeout_s, implements)
+    # Only a rejected start leaves its exit output; a SKIP without one is a command the server lacks.
+    if status is not ComponentStatus.SKIP or "exit_output" not in facts:
         return status, summary, facts
     lacking = sorted(set(server_config) & set(named))
     without = {name: value for name, value in server_config.items() if name not in named}
@@ -317,15 +336,24 @@ def _check_capabilities(config: Mapping[str, Any], client: Any, facts: dict[str,
             info_values[f"{section}.{field_name}"] = section_info[field_name]
     facts["info"] = info_values
 
-    for command in config["commands"]:
+    missing = _missing_command(client, config["commands"])
+    if missing is not None:
+        return ComponentStatus.SKIP, f"build does not implement command {missing!r}", facts
+    return ComponentStatus.PASS, "capability probe passed", facts
+
+
+def _missing_command(client: Any, commands: Sequence[str]) -> Optional[str]:
+    """The first of ``commands`` the started server's ``COMMAND INFO`` does not know, or None."""
+
+    for command in commands:
         try:
             reply = client.execute_command("COMMAND", "INFO", command)
         except TypeError:
             # valkey-py cannot parse the nil entry an unknown command returns.
             reply = None
         if not isinstance(reply, Mapping) or command.lower() not in {name.lower() for name in reply}:
-            return ComponentStatus.SKIP, f"build does not implement command {command!r}", facts
-    return ComponentStatus.PASS, "capability probe passed", facts
+            return command
+    return None
 
 
 class BuildProbe:
@@ -354,14 +382,19 @@ class BuildProbe:
         builds = set()
         for label, binary in binaries.items():
             # The capability checks with the probe's own startup config, then one start per distinct deployment
-            # config.
-            record(label, probe_binary(context, spec, binary, config))
+            # config. The commands are checked on the deployment config's starts when there are any: a module the
+            # deployment loads brings its commands only there.
+            starts = planned.get(label, ())
+            record(label, probe_binary(context, spec, binary, {**config, "commands": []} if starts else config))
             builds.add((results[label].get("version"), results[label].get("git_sha1")))
-            for instances, server_config in planned.get(label, ()):
-                name = f"{label} deployment config" + ("" if len(planned[label]) == 1 else f" ({', '.join(instances)})")
+            for instances, server_config in starts:
+                name = f"{label} deployment config" + ("" if len(starts) == 1 else f" ({', '.join(instances)})")
                 startup_config = {**config["startup_config"], **server_config}
                 named = {*config["deployment_config"], *config["startup_config"]}
-                record(name, starts_with_named(context, spec, binary, startup_config, named, config["timeout_s"]))
+                probed = starts_with_named(
+                    context, spec, binary, startup_config, named, config["timeout_s"], config["commands"]
+                )
+                record(name, probed)
         if worst is ComponentStatus.PASS:
             if len(builds) < config["min_distinct_builds"]:
                 # A second build is an input the operator gives; without it the run cannot be set up.

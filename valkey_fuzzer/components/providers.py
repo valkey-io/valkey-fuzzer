@@ -3,7 +3,9 @@
 ``valkey.artifact.local-binary`` resolves a valkey-server binary on this host,
 fingerprints it, and optionally verifies its version or build SHA; its
 ``binary`` output is referenced from deployments and components with
-``{$ref: artifacts.<id>.binary}``.
+``{$ref: artifacts.<id>.binary}``. ``valkey.artifact.local-module`` is a
+module build (a ``.so``) on this host, fingerprinted the same way; its ``path``
+output goes to ``loadmodule`` (``{$ref: artifacts.<id>.path}``).
 
 ``valkey.resource.tmpdir`` and ``valkey.resource.tmpfs`` provision a private
 directory or a size-limited tmpfs mount whose ``path`` output can hold instance
@@ -34,6 +36,7 @@ import time
 from collections.abc import Mapping
 from typing import Any, Optional
 
+from valkey_fuzzer._data import file_sha256
 from valkey_fuzzer.deployment.local.processes import resolve_binary_path
 from valkey_fuzzer.environment import EnvironmentProviderRegistration, EnvironmentResult, SupportDecision
 from valkey_fuzzer.hoststate import mount_parent, release_mount_parent, run_bounded, tag_directory, untag_directory
@@ -43,6 +46,7 @@ from valkey_fuzzer.schema import ConfigError, ConfigField, ConfigSchema
 from .server import parse_version_output, version_output
 
 LOCAL_BINARY_PROVIDER = "valkey.artifact.local-binary"
+LOCAL_MODULE_PROVIDER = "valkey.artifact.local-module"
 TMPDIR_PROVIDER = "valkey.resource.tmpdir"
 TMPFS_PROVIDER = "valkey.resource.tmpfs"
 
@@ -76,10 +80,9 @@ def describe_binary(path: str) -> dict[str, Any]:
     return {"sha256": digest.hexdigest(), **parse_version_output(output), "version_output": output.strip()}
 
 
-def _check_binary(spec: Any, config: Mapping[str, Any]) -> None:
+def _check_strings(spec: Any, config: Mapping[str, Any]) -> None:
     # ``path`` may still be a reference at compile time; it is checked once resolved.
-    for name in _BINARY_CONFIG.fields:
-        value = config[name]
+    for name, value in config.items():
         if isinstance(value, str) and (not value or "\0" in value):
             raise ConfigError(f"{spec.dependency.path}.with.{name} must be a non-empty string without NUL bytes")
 
@@ -108,6 +111,36 @@ class LocalBinaryProvider:
             outputs={"binary": path},
             provenance={key: value for key, value in record.items() if key != "version_output"},
         )
+
+    def rollback(self, context: Any, spec: Any) -> None:
+        return None
+
+    def cleanup(self, context: Any, spec: Any, result: EnvironmentResult) -> None:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# valkey.artifact.local-module
+# ---------------------------------------------------------------------------
+
+# A bare path: Valkey reads module arguments from the tokens after the path on one loadmodule directive, and a
+# server config value is one argument (a list repeats the directive), so arguments could not reach the module.
+_MODULE_CONFIG = ConfigSchema({"path": ConfigField(str, reference=True)})
+
+
+class LocalModuleProvider:
+    """A module build on this host: its absolute ``path``, and the SHA-256 of the file as provenance, so a replay
+    of another build of the module is drift."""
+
+    def check_support(self, context: Any, spec: Any, resolved_config: Mapping[str, Any]) -> SupportDecision:
+        return SupportDecision.allow()
+
+    def acquire(self, context: Any, spec: Any, resolved_config: Mapping[str, Any]) -> EnvironmentResult:
+        path = os.path.abspath(resolved_config["path"])
+        digest = file_sha256(path) if os.path.isfile(path) else None
+        if digest is None:
+            raise FileNotFoundError(f"artifact {spec.id!r}: module {path} is not a readable file")
+        return EnvironmentResult(outputs={"path": path}, provenance={"sha256": digest})
 
     def rollback(self, context: Any, spec: Any) -> None:
         return None
@@ -296,7 +329,15 @@ ENVIRONMENT_PROVIDERS = (
         factory=LocalBinaryProvider,
         outputs=("binary",),
         config=_BINARY_CONFIG,
-        check=_check_binary,
+        check=_check_strings,
+    ),
+    EnvironmentProviderRegistration(
+        kind=EnvironmentKind.ARTIFACT,
+        provider_id=LOCAL_MODULE_PROVIDER,
+        factory=LocalModuleProvider,
+        outputs=("path",),
+        config=_MODULE_CONFIG,
+        check=_check_strings,
     ),
     EnvironmentProviderRegistration(
         kind=EnvironmentKind.RESOURCE,

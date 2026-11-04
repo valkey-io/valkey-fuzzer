@@ -207,9 +207,14 @@ configuration the deployment gives the instances that run it.
 rejects the configuration but starts without those settings (and the
 probe's own `startup_config`), such as `rdbcompression zstd` on a build made
 without `BUILD_ZSTD=yes`, the run is `SKIP_UNSUPPORTED`; any other rejected
-setting makes it `ERROR`. Those starts only ask whether the build accepts the
-configuration: the `config_get` values, INFO fields, and commands are checked
-on the probe's own `startup_config`, never on the deployment's. A scenario
+setting makes it `ERROR`. Those starts ask whether the build accepts the
+configuration and, once started, implements `commands`: a module the
+deployment loads (`deployment.server_config.loadmodule`) brings its commands
+only there, so with `deployment_config` the commands are checked on those
+starts instead of the probe's own, and a deployment that does not load the
+module is `SKIP_UNSUPPORTED` (a module that fails to load is `ERROR`). The
+`config_get` values and INFO fields are checked on the probe's own
+`startup_config`, never on the deployment's. A scenario
 that configures a feature away (such as `bgsave-default-method fork` for a
 forkless experiment) therefore runs and lacks the experiment's required path
 evidence, which makes it `ERROR`; it is never hidden as unsupported.
@@ -223,7 +228,7 @@ evidence, which makes it `ERROR`; it is never hidden as unsupported.
 | `info_fields` | mapping | `{}` | INFO section to the field names it must report. |
 | `lacks_configs` | list | `[]` | Configs the build must not know (`CONFIG GET` returns nothing), such as `repl-compression` for an older build; a build that knows one is `ERROR`. |
 | `config_set` | mapping | `{}` | Config name to the values `CONFIG SET` must accept at runtime. |
-| `commands` | list | `[]` | Command names the build must implement. |
+| `commands` | list | `[]` | Command names the build must implement; with `deployment_config` (`[loadmodule]` for a module's commands, such as `JSON.GET`), checked on the deployment config's starts. |
 | `min_version` | string or null | `null` | Lowest accepted version, such as `"8.1.0"`. |
 | `min_distinct_builds` | integer, 1 to 64 | 1 | Distinct (version, git SHA) builds the binaries must cover; fewer is `ERROR`. |
 | `binaries` | list of strings or references | `[]` | Further binaries to probe, such as a rolling-upgrade target. |
@@ -339,7 +344,8 @@ record per reply.
 
 Sends a command sequence on one connection, so `MULTI`/`EXEC`, `WATCH`,
 `SELECT`, and client state span the commands, and with `compare_with`
-compares every reply with the same sequence on another build.
+compares every reply with the same sequence on another build; with `modules`
+and `modules_parent`, on another build of a module.
 
 ```yaml
 - use: valkey.action.commands
@@ -360,6 +366,8 @@ compares every reply with the same sequence on another build.
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `compare_with` | binary path or null | `null` | A build to compare with, usually `{$ref: artifacts.parent.binary}`. With it the sequence runs on two private servers the action starts, one of the deployment's binary (the candidate) and one of this (the parent), both from an empty dataset; the deployment's instances are never touched. |
+| `modules` | list of paths or references | `[]` | Modules both private servers load (`--loadmodule` each, a bare path: see [`valkey.artifact.local-module`](#valkeyartifactlocal-module)), usually `[{$ref: artifacts.module.path}]`; recorded in the evidence. Needs `compare_with` or `modules_parent`: the deployment's instances load modules through `deployment.server_config.loadmodule`, which `server_config` here refuses. |
+| `modules_parent` | list of paths or references, or null | `null` | The parent server loads these instead of `modules`, usually `[{$ref: artifacts.module_parent.path}]`. Without `compare_with`, both servers run the deployment's binary, so the sequence compares two builds of a module on one Valkey build; with it (a core change to the module API), each Valkey build loads its own commit's modules. Needs `modules`. |
 | `instances` | selector | `primaries` | Without `compare_with`: the instances the sequence runs on, one connection each. |
 | `cluster` | boolean | `false` | With `compare_with`: both private servers run as a one-node cluster serving every slot (`cluster-enabled yes`, `CLUSTER ADDSLOTSRANGE 0 16383`, `cluster_state:ok` awaited within `timeout_s`), so a sequence can test `CLUSTER` subcommands and slot-keyed replies. Without `compare_with` it is a config error: the deployment decides the mode. |
 | `server_config` | mapping | `{}` | Server options both private servers start with, as the deployment's `server_config`; the options the deployment manages (`dir`, `port`, `cluster-enabled`, ...) are refused. `sanitize-dump-payload yes` and `enable-debug-command yes` unless set. An option the parent rejects is dropped on both sides and recorded as `dropped_config`; test an option the change adds with `CONFIG SET` inside the sequence, marked `expect_difference`. |
@@ -374,7 +382,7 @@ Each command has:
 | `command` | list of strings, numbers, or `!!binary` values | | A `!!binary` argument is sent as bytes (it loads as `{$base64: ...}`). |
 | `expect` | mapping or null | `null` | A [predicate](#predicates) on the reply (`equals` also takes a list or a mapping, compared as JSON data), or `{error: true}`, `{error: false}`, or `{error: "<substring>"}`. `null` accepts any reply that is not an error. |
 | `expect_difference` | boolean | `false` | The change under test means this reply to differ from the parent's: the command the change is in, or a later read it carries into. Needs `expect` and `compare_with`. |
-| `compare` | `equal`, `unordered`, `unordered-pairs`, `skip` | `equal` | How the two builds' replies compare: as sent; a flat reply with its items sorted; a flat field-value reply with its pairs sorted (values swapped between fields still differ; a RESP3 map compares as a map); or recorded and never compared (`TIME`, `TTL`, `INFO`, `CLIENT ID`, `SCAN` cursors, `OBJECT ENCODING`, `MEMORY USAGE`, `DEBUG OBJECT`). Avoid commands that also change state at random (`SPOP`, `SRANDMEMBER`, `HRANDFIELD`, `RANDOMKEY`) in a compared sequence: Valkey seeds its hash function per process. |
+| `compare` | `equal`, `unordered`, `unordered-pairs`, `json`, `skip` | `equal` | How the two builds' replies compare: as sent; a flat reply with its items sorted; a flat field-value reply with its pairs sorted (values swapped between fields still differ; a RESP3 map compares as a map); the JSON value a bulk string (or each item of an array) holds, for valkey-json's `JSON.GET` and `JSON.MGET` (key order, spacing, and `1.0` against `1` do not count; `true` is not `1`; a reply that is not JSON compares as itself); or recorded and never compared (`TIME`, `TTL`, `INFO`, `CLIENT ID`, `SCAN` cursors, `OBJECT ENCODING`, `MEMORY USAGE`, `DEBUG OBJECT`). Avoid commands that also change state at random (`SPOP`, `SRANDMEMBER`, `HRANDFIELD`, `RANDOMKEY`) in a compared sequence: Valkey seeds its hash function per process. |
 
 Replies are recorded as the server sent them, over a raw connection without
 valkey-py's response callbacks: `SET` replies `OK`, not `true`; `HGETALL` a
@@ -418,8 +426,9 @@ allowed and simply crash the server they are sent to (a candidate crash is a
 deployment's instances.
 
 Evidence: `valkey.command.sequence`, `{candidate: {replies: [{index, reply |
-error, unanswered?}], digest, exited?}, parent: {...} | null, cluster,
-dropped_config, reached: [indexes], unexplained: [indexes]}` (and
+error, unanswered?}], digest, exited?}, parent: {...} | null, modules:
+{candidate: [paths], parent: [paths]} | null, cluster, dropped_config,
+reached: [indexes], unexplained: [indexes]}` (and
 `instance_id` without `compare_with`, one item per instance). `digest` is the
 SHA-256 of the canonical JSON of the compared replies. Both private servers'
 `server.log` and `output.log` are copied into the run's component folder
@@ -1338,6 +1347,23 @@ SHA, and optionally verifies them.
 | `expected_sha` | string or null | `null` | A prefix of the git SHA or of the file's SHA-256. |
 
 Output: `binary`, the absolute path.
+
+### `valkey.artifact.local-module`
+
+A module build on this host, such as valkey-json's `libjson.so` or one of
+Valkey's `tests/modules`, for a deployment's `server_config.loadmodule` or the
+`modules` of `valkey.action.commands`. Its SHA-256 is the provenance a replay
+compares, so a replay that loads another build of the module reports drift,
+as for a binary.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `path` | string or reference | | The module file; a relative path is taken from the current directory. |
+
+Output: `path`, the absolute path. A bare path only, without module
+arguments: Valkey reads a module's arguments from the words after its path on
+one `loadmodule` directive, and a server config value is one argument (a list
+repeats the directive), so arguments could not reach the module.
 
 ### `valkey.resource.tmpdir`
 

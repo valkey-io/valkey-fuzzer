@@ -214,6 +214,55 @@ binary. The outcome records the server's git SHA, read from
 `valkey-server --version`, as `valkey_sha`, and each instance's binary and its
 SHA-256 under `diagnostics.deployment.instances`.
 
+### Modules
+
+A deployment loads a module through `server_config.loadmodule`, usually a
+[`valkey.artifact.local-module`](components.md#valkeyartifactlocal-module)
+artifact; a list loads several:
+
+```yaml
+artifacts:
+  module: {use: valkey.artifact.local-module, with: {path: /opt/valkey-json/build/src/libjson.so}}
+deployment:
+  mode: standalone
+  server_config:
+    loadmodule: {$ref: artifacts.module.path}
+```
+
+A bare path only: Valkey reads a module's arguments from the words after its
+path on one directive, and a config value is one argument. What the fuzzer
+does with a module:
+
+- **Is it loaded?** A [build probe](components.md#valkeycapabilitybuild-probe)
+  with `commands: [JSON.GET]` and `deployment_config: [loadmodule]` checks the
+  commands on a server started with the deployment's config, so a
+  deployment that does not load the module is `SKIP_UNSUPPORTED`.
+- **Its data.** [`valkey.oracle.dataset-digest`](components.md#valkeyoracledataset-digest)
+  digests a module value by its `DUMP` payload, less the RDB version and
+  CRC64, after checking that the module serializes a value the same way in
+  two processes (a module that does not is `ERROR`, never a `FAIL`);
+  [`valkey.oracle.rdb-snapshot`](components.md#valkeyoraclerdb-snapshot)
+  reloads an RDB with the saving instance's modules. This compares the
+  module's serialization, not its logical data, so a module that changes its
+  format changes the digest without a bug. A module command that does not
+  replicate itself (`datatype.set` of Valkey's `tests/modules/datatype.so`
+  never does) leaves replicas without its writes, which `include_replicas`
+  reports as replicas that do not hold their primary's data; write such values
+  with `RESTORE` of their payload, which replicates.
+- **Its commands, across builds.** [`valkey.action.commands`](components.md#valkeyactioncommands)
+  starts two private servers that load `modules` and `modules_parent`, on one
+  Valkey build (or, with `compare_with`, each on its own), and compares their
+  replies; `compare: json` compares valkey-json's `JSON.GET` replies as JSON
+  values. [`examples/valkey/experiments/module-commands-compare.yaml`](../examples/valkey/experiments/module-commands-compare.yaml)
+  is such a sequence on `tests/modules/datatype.so`, and
+  [`examples/valkey/module_commands_compare.yaml`](../examples/valkey/module_commands_compare.yaml)
+  runs it with the two module builds declared as `artifacts.module` and
+  `artifacts.module_parent`, the names the [PR batch](cluster-chaos-and-ci.md#scheduled-and-repository-workflows)
+  declares when it builds a module.
+
+The first module the fuzzer supports is valkey-json, after Valkey's own
+`tests/modules`.
+
 ### Ports, logs, and cleanup
 
 Before resolving binaries or starting anything, the provider checks that every

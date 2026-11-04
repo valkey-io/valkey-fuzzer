@@ -92,7 +92,8 @@ def test_every_valkey_fuzzer_command_in_a_workflow_parses_with_the_cli(name):
 @pytest.mark.parametrize("name", WORKFLOW_NAMES)
 def test_every_file_a_workflow_names_exists(name):
     scripts = "\n".join(_run_scripts(_workflow(name)))
-    for path in re.findall(r"(?:tests|examples|zoo|\.github/scripts)/[\w./-]+", scripts):
+    # A path that continues another ("$1/tests/modules") is in another checkout.
+    for path in re.findall(r"(?<![\w/])(?:tests|examples|zoo|\.github/scripts)/[\w./-]+", scripts):
         assert (ROOT / path).exists(), f"{name} references missing {path}"
 
 
@@ -333,6 +334,18 @@ OTHER_ARTIFACT = yaml.safe_dump(
 )
 PARENT = "b" * 40
 PARENT_BINARY = "/work/valkey-parent/src/valkey-server"
+MODULE_DIR, MODULE_PARENT_DIR = "/work/module-src", "/work/module-parent"
+# A scenario that compares two builds of a module: what a valkey.action.commands scenario with modules holds.
+COMPARES_MODULES = yaml.safe_dump(
+    {
+        **SCENARIO_DOCUMENT,
+        "experiment": {
+            "id": "x",
+            "inputs": {"module": {"$ref": "artifacts.module.path"}, "old": {"$ref": "artifacts.module_parent.path"}},
+        },
+    }
+)
+JSON_MODULE = {"module_repository": "valkey-io/valkey-json", "module_sha": "c" * 40, "module_parent_sha": "d" * 40}
 # A proposal's own experiment: the register bundle's, under a proposed. ID.
 PROPOSED = BUNDLE["experiments/toy.register.yaml"].replace("id: toy.register\n", "id: proposed.register\n")
 
@@ -352,6 +365,10 @@ def _check_pr_batch_inputs(tmp_path, scenarios, inputs):
         "INPUT_VALKEY_SHA": inputs.get("sha", "a" * 40),
         "INPUT_VALKEY_PARENT_SHA": inputs.get("parent_sha", ""),
         "INPUT_BUILD": inputs.get("build", "default"),
+        "INPUT_MODULE_REPOSITORY": inputs.get("module_repository", ""),
+        "INPUT_MODULE_SHA": inputs.get("module_sha", ""),
+        "INPUT_MODULE_PARENT_SHA": inputs.get("module_parent_sha", ""),
+        "INPUT_MODULE_FILE": inputs.get("module_file", ""),
         "INPUT_RANDOM_SEEDS": inputs.get("random_seeds", "0"),
         "INPUT_REQUEST_ID": inputs.get("request_id", ""),
         "INPUT_EXCLUDE_EXPERIMENTS": inputs.get("exclude_experiments", ""),
@@ -359,6 +376,8 @@ def _check_pr_batch_inputs(tmp_path, scenarios, inputs):
         "SPEC_DIR": str(tmp_path / "spec"),
         "EXPERIMENTS_DIR": str(tmp_path / "experiments"),
         "PARENT_BINARY": PARENT_BINARY,
+        "MODULE_DIR": MODULE_DIR,
+        "MODULE_PARENT_DIR": MODULE_PARENT_DIR,
     }
     with patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()):
         try:
@@ -413,7 +432,7 @@ def test_the_pr_batch_builds_a_parent_commit_the_same_way_and_declares_it_to_eve
     # With a parent build, the block is appended to the text as sent, and the result is the scenario plus it.
     scenarios = {"compare": COMPARES_PARENT, "plain": SCENARIO}
     assert _check_pr_batch_inputs(tmp_path, scenarios, {"parent_sha": PARENT, "build": "asan"}) is None
-    block = CI.parent_artifact_block(PARENT_BINARY)
+    block = CI.artifacts_block({"parent": ("valkey.artifact.local-binary", PARENT_BINARY)})
     assert block == (
         f'artifacts:\n  parent:\n    use: valkey.artifact.local-binary\n    with:\n      path: "{PARENT_BINARY}"\n'
     )
@@ -424,6 +443,68 @@ def test_the_pr_batch_builds_a_parent_commit_the_same_way_and_declares_it_to_eve
             **yaml.safe_load(text),
             "artifacts": {"parent": {"use": "valkey.artifact.local-binary", "with": {"path": PARENT_BINARY}}},
         }
+
+
+def test_the_pr_batch_builds_a_module_at_two_commits_and_declares_both_to_every_scenario(tmp_path):
+    workflow = _workflow("fuzzer-pr-batch.yml")
+    inputs = workflow["on"]["workflow_dispatch"]["inputs"]
+    for name in ("module_repository", "module_sha", "module_parent_sha", "module_file"):
+        assert inputs[name]["required"] is False and inputs[name]["default"] == "", name
+    (job,) = workflow["jobs"].values()
+    assert job["env"]["MODULE_DIR"].endswith("/module-src")
+    assert job["env"]["MODULE_PARENT_DIR"].endswith("/module-parent")
+    checkouts = {step["with"]["path"]: step for step in job["steps"] if "path" in step.get("with", {})}
+    assert checkouts["module-src"]["if"] == "inputs.module_repository != ''"
+    assert checkouts["module-src"]["with"]["ref"] == "${{ inputs.module_sha }}"
+    assert checkouts["module-parent"]["if"] == "inputs.module_parent_sha != ''"
+    assert checkouts["module-parent"]["with"]["ref"] == "${{ inputs.module_parent_sha }}"
+    for checkout in ("module-src", "module-parent"):
+        assert checkouts[checkout]["with"]["repository"] == "${{ inputs.module_repository }}"
+    steps = [step.get("name") for step in job["steps"]]
+    # The modules are built against the Valkey build, after it.
+    assert steps.index("Build the modules") > steps.index("Build Valkey")
+    (build,) = [step for step in job["steps"] if step.get("name") == "Build the modules"]
+    assert build["if"] == "inputs.module_repository != ''"
+    # The workflow's table of module builds is exactly the modules check-inputs accepts.
+    table = re.search(r'case "\$\{INPUT_MODULE_REPOSITORY#\*/\}" in(.*?)esac', build["run"], re.S).group(1)
+    assert set(re.findall(r"^\s*([\w.-]+)\)", table, re.M)) == set(CI.MODULE_FILES)
+    assert 'VALKEY_MODULE_H_PATH="${GITHUB_WORKSPACE}/valkey-src/src/valkeymodule.h" ./build.sh' in table
+    assert 'make -C "$1/tests/modules"' in table
+    assert "build_module module-src" in build["run"] and "build_module module-parent" in build["run"]
+    (summary,) = _step_env("fuzzer-pr-batch.yml", "summary")
+    assert {"MODULE_REPOSITORY", "MODULE_SHA", "MODULE_PARENT_SHA"} <= set(summary)
+
+    # One Valkey build, two module builds: no valkey_parent_sha needed.
+    scenarios = {"compare": COMPARES_MODULES, "plain": SCENARIO}
+    assert _check_pr_batch_inputs(tmp_path, scenarios, JSON_MODULE) is None
+    declared = {
+        "module": ("valkey.artifact.local-module", f"{MODULE_DIR}/build/src/libjson.so"),
+        "module_parent": ("valkey.artifact.local-module", f"{MODULE_PARENT_DIR}/build/src/libjson.so"),
+    }
+    for name, text in scenarios.items():
+        written = (tmp_path / "candidates" / f"{name}.yaml").read_text(encoding="utf-8")
+        assert written == text + CI.artifacts_block(declared)
+        assert yaml.safe_load(written)["artifacts"]["module"] == {
+            "use": "valkey.artifact.local-module",
+            "with": {"path": f"{MODULE_DIR}/build/src/libjson.so"},
+        }
+
+    # valkey's tests/modules at both commits, with the parent Valkey build too.
+    core = {"module_repository": "valkey-io/valkey", "module_sha": "c" * 40, "module_parent_sha": "d" * 40,
+            "module_file": "tests/modules/datatype.so", "parent_sha": PARENT}  # fmt: skip
+    assert _check_pr_batch_inputs(tmp_path / "core", {"compare": COMPARES_MODULES}, core) is None
+    written = yaml.safe_load((tmp_path / "core" / "candidates" / "compare.yaml").read_text(encoding="utf-8"))
+    assert list(written["artifacts"]) == ["parent", "module", "module_parent"]
+    assert written["artifacts"]["module_parent"]["with"]["path"] == f"{MODULE_PARENT_DIR}/tests/modules/datatype.so"
+
+
+def test_the_batch_summary_names_the_module_commits(tmp_path):
+    (tmp_path / "summary.json").write_text(json.dumps({"status": "PASS", "counts": {}, "runs": [], "signatures": []}))
+
+    summary = CI.batch_summary("Batch", str(tmp_path), module="`o/valkey-json` `ccc`", module_parent="ddd")
+
+    assert "- Module (artifacts.module): `o/valkey-json` `ccc`\n" in summary
+    assert "- Module parent commit (artifacts.module_parent): `ddd`\n" in summary
 
 
 def test_the_pr_batch_writes_the_experiments_it_is_sent_and_the_batch_loads_them(tmp_path):
@@ -484,6 +565,47 @@ def test_the_batch_summary_names_the_parent_commit_and_the_build(tmp_path):
         ({"a": SCENARIO}, {"parent_sha": "B" * 40}, "valkey_parent_sha must be empty or a full"),
         ({"a": SCENARIO}, {"parent_sha": "a" * 40}, "valkey_parent_sha is valkey_sha"),
         ({"a": SCENARIO}, {"build": "valgrind"}, "build must be one of default, asan, ubsan"),
+        (
+            {"a": COMPARES_MODULES},
+            {},
+            "references artifacts.module, which the batch does not declare (no module_repository)",
+        ),
+        (
+            {"a": COMPARES_MODULES},
+            {**JSON_MODULE, "module_parent_sha": ""},
+            "references artifacts.module_parent, which the batch does not declare (no module_parent_sha)",
+        ),
+        (
+            {"a": SCENARIO},
+            {"module_sha": "c" * 40},
+            "module_sha, module_parent_sha, and module_file need module_repository",
+        ),
+        ({"a": SCENARIO}, {"module_file": "x.so"}, "need module_repository"),
+        (
+            {"a": SCENARIO},
+            {**JSON_MODULE, "module_repository": "evil; rm"},
+            "module_repository must be empty or OWNER/NAME",
+        ),
+        (
+            {"a": SCENARIO},
+            {**JSON_MODULE, "module_repository": "o/valkey-search"},
+            "is not a module the batch builds; it builds valkey-json, valkey",
+        ),
+        ({"a": SCENARIO}, {**JSON_MODULE, "module_sha": "main"}, "module_sha must be a full 40-character"),
+        ({"a": SCENARIO}, {**JSON_MODULE, "module_parent_sha": "D" * 40}, "module_parent_sha must be empty or a full"),
+        ({"a": SCENARIO}, {**JSON_MODULE, "module_parent_sha": "c" * 40}, "module_parent_sha is module_sha"),
+        (
+            {"a": SCENARIO},
+            {**JSON_MODULE, "module_repository": "valkey-io/valkey"},
+            "valkey builds many modules: module_file must name one",
+        ),
+        (
+            {"a": SCENARIO},
+            {**JSON_MODULE, "module_file": "../escape.so"},
+            "module_file must be a relative path to a .so",
+        ),
+        ({"a": SCENARIO}, {**JSON_MODULE, "module_file": "/abs/x.so"}, "module_file must be a relative path to a .so"),
+        ({"a": SCENARIO.rstrip("\n")}, JSON_MODULE, "does not add exactly that key"),
         ({"a": SCENARIO}, {"sha": "main"}, "full 40-character lowercase commit SHA"),
         ({"a": SCENARIO}, {"repository": "evil; rm -rf /"}, "OWNER/NAME"),
         ({"a": SCENARIO}, {"bundles": {"../up": {}}}, "must be lowercase letters"),

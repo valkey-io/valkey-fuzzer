@@ -12,10 +12,17 @@ import pytest
 
 from tests.test_compression_evidence import _bgsave
 from tests.test_valkey_components import FakeHandle, _spec
-from tests.valkey_experiments_support import evidence_values, fake_context
-from valkey_fuzzer.components import snapshots
+from tests.valkey_experiments_support import evidence_values, fake_context, resolved, unit_plan, valkey_service
+from valkey_fuzzer.components import capabilities, providers, snapshots
 from valkey_fuzzer.components.keyspace import canonical_value, keyspace_digest
 from valkey_fuzzer.components.snapshots import NONDETERMINISTIC, DatasetDigestOracle
+from valkey_fuzzer.environment import EnvironmentProviderRegistry, EnvironmentProvisioner, EnvironmentSpec
+from valkey_fuzzer.plan import ComponentSpec
+from valkey_fuzzer.protocols import ComponentRole
+from valkey_fuzzer.provenance import artifact_digests, replayed_drift
+from valkey_fuzzer.references import EnvironmentKind, parse_environment_reference
+from valkey_fuzzer.service import with_artifact_paths
+from valkey_fuzzer.testing import FakeContext
 
 MODULE = "/opt/modules/datatype.so"
 
@@ -196,3 +203,120 @@ def test_a_digest_listing_records_a_module_value_by_its_digest(tmp_path, probe_s
     [record] = evidence_values(result.evidence, "valkey.dataset.digest")
     expected = {"a": ["test___dt", hashlib.sha256(b"1").hexdigest()]}
     assert record["digest"] == keyspace_digest(expected) and os.path.exists(record["listing"])
+
+
+# valkey.artifact.local-module
+
+
+def _acquire(tmp_path, path, run="r1"):
+    """Acquire ``artifacts.module`` from ``path`` with the real provider; the session."""
+
+    registry = EnvironmentProviderRegistry()
+    registry.register_many(providers.ENVIRONMENT_PROVIDERS)
+    spec = EnvironmentSpec(EnvironmentKind.ARTIFACT, "module", providers.LOCAL_MODULE_PROVIDER, config={"path": path})
+    return EnvironmentProvisioner(registry=registry, artifact_root=tmp_path / run).acquire(
+        (spec,), (), run_id=run, seed=1, deadline=None
+    )
+
+
+def test_a_local_module_is_its_absolute_path_and_its_sha256_is_compared_on_replay(tmp_path, monkeypatch):
+    module = tmp_path / "libjson.so"
+    module.write_bytes(b"build one")
+    monkeypatch.chdir(tmp_path)
+
+    session = _acquire(tmp_path, "libjson.so")
+    assert session.resolve(parse_environment_reference("artifacts.module.path")) == str(module)
+    recorded = {"diagnostics": {"environment_report": session.report.to_data()}}
+    session.close()
+    assert artifact_digests(recorded) == {"artifacts.module": hashlib.sha256(b"build one").hexdigest()}
+
+    # A replay that loads another build of the module drifts, as a binary artifact does.
+    module.write_bytes(b"build two")
+    session = _acquire(tmp_path, str(module), run="r2")
+    replayed = {"diagnostics": {"environment_report": session.report.to_data()}}
+    session.close()
+    context = FakeContext()
+    outcome = SimpleNamespace(valkey_sha=None, to_data=lambda: replayed)
+    drift = replayed_drift(
+        valkey_service().catalog, context.plan, {"reproducer": {}, "outcome": recorded}, None, outcome
+    )
+    assert [entry["item"] for entry in drift] == ["artifacts.module sha256"]
+
+
+def test_a_local_module_that_is_not_a_file_fails_its_acquisition(tmp_path):
+    with pytest.raises(Exception, match=r"module .*missing\.so is not a readable file"):
+        _acquire(tmp_path, str(tmp_path / "missing.so"))
+
+
+# valkey.capability.build-probe: commands a module brings
+
+
+class _ModuleProbeServer:
+    """A probe server that implements JSON.GET only when started with ``--loadmodule /m/libjson.so``, and exits at
+    startup with any other module."""
+
+    def __init__(self, binary, arguments, **_):
+        self.modules = [value for name, value in zip(arguments[::2], arguments[1::2]) if name == "--loadmodule"]
+        self.workdir = "/nonexistent/probe"
+        commands = {"json.get": [], "get": []} if "/m/libjson.so" in self.modules else {"get": []}
+
+        def execute_command(*args):
+            name = args[2].lower()
+            if name not in commands:
+                raise TypeError("cannot parse a nil entry")
+            return {name: commands[name]}
+
+        info = {"valkey_version": "9.0.0", "valkey_git_sha1": "abc"}
+        self.client = SimpleNamespace(info=lambda section: info, execute_command=execute_command)
+
+    def start(self):
+        unknown = [module for module in self.modules if module != "/m/libjson.so"]
+        return f"Module {unknown[0]} failed to load: no such file" if unknown else None
+
+    def stop(self):
+        pass
+
+
+@pytest.mark.parametrize(
+    ("loadmodule", "deployment_config", "status", "summary"),
+    [
+        ("/m/libjson.so", ["loadmodule"], "PASS", "every binary supports"),
+        # A deployment that does not load the module lacks its commands: unsupported.
+        (None, ["loadmodule"], "SKIP", "started with it, the build does not implement command 'JSON.GET'"),
+        # Without deployment_config the commands are checked on the probe's own server, which loads no module.
+        ("/m/libjson.so", [], "SKIP", "build does not implement command 'JSON.GET'"),
+        # A module that does not load is a setup error, never a skip.
+        ("/m/other.so", ["loadmodule"], "ERROR", "probe server exited: Module /m/other.so failed to load"),
+    ],
+    ids=["loaded", "not-loaded", "own-server", "load-fails"],
+)
+def test_the_build_probe_checks_commands_on_the_server_the_deployment_config_starts(
+    monkeypatch, tmp_path, loadmodule, deployment_config, status, summary
+):
+    binary = tmp_path / "valkey-server"
+    binary.write_bytes(b"")
+    binary.chmod(0o755)
+    monkeypatch.setattr(capabilities, "PrivateServer", _ModuleProbeServer)
+    server_config = {} if loadmodule is None else {"loadmodule": loadmodule}
+    plan = unit_plan(document={"mode": "standalone", "valkey_binary": str(binary), "server_config": server_config})
+    config = {"commands": ["JSON.GET"], "deployment_config": deployment_config}
+    spec = resolved(
+        ComponentSpec(role=ComponentRole.CAPABILITY, use="valkey.capability.build-probe", id="b", config=config)
+    )
+
+    result = capabilities.BuildProbe().probe(FakeContext(plan=plan), spec)
+
+    assert result.status.value == status, result.summary
+    assert summary in result.summary
+
+
+def test_an_artifact_override_resolves_a_local_module_elsewhere():
+    module = {"use": "valkey.artifact.local-module", "with": {"path": "/ci/module-src/build/src/libjson.so"}}
+    scenario = {"scenario_id": "s", "artifacts": {"module": module}}
+
+    overridden = with_artifact_paths(scenario, {"module": "/here/libjson.so"})
+
+    assert overridden["artifacts"]["module"] == {
+        "use": "valkey.artifact.local-module",
+        "with": {"path": "/here/libjson.so"},
+    }

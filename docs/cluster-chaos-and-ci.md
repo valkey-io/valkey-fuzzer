@@ -299,7 +299,7 @@ The full output is also in the **Execute fuzzer run** step of each
 | Workflow | Trigger | Does |
 | --- | --- | --- |
 | [Valkey Fuzzer Cluster Chaos Every 4 Hours](../.github/workflows/fuzzer-run.yml) | every four hours, manual | A [batch](cli.md#batch) of three fresh `valkey.cluster-chaos` seeds under the `nightly-soak` profile (`batch --random valkey.cluster-chaos --seeds 3`), on a build of Valkey `unstable` that the workflow makes and passes with `--valkey-binary`. Uploads `fuzzer-run-artifacts-<run id>`, which holds the batch folder `batch/`, and writes the batch status, each run's scenario, seed, status, summary, Valkey SHA, failed components, and rerun command, and the failure signatures to the job summary. |
-| [Valkey Fuzzer PR Batch](../.github/workflows/fuzzer-pr-batch.yml) | dispatch (valkey-ci-agent) | Takes `scenarios` (a JSON object mapping a name to scenario YAML, at most 60,000 characters), optional `spec_bundles` and `experiments` (below), `valkey_repository`, `valkey_ref`, and `valkey_sha`, which must be a full commit SHA: 40 lowercase hex characters, never a short or uppercase one; optional `valkey_parent_sha` and `build` (below); optional `random_seeds` (0 to 4; 4 seeds of the 17 one-build experiments is what the job's timeout fits), `exclude_experiments` (experiment IDs separated by spaces, left out of the random baseline; it needs `random_seeds` above 0, and the three two-build experiments are always left out), and `request_id` (shown in the run's title, so the caller can find the run it dispatched); builds exactly `valkey_sha`, with zstd; runs the scenarios through `batch --scenarios` with the `candidate` profile on two workers, as root so the tmpfs and iptables experiments run, plus `random_seeds` seeds of every experiment that needs one build (`--random all`, first seed from the commit), a random baseline beside the scenarios; and uploads the batch folder as `fuzzer-batch-<run id>`, less the write ledgers (`ledger.jsonl`, `preload.jsonl`) of the runs that passed. A scenario that names a binary of its own (`deployment.valkey_binary`, `deployment.instance_binaries`, or `artifacts`) is refused. The token is read-only, and inputs reach the scripts only through environment variables. |
+| [Valkey Fuzzer PR Batch](../.github/workflows/fuzzer-pr-batch.yml) | dispatch (valkey-ci-agent) | Takes `scenarios` (a JSON object mapping a name to scenario YAML, at most 60,000 characters), optional `spec_bundles` and `experiments` (below), `valkey_repository`, `valkey_ref`, and `valkey_sha`, which must be a full commit SHA: 40 lowercase hex characters, never a short or uppercase one; optional `valkey_parent_sha` and `build` (below); optional `module_repository`, `module_sha`, `module_parent_sha`, and `module_file` (below); optional `random_seeds` (0 to 4; 4 seeds of the 17 one-build experiments is what the job's timeout fits), `exclude_experiments` (experiment IDs separated by spaces, left out of the random baseline; it needs `random_seeds` above 0, and the three two-build experiments are always left out), and `request_id` (shown in the run's title, so the caller can find the run it dispatched); builds exactly `valkey_sha`, with zstd; runs the scenarios through `batch --scenarios` with the `candidate` profile on two workers, as root so the tmpfs and iptables experiments run, plus `random_seeds` seeds of every experiment that needs one build (`--random all`, first seed from the commit), a random baseline beside the scenarios; and uploads the batch folder as `fuzzer-batch-<run id>`, less the write ledgers (`ledger.jsonl`, `preload.jsonl`) of the runs that passed. A scenario that names a binary of its own (`deployment.valkey_binary`, `deployment.instance_binaries`, or `artifacts`) is refused. The token is read-only, and inputs reach the scripts only through environment variables. |
 | [Valkey Experiments Live](../.github/workflows/valkey-experiments-live.yml) | daily, manual | Builds Valkey `unstable` and 8.1 and runs `tests/test_live_valkey_experiments.py` and `tests/test_live_spec_register.py` as the runner user, with java and the pinned `tla2tools.jar`, so the spec bridge's conformance checks run too. Only the tmpfs and iptables tests run as root, in a separate step that fails if either skips. |
 | [Tests](../.github/workflows/test.yml) | push and PR to `main` | Unit tests on Python 3.9 to 3.14, a check that the wheel ships every file under `formal/`, and in a parallel job on Python 3.12 the server tests and a live experiment subset (with the spec bridge's register bundle end to end) against the Valkey commit in `zoo/valkey-commit`, with java and the pinned `tla2tools.jar` for the tests backed by TLC. |
 | [Lint](../.github/workflows/lint.yml) | push and PR to `main` | `ruff check` and `ruff format --check`. |
@@ -342,6 +342,35 @@ scenario that references `artifacts.parent` without `valkey_parent_sha`, or
 any other artifact, is refused before anything is built; one that declares
 `artifacts` of its own is always refused. The step summary names the parent
 commit and the build.
+
+`module_repository` (`OWNER/NAME`, or empty) tests a change to a module: the
+workflow checks the module out at `module_sha` into `module-src/` (and at
+`module_parent_sha`, if given, into `module-parent/`), builds both the same
+way after Valkey, and the appended block also declares `module` (and
+`module_parent`) as a `valkey.artifact.local-module` artifact at the built
+file, so a scenario loads them with `{$ref: artifacts.module.path}` (the
+`modules` and `modules_parent` of `valkey.action.commands`, or a deployment's
+`server_config.loadmodule`). A module change needs no `valkey_parent_sha`: one
+Valkey build loads two module builds. The modules the batch builds are a table
+in the workflow's "Build the modules" step, keyed by the repository's name, so
+a fork builds as its upstream:
+
+| Repository | Build | Declared file (`module_file`) |
+| --- | --- | --- |
+| `valkey-json` | `SERVER_VERSION=unstable VALKEY_MODULE_H_PATH=<valkey-src>/src/valkeymodule.h ./build.sh` in the checkout (its README's build; CMake, against the Valkey build under test's module header, so it clones no Valkey) | `build/src/libjson.so` unless set |
+| `valkey` | `make -C tests/modules`, against that commit's own header | required, such as `tests/modules/datatype.so` |
+
+`valkey` is for a core pull request that changes the module API: set
+`module_sha` and `module_parent_sha` to the two Valkey commits (usually
+`valkey_sha` and `valkey_parent_sha`) and compare with `compare_with:
+{$ref: artifacts.parent.binary}`, each Valkey build loading its own commit's
+module. Any other repository is refused, as are `module_sha` that is not a full
+lowercase SHA, a `module_parent_sha` equal to it, module inputs without
+`module_repository`, and a `module_file` that is not a relative path to a
+`.so`; a scenario that references `artifacts.module` or
+`artifacts.module_parent` the batch does not build is refused like one that
+references `artifacts.parent`. The modules are always plain builds, whatever
+`build` says. The step summary names the module commits.
 
 `build` chooses how every commit is built: `default` (plain, with zstd),
 `asan` (`CC=clang OPT=-O3 SANITIZER=address`) or `ubsan` (`CC=clang OPT=-O3
@@ -396,6 +425,10 @@ root, and that every action is pinned.
    valkey-fuzzer replay runs/<id>/report.json --experiment-dir experiments \
      --valkey-binary /path/to/valkey-server --artifact parent=/path/to/parent/valkey-server
    ```
+
+   A run that loaded module builds needs them too (`--artifact
+   module=/path/to/libjson.so --artifact module_parent=/path/to/parent/libjson.so`);
+   their SHA-256 is compared with the recorded run's like a binary's.
 
    Instance logs are in the run folder's `logs/`.
 
