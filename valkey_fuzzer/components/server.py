@@ -17,6 +17,7 @@ from typing import Any, Optional
 
 import valkey
 
+from valkey_fuzzer.deployment.local.processes import kill_server
 from valkey_fuzzer.deployment.local.queries import parse_replication, replication_role
 from valkey_fuzzer.hoststate import server_tag_arguments, tag_directory
 
@@ -207,7 +208,7 @@ class PrivateServer:
                 try:
                     self.process.wait(timeout=10)
                 except subprocess.TimeoutExpired:
-                    self.process.kill()
+                    kill_server(self.process)
                     self.process.wait()
         shutil.rmtree(self.workdir, ignore_errors=True)
 

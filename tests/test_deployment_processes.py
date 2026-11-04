@@ -1,7 +1,9 @@
 """The local deployment's servers: their commands, spawning, restarts, ports, formation, output, and cleanup."""
 
 import os
+import signal
 import socket
+import subprocess
 import sys
 import time
 from contextlib import contextmanager, nullcontext
@@ -192,6 +194,54 @@ def test_a_kept_deployment_whose_tag_cannot_be_removed_is_reported_like_any_clea
         server.process.terminate.assert_called_once()
         with pytest.raises(RuntimeError, match="completed with failures: untag"):
             manager.cleanup_deployment([server])
+
+
+# A server that refuses SIGTERM, as a replica writing its first AOF does, and has forked a child.
+_FORKING_SERVER = """
+import os, signal, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+child = os.fork()
+if child == 0:
+    time.sleep(60)
+    os._exit(0)
+print(child, flush=True)
+time.sleep(60)
+"""
+
+
+def _exited(pid):
+    # A zombie has exited too, whoever is left to reap it.
+    status = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    return not status or status.startswith("Z")
+
+
+def test_a_server_killed_at_cleanup_takes_the_child_it_forked_along():
+    # Issue #34: a SIGKILLed server's AOF rewrite child kept running past the run.
+    server = subprocess.Popen([sys.executable, "-c", _FORKING_SERVER], stdout=subprocess.PIPE, text=True)
+    child = int(server.stdout.readline())
+    try:
+        processes.kill_server(server)
+        assert server.wait(timeout=10) == -signal.SIGKILL
+        deadline = time.monotonic() + 10
+        while not _exited(child) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert _exited(child)
+    finally:
+        server.kill()
+        server.wait()
+        server.stdout.close()
+        try:
+            os.kill(child, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def test_a_server_that_refuses_sigterm_is_killed_with_its_children():
+    server = Mock(**{"wait.side_effect": [subprocess.TimeoutExpired("valkey-server", 5), -9]})
+    with patch(f"{PROCESSES}.kill_server") as kill_server:
+        processes._stop_process(server)
+    kill_server.assert_called_once_with(server)
+    server.kill.assert_not_called()
 
 
 def test_two_deployments_with_the_same_seed_write_separate_logs_that_cleanup_finds(tmp_path):

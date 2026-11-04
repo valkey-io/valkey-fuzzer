@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -21,7 +22,14 @@ from typing import Any, Optional
 
 import valkey
 
-from ...hoststate import open_shared_lock, server_tag_arguments, shared_directory, tag_directory, untag_directory
+from ...hoststate import (
+    open_shared_lock,
+    run_bounded,
+    server_tag_arguments,
+    shared_directory,
+    tag_directory,
+    untag_directory,
+)
 from ...protocols import RunContext
 from .cluster_nodes import parse_cluster_nodes
 from .models import (
@@ -84,13 +92,35 @@ def verify_instance_process_identity(instance: InstanceInfo, client: valkey.Valk
         )
 
 
+def kill_server(process: subprocess.Popen) -> None:
+    """SIGKILL a server and the children it forked (an AOF rewrite, an RDB save), which would outlive it.
+
+    The server is stopped first, so it cannot reap a child (freeing its PID for reuse) before the child is killed.
+    """
+    process.send_signal(signal.SIGSTOP)
+    if process.poll() is None:
+        listing = run_bounded(["ps", "-A", "-o", "pid=", "-o", "ppid="])
+        for line in listing.stdout.splitlines():
+            fields = line.split()
+            if len(fields) == 2 and fields[1] == str(process.pid):
+                try:
+                    os.kill(int(fields[0]), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+    process.kill()
+
+
 def _stop_process(process: subprocess.Popen) -> None:
-    """Send SIGTERM, then SIGKILL if the process has not exited after 5 seconds."""
+    """Send SIGTERM, then SIGKILL (to it and its children) if the process has not exited after 5 seconds.
+
+    A server refuses a SIGTERM while it writes its first AOF (a replica after a full sync does), and its
+    rewrite child would outlive a SIGKILL of the server alone.
+    """
     process.terminate()
     try:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:
-        process.kill()
+        kill_server(process)
         process.wait()
 
 
