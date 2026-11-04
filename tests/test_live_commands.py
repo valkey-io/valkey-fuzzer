@@ -1,9 +1,11 @@
 """``valkey.action.commands`` against real builds: one build on both sides replies equal (RESP2 and RESP3), a
 marked command with equal replies is unreached, a candidate crash is a FAIL with its logs kept, the private
-servers run as one-node and two-node clusters, and the LSET example reaches valkey-io/valkey#4823 on builds of the fix
-(``VALKEY_FUZZER_LSET_FIX_BINARY``, commit e50b62d0b) and its parent (``VALKEY_FUZZER_LSET_PARENT_BINARY``).
+servers run as one-node and two-node clusters, every check passes on one build, and the LSET example reaches
+valkey-io/valkey#4823 on builds of the fix (``VALKEY_FUZZER_LSET_FIX_BINARY``, commit e50b62d0b) and its parent
+(``VALKEY_FUZZER_LSET_PARENT_BINARY``).
 
-Needs a valkey-server (``VALKEY_FUZZER_BINARY`` or ``PATH``); the LSET rows need the two builds above.
+Needs a valkey-server (``VALKEY_FUZZER_BINARY`` or ``PATH``); the LSET rows need the two builds above, and the
+compat row across builds an older build (``VALKEY_FUZZER_OLD_BINARY``).
 """
 
 import os
@@ -11,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.live_support import BINARY, check, evidence, run_scenario, scenario
+from tests.live_support import BINARY, OLD_BINARY, check, evidence, needs_old_binary, run_scenario, scenario
 from tests.valkey_experiments_support import registration_for, valkey_service
 from valkey_fuzzer._data import to_plain_data
 from valkey_fuzzer.components import actions
@@ -196,6 +198,95 @@ def test_a_restart_reads_the_rewritten_config_file_the_acl_file_and_the_rdb_back
 
     assert result.status.value == "PASS", result.summary
     assert value["candidate"]["digest"] == value["parent"]["digest"]
+
+
+# Every type in its compact encoding, replies whose RESP3 shape differs (a map, doubles, nested pairs, a
+# boolean), a transaction, an expiring key, and a script.
+CHECKED = [
+    {"command": ["HSET", "h", "f1", "v1", "f2", "v2"], "expect": {"equals": 2}},
+    {"command": ["HGETALL", "h"], "compare": "unordered-pairs"},
+    {"command": ["SADD", "ints", 3, 1, 2], "expect": {"equals": 3}},
+    {"command": ["SADD", "s", "a", "b", 1], "expect": {"equals": 3}},
+    {"command": ["SMEMBERS", "ints"], "compare": "unordered"},
+    {"command": ["SINTERCARD", 2, "ints", "s"], "expect": {"equals": 1}},
+    {"command": ["ZADD", "z", 1.5, "a", 2, "b"], "expect": {"equals": 2}},
+    {"command": ["ZRANGE", "z", 0, -1, "WITHSCORES"]},
+    {"command": ["ZINCRBY", "z", 0.25, "a"]},
+    {"command": ["ZSCORE", "z", "a"]},
+    {"command": ["RPUSH", "l", "a", "b", "c"], "expect": {"equals": 3}},
+    {"command": ["LRANGE", "l", 0, -1], "expect": {"equals": ["a", "b", "c"]}},
+    {"command": ["LPOS", "l", "b"], "expect": {"equals": 1}},
+    {"command": ["OBJECT", "ENCODING", "h"]},
+    {"command": ["SET", "n", 10]},
+    {"command": ["INCRBYFLOAT", "n", 0.5]},
+    {"command": ["SET", "t", "v", "PX", 100]},
+    {"command": ["EVAL", "return redis.call('EXISTS', KEYS[1]) == 1", 1, "h"]},
+    {"command": ["MULTI"]},
+    {"command": ["INCR", "c"]},
+    {"command": ["HDEL", "h", "f1"]},
+    {"command": ["EXEC"], "expect": {"equals": [1, 1]}},
+    {"command": ["COPY", "z", "z2"], "expect": {"equals": 1}},
+    {"command": ["BLPOP", "l", 1], "expect": {"equals": ["l", "a"]}},
+    {"command": ["PING"]},
+]
+ALL_CHECKS = {"variants": True, "replica": True, "acl": True, "concurrency": 4, "compat": True}
+
+
+@pytest.mark.parametrize(
+    "checks",
+    [{"variants": True}, {"replica": True}, {"acl": True}, {"concurrency": 4}, {"compat": True}, ALL_CHECKS],
+    ids=["variants", "replica", "acl", "concurrency", "compat", "all"],
+)
+def test_every_check_passes_on_one_build(checks):
+    result, value = run(BINARY, CHECKED, compare_with=BINARY, checks=checks)
+
+    assert result.status.value == "PASS", result.summary
+    assert {name: outcome["outcome"] for name, outcome in value["checks"].items()} == dict.fromkeys(checks, "pass")
+    assert value["checks"].get("variants", {}).get("encodings", {"outcome": "pass"})["outcome"] == "pass"
+    if "acl" in checks:
+        assert value["checks"]["acl"]["category"]["user"] == "default +@all -@write"
+        assert value["checks"]["acl"]["keys"]["outcome"] == "pass"
+
+
+def test_checks_on_a_two_node_cluster_skip_what_needs_one_standalone_node():
+    commands = [
+        {"command": ["SET", "k", "v"], "expect": {"equals": "OK"}},
+        {"command": ["HSET", "{k}h", "f", "v"], "expect": {"equals": 1}},
+        {"command": ["GET", "k"], "node": 1, "expect": {"error": "MOVED 7629 127.0.0.1:<node.0.port>"}},
+        {"command": ["CLUSTER", "COUNTKEYSINSLOT", 7629], "expect": {"equals": 2}},
+    ]
+    result, value = run(BINARY, commands, compare_with=BINARY, cluster=True, nodes=2, checks=ALL_CHECKS)
+
+    assert result.status.value == "PASS", result.summary
+    assert {name: outcome["outcome"] for name, outcome in value["checks"].items()} == {
+        "variants": "pass",
+        "replica": "skipped",
+        "acl": "pass",
+        "concurrency": "pass",
+        "compat": "skipped",
+    }
+
+
+def test_a_key_expired_but_not_yet_deleted_when_the_parent_saves_still_compares():
+    # A primary drops it loading the RDB; the parent's digest still has it.
+    commands = [
+        {"command": ["DEBUG", "SET-ACTIVE-EXPIRE", 0], "expect": {"equals": "OK"}},
+        {"command": ["SET", "t", "v", "PX", 50], "expect": {"equals": "OK"}},
+        {"command": ["DEBUG", "SLEEP", 0.1], "expect": {"equals": "OK"}},
+        {"command": ["SET", "k", "v"], "expect": {"equals": "OK"}},
+    ]
+    result, value = run(BINARY, commands, compare_with=BINARY, checks={"replica": True, "compat": True})
+
+    assert result.status.value == "PASS", result.summary
+    assert value["checks"]["compat"]["outcome"] == "pass"
+
+
+@needs_old_binary
+def test_an_older_builds_data_loads_and_replicates_into_the_candidate():
+    result, value = run(BINARY, CHECKED, compare_with=OLD_BINARY, checks={"compat": True})
+
+    assert value["checks"]["compat"]["outcome"] == "pass", value["checks"]["compat"]
+    assert result.status.value in ("PASS", "ERROR"), result.summary
 
 
 @needs_lset_builds
