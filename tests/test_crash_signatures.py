@@ -55,8 +55,14 @@ STARTING = f"{PREFIX} * oO0OoO0OoO0Oo Valkey is starting oO0OoO0OoO0Oo"
         ("valkey-2", "forkless-save-crash-s200014-valkey-2.log", False, (), ASSERTION, "crash report"),
         # A signal names the function it hit in, as in valkey-io/valkey#3645's proposed test, so two
         # segfaults elsewhere are two failures.
-        ("valkey-0", "module-pause-segfault-valkey-0.log", False, (), "crashed by signal: 11 in VM_FreeCallReply",
-         "crash report"),
+        (
+            "valkey-0",
+            "module-pause-segfault-valkey-0.log",
+            False,
+            (),
+            "crashed by signal: 11 in VM_FreeCallReply",
+            "crash report",
+        ),
         # No assertion, panic or signal: Valkey's fatal log line before it exits.
         ("valkey-1", DUAL_CHANNEL, False, (), SHORT_READ, "fatal exit"),
         # Still running, or stopped on purpose: the last fatal-looking line is not why it is down.

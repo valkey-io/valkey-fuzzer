@@ -1123,7 +1123,9 @@ def test_variants_compare_replies_as_multisets_of_their_resp2_values(builds):
     for build in BUILDS.values():
         build.replies = {
             ("HGETALL", "h"): ByResp({2: [b"f1", b"v1", b"f2", b"v2"], 3: {b"f2": b"v2", b"f1": b"v1"}}),
-            ("ZRANGE", "z", "0", "-1", "WITHSCORES"): ByResp({2: [b"a", b"1.5", b"b", b"2"], 3: [[b"a", 1.5], [b"b", 2.0]]}),
+            ("ZRANGE", "z", "0", "-1", "WITHSCORES"): ByResp(
+                {2: [b"a", b"1.5", b"b", b"2"], 3: [[b"a", 1.5], [b"b", 2.0]]}
+            ),
             ("EVAL", "return true", "0"): ByResp({2: 1, 3: True}),
             ("SMEMBERS", "s"): lambda server: [b"b", b"a"] if _encodings_off(server) else [b"a", b"b"],
             ("OBJECT", "ENCODING", "s"): lambda server: b"hashtable" if _encodings_off(server) else b"listpack",
@@ -1138,7 +1140,11 @@ def test_variants_compare_replies_as_multisets_of_their_resp2_values(builds):
     result, value = run(builds, commands, checks={"variants": True})
 
     assert result.status.value == "PASS", result.summary
-    assert _check(value, "variants") == {"outcome": "pass", "encodings": {"outcome": "pass"}, "protocol": {"outcome": "pass"}}
+    assert _check(value, "variants") == {
+        "outcome": "pass",
+        "encodings": {"outcome": "pass"},
+        "protocol": {"outcome": "pass"},
+    }
     assert result.summary.endswith(", variants pass")
     encodings, protocol = [server for server in SERVERS.values() if server.node][2:]
     assert [encodings.option(name) for name in ("set-max-intset-entries", "list-max-listpack-size")] == ["0", "0"]
@@ -1150,15 +1156,22 @@ def test_variants_compare_replies_as_multisets_of_their_resp2_values(builds):
 def test_a_reply_that_changes_with_the_encoding_is_a_variant_mismatch(builds):
     for build in BUILDS.values():
         build.replies = {("SCARD", "s"): lambda server: 0 if _encodings_off(server) else 2}
-    result, value = run(builds, [{"command": ["SADD", "s", 1, 2]}, {"command": ["SCARD", "s"]}], checks={"variants": True})
+    result, value = run(
+        builds, [{"command": ["SADD", "s", 1, 2]}, {"command": ["SCARD", "s"]}], checks={"variants": True}
+    )
 
     assert result.status.value == "FAIL" and not result.crash
-    assert result.summary.startswith('command 1 (SCARD s) replies otherwise with server_config {"hash-max-listpack-entries"')
+    assert result.summary.startswith(
+        'command 1 (SCARD s) replies otherwise with server_config {"hash-max-listpack-entries"'
+    )
     assert result.diagnostics["reason"] == "variant-mismatch" and result.diagnostics["variant"] == "encodings"
     assert to_plain_data(result.diagnostics["commands"]) == [
         {"index": 1, "command": "SCARD s", "base": {"reply": 2}, "variant": {"reply": 0}}
     ]
-    assert (_check(value, "variants")["outcome"], _check(value, "variants")["protocol"]) == ("fail", {"outcome": "pass"})
+    assert (_check(value, "variants")["outcome"], _check(value, "variants")["protocol"]) == (
+        "fail",
+        {"outcome": "pass"},
+    )
 
 
 def test_encodings_are_not_varied_with_modules_loaded(builds):
@@ -1230,7 +1243,9 @@ def _enforcing_acls(wrong=()):
             ("COMMAND", "GETKEYS", "PING"): Error("ERR The command has no key arguments"),
         }
         for name, categories in _CATEGORIES.items():
-            build.replies[("COMMAND", "INFO", name)] = [[name.lower().encode(), -1, [], 0, 0, 0, categories, [], [], []]]
+            build.replies[("COMMAND", "INFO", name)] = [
+                [name.lower().encode(), -1, [], 0, 0, 0, categories, [], [], []]
+            ]
 
 
 def test_acl_users_are_refused_exactly_the_commands_their_rules_deny(builds):
@@ -1351,7 +1366,10 @@ def test_the_parents_data_loads_and_replicates_into_the_candidate(builds, monkey
     result, value = run(builds, [{"command": ["SET", "k", "v"]}], checks={"compat": True})
 
     compat = _check(value, "compat")
-    assert (compat["load"]["outcome"], compat["sync"]["outcome"]) == ("pass" if loads else "fail", "pass" if syncs else "fail")
+    assert (compat["load"]["outcome"], compat["sync"]["outcome"]) == (
+        "pass" if loads else "fail",
+        "pass" if syncs else "fail",
+    )
     rdb = next(path for path in result.evidence[0].artifacts if os.path.basename(path) == "parent.compat.rdb")
     # The candidate that loads it loads it again as a replica, which keeps keys expired since the parent saved.
     (loaded,) = [server for server in _nodes(BUILDS[builds["candidate"]]) if server.files.get("dump.rdb")]

@@ -1304,9 +1304,8 @@ def _violations(commands: Sequence[Mapping[str, Any]], replies: Sequence[Mapping
         f"command {record['index']} ({_step_text(commands[record['index']])}) replied "
         f"{canonical_json(_without_index(record))}, not {canonical_json(plain_config(commands[record['index']]['expect']))}"
         for record in replies
-        if not record.get("unanswered") and not _sequence_matches(
-            commands[record["index"]]["expect"], record, commands[record["index"]]["compare"]
-        )
+        if not record.get("unanswered")
+        and not _sequence_matches(commands[record["index"]]["expect"], record, commands[record["index"]]["compare"])
     ]
 
 
@@ -1317,9 +1316,8 @@ def _violating(commands: Sequence[Mapping[str, Any]], replies: Sequence[Mapping[
     return [
         record["index"]
         for record in replies
-        if not record.get("unanswered") and not _sequence_matches(
-            commands[record["index"]]["expect"], record, commands[record["index"]]["compare"]
-        )
+        if not record.get("unanswered")
+        and not _sequence_matches(commands[record["index"]]["expect"], record, commands[record["index"]]["compare"])
     ]
 
 
