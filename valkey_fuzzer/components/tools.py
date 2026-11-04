@@ -172,11 +172,17 @@ class _Side:
             record.update(exit=None, timed_out=True)
         # Longest first, so a value inside another (the port's digits in a path) is not replaced inside it.
         written_back = sorted({**values, "$dir": self.workdir}.items(), key=lambda item: -len(item[1]))
+        nodes = [] if self.server is None else self.server.nodes
         streams = []
         for data in (stdout, stderr):
             for name, value in written_back:
                 pattern = rf"\b{re.escape(value)}\b" if name == "$port" else re.escape(value)
                 data = re.sub(pattern.encode(), name.encode(), data)
+            # Each node ID as valkey.action.commands names it: in full, or as valkey-cli abbreviates it.
+            for index, node in enumerate(nodes):
+                if node.id is not None:
+                    pattern = rf"\b(?:{re.escape(node.id)}\b|{re.escape(node.id[:8])}\.\.\.)"
+                    data = re.sub(pattern.encode(), f"<node.{index}.id>".encode(), data)
             streams.append(data)
         record["stdout"], record["stderr"] = _text(streams[0]), _text(streams[1])
         self.runs.append(record)

@@ -17,9 +17,10 @@ from valkey_fuzzer.testing import FakeContext
 
 # Each argument is a step: out:<text>, err:<text>, label (the build's), cwd, stdin, env:<name>,
 # cat:<file>, exit:<status>, and <step>@<label> runs the step on that build alone; crash is SIGSEGV, hang
-# sleeps, write:<file> writes the arguments into a file.
+# sleeps, write:<file> writes the arguments into a file; node:<socket> and short:<socket> print the node ID of
+# the fake server with that socket (see FakeServer), node: in full and abbreviated, short: its first 8 digits.
 TOOL = """#!{python}
-import os, signal, sys, time
+import hashlib, os, signal, sys, time
 LABEL = {label!r}
 for step in sys.argv[1:]:
     step, _, only = step.partition("@")
@@ -37,6 +38,9 @@ for step in sys.argv[1:]:
     elif name == "exit": sys.exit(int(value))
     elif name == "crash": sys.stdout.flush(); os.kill(os.getpid(), signal.SIGSEGV)
     elif name == "hang": time.sleep(30)
+    elif name in ("node", "short"):
+        node_id = hashlib.sha1(os.path.dirname(value).encode()).hexdigest()
+        print(f"{{node_id}} ({{node_id[:8]}}...)" if name == "node" else node_id[:8])
 """
 
 
@@ -133,6 +137,19 @@ def test_a_server_side_names_its_own_port_and_socket_and_the_output_names_them_b
     assert {os.path.basename(path) for path in result.evidence[0].artifacts} == {
         "candidate.server.log", "candidate.output.log", "parent.server.log", "parent.output.log"
     }  # fmt: skip
+
+
+def test_a_cluster_sides_node_ids_are_named_as_compared_sequences_name_them(builds):
+    other = "0123456789abcdef" * 2 + "01234567"
+    runs = [cli("node:$socket", f"out:{other}"), cli("short:$socket", compare="skip")]
+    result, value, _ = run(builds, runs, server=True, cluster=True)
+
+    # Only the side's own node ID, in full or abbreviated as valkey-cli prints it, never other hex.
+    assert result.status.value == "PASS", result.summary
+    for label in ("candidate", "parent"):
+        assert value[label]["runs"][0]["stdout"] == f"<node.0.id> (<node.0.id>)\n{other}\n"
+    server = next(server for server in SERVERS.values() if server.node and server.binary == builds["candidate"])
+    assert value["candidate"]["runs"][1]["stdout"] == f"{server.id[:8]}\n"
 
 
 # ---------------------------------------------------------------------------

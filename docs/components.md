@@ -573,7 +573,10 @@ Each run has:
 
 Output is recorded with the side's port, socket path, and working directory
 written back as `$port`, `$socket`, and `$dir`, so the two sides compare
-equal; output that is not valid UTF-8 is recorded as `{$base64: ...}`.
+equal; output that is not valid UTF-8 is recorded as `{$base64: ...}`. With
+`cluster`, its private server's node ID, in full or as the `1a2b3c4d...`
+valkey-cli abbreviates it to, is written back as `<node.0.id>`, as
+[`valkey.action.commands`](#valkeyactioncommands) names it.
 
 The outcome, as for [`valkey.action.commands`](#valkeyactioncommands):
 
