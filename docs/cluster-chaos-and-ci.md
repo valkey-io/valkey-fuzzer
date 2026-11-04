@@ -335,7 +335,8 @@ builds the same way. The input step then appends to every scenario's text an
 `artifacts:` block declaring `parent` as a `valkey.artifact.local-binary`
 artifact at that build, so a scenario compares the two builds with
 `{$ref: artifacts.parent.binary}` (the `compare_with` of
-`valkey.action.commands`). The block is appended, not merged: the result must
+`valkey.action.commands` and `valkey.action.tools`; `make` builds the tools
+beside `valkey-server` in both builds). The block is appended, not merged: the result must
 parse to the scenario plus exactly that one key, so a scenario written as a
 flow-style top-level mapping, or without a final newline, is refused. A
 scenario that references `artifacts.parent` without `valkey_parent_sha`, or
