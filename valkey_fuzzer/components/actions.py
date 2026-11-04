@@ -677,6 +677,16 @@ class CommandsAction:
             ),
         )
         violations = _violations(commands, candidate.replies)
+        # A violated expect on which the parent replied the same is about behaviour the change did not touch:
+        # nearly always the test's own expectation, not the change. Recorded, never a FAIL.
+        disputed = [
+            index
+            for index in _violating(commands, candidate.replies)
+            if _same_on_parent(commands, index, candidate, parent)
+        ]
+        violations = [
+            text for index, text in zip(_violating(commands, candidate.replies), violations) if index not in disputed
+        ]
         if candidate.exited is not None:
             cause = candidate.crash_cause()
             at = candidate.replies[-1]["index"] if candidate.replies else None
@@ -700,6 +710,25 @@ class CommandsAction:
         ]
         if unanswered:
             return make_result(spec, ComponentStatus.ERROR, "; ".join(unanswered), evidence=evidence)
+        if disputed:
+            commands_disputed = [
+                {
+                    "index": index,
+                    "command": _command_text(commands[index]["command"]),
+                    "expect": plain_config(commands[index]["expect"]),
+                    "candidate": _reply_at(candidate.replies, index),
+                    "parent": _reply_at(parent.replies, index),
+                }
+                for index in disputed
+            ]
+            return make_result(
+                spec,
+                ComponentStatus.ERROR,
+                "expectations both builds violate alike, so they are not about the change: "
+                + ", ".join(f"{item['index']} ({item['command']})" for item in commands_disputed),
+                evidence=evidence,
+                diagnostics={"reason": "expect-disputed", "commands": commands_disputed},
+            )
         if unexplained:
             differences = [
                 {
@@ -773,6 +802,29 @@ def _violations(commands: Sequence[Mapping[str, Any]], replies: Sequence[Mapping
         for record in replies
         if not record.get("unanswered") and not _sequence_matches(commands[record["index"]]["expect"], record)
     ]
+
+
+def _violating(commands: Sequence[Mapping[str, Any]], replies: Sequence[Mapping[str, Any]]) -> list[int]:
+    """The indexes of the answered replies that violate their command's ``expect``, in the order of
+    :func:`_violations`."""
+
+    return [
+        record["index"]
+        for record in replies
+        if not record.get("unanswered") and not _sequence_matches(commands[record["index"]]["expect"], record)
+    ]
+
+
+def _same_on_parent(commands: Sequence[Mapping[str, Any]], index: int, candidate: Any, parent: Any) -> bool:
+    """Whether the parent answered command ``index`` and its reply compares equal to the candidate's."""
+
+    mine, theirs = _reply_at(candidate.replies, index), _reply_at(parent.replies, index)
+    if mine is None or theirs is None or theirs.get("unanswered"):
+        return False
+    mode = commands[index]["compare"]
+    return canonical_json(_compared({**mine, "index": index}, mode)) == canonical_json(
+        _compared({**theirs, "index": index}, mode)
+    )
 
 
 def _unanswered(commands: Sequence[Mapping[str, Any]], replies: Sequence[Mapping[str, Any]]) -> list[str]:

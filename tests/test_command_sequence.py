@@ -262,17 +262,41 @@ def test_compare_modes(builds, mode, candidate, parent, status):
 
 
 def test_an_expect_the_candidate_violates_is_fail(builds):
+    # The candidate replies differently from the parent, and wrongly: the change broke it.
     BUILDS[builds["candidate"]].replies = {("LRANGE", "l", "0", "-1"): [b"a", b"x"]}
-    BUILDS[builds["parent"]].replies = {("LRANGE", "l", "0", "-1"): [b"a", b"x"]}
+    BUILDS[builds["parent"]].replies = {("LRANGE", "l", "0", "-1"): [b"a", b"b"]}
     commands = [
-        {"command": ["LRANGE", "l", 0, -1], "expect": {"equals": ["a", "b"]}},
+        {"command": ["LRANGE", "l", 0, -1], "expect_difference": True, "expect": {"equals": ["a", "b"]}},
         {"command": ["PING"], "expect": {"error": True}},
     ]
     result, _ = run(builds, commands)
 
     assert result.status.value == "FAIL"
     assert 'command 0 (LRANGE l 0 -1) replied {"reply":["a","x"]}, not {"equals":["a","b"]}' in result.summary
-    assert "command 1 (PING)" in result.summary
+    # PING violates its expect alike on both builds: not about the change, so not part of the failure.
+    assert "command 1 (PING)" not in result.summary
+
+
+def test_an_expect_both_builds_violate_alike_is_disputed_not_fail(builds):
+    # As in a proposed test for valkey-json#112: the expectation is wrong on both builds.
+    BUILDS[builds["candidate"]].replies = {("LRANGE", "l", "0", "-1"): [b"a", b"x"]}
+    BUILDS[builds["parent"]].replies = {("LRANGE", "l", "0", "-1"): [b"a", b"x"]}
+    commands = [{"command": ["LRANGE", "l", 0, -1], "expect": {"equals": ["a", "b"]}}]
+    result, _ = run(builds, commands)
+
+    assert result.status.value == "ERROR"
+    assert to_plain_data(result.diagnostics) == {
+        "reason": "expect-disputed",
+        "commands": [
+            {
+                "index": 0,
+                "command": "LRANGE l 0 -1",
+                "expect": {"equals": ["a", "b"]},
+                "candidate": {"reply": ["a", "x"]},
+                "parent": {"reply": ["a", "x"]},
+            }
+        ],
+    }
 
 
 def test_a_candidate_reply_that_never_came_leaves_the_run_untested(builds):

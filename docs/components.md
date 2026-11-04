@@ -393,10 +393,15 @@ No timestamps, so two runs' replies compare equal.
 
 The outcome, with `compare_with`:
 
-- `FAIL`: a candidate reply that violates its `expect`, or the candidate
-  exiting (a crash, a sanitizer abort); its cause is `crashes` in the
-  diagnostics. Nothing else: a difference between builds is never, by
-  itself, a Valkey failure.
+- `FAIL`: a candidate reply that violates its `expect` where the parent
+  replied otherwise, or the candidate exiting (a crash, a sanitizer abort);
+  its cause is `crashes` in the diagnostics. Nothing else: a difference
+  between builds is never, by itself, a Valkey failure.
+- `ERROR` with `diagnostics: {reason: expect-disputed, commands: [...]}`: an
+  `expect` the candidate violates but the parent replied the same to. The
+  expectation is about behaviour the change did not touch, nearly always the
+  test's own mistake; each command is given with its `expect` and both
+  replies.
 - `ERROR` with `diagnostics: {reason: unreached-change}`: a marked command
   whose parent reply equals the candidate's, the parent alive. The sequence
   did not reach the change; for a bug fix, the parent is a build with the
