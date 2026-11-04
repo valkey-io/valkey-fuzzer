@@ -1,0 +1,14 @@
+# A replica's forkless BGSAVE under replicated writes, with a full sync forced mid-save.
+#   valkey-fuzzer run examples/valkey/forkless_save_on_replica.yaml --output report.json
+scenario_id: forkless-save-on-replica
+seed: 123
+experiment:
+  id: valkey.forkless-save-on-replica
+  inputs:
+    stable_keys: 5000
+    mutation_rate: 300
+    diskless_load: swapdb
+deployment:
+  mode: standalone
+  replicas_per_primary: 1
+  base_port: 7490
