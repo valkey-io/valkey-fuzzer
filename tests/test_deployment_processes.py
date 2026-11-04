@@ -244,6 +244,14 @@ def test_a_server_that_refuses_sigterm_is_killed_with_its_children():
     server.kill.assert_not_called()
 
 
+def test_a_relative_base_data_dir_gives_absolute_paths(tmp_path, monkeypatch):
+    # Each server runs in its own data directory: a relative log path made it refuse to start.
+    monkeypatch.chdir(tmp_path)
+    data_dir, log_file = process_manager(base_data_dir="runs/data", seed=7).create_instance_directories("valkey-0")
+    assert os.path.isabs(data_dir) and os.path.isabs(log_file)
+    assert log_file.startswith(str(tmp_path / "runs" / "data" / "logs"))
+
+
 def test_two_deployments_with_the_same_seed_write_separate_logs_that_cleanup_finds(tmp_path):
     # Concurrent runs of one seed must not interleave their instance logs: log checks would read the other's lines.
     paths = [process_manager(tmp_path, seed=7).create_instance_directories("valkey-0")[1] for _ in range(2)]

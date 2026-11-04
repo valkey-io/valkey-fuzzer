@@ -276,11 +276,13 @@ class ProcessManager:
         ``data_root`` places the instance's data (RDB, AOF, nodes.conf) on another
         filesystem, e.g. a size-limited resource; logs stay under base_data_dir.
         """
-        deployment_dir = os.path.join(data_root or self.config.base_data_dir, f"deployment-{self.deployment_id}")
+        # Absolute: each server runs in its own data directory, so a relative log path would not resolve.
+        base_data_dir = os.path.abspath(self.config.base_data_dir)
+        deployment_dir = os.path.join(os.path.abspath(data_root or base_data_dir), f"deployment-{self.deployment_id}")
         if data_root:
             self._extra_deployment_dirs.add(deployment_dir)
         instance_data_dir = os.path.join(deployment_dir, instance_id, "data")
-        log_dir = os.path.join(self.config.base_data_dir, "logs")
+        log_dir = os.path.join(base_data_dir, "logs")
         if os.path.normpath(self.config.base_data_dir) == DEFAULT_BASE_DATA_DIR:
             # Every user's runs share the default base_data_dir and its logs; a deployment directory is its own.
             shared_directory(self.config.base_data_dir)
