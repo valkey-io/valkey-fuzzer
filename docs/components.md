@@ -1263,7 +1263,7 @@ bgsave with `capture_rdb: false` is rejected.
 | `workload` | string or null | `null` | The workload's `id`. |
 | `timeout_s` | number, 1 to 3600 | 60 | |
 | `expect_codec` | `none`, `lz4`, `zstd`, an `rdbcompression` value, or null | `null` | Every RDB's `rdb_format.codec` must be this (`no`, `yes`, and `lzf` mean `none`), and its load must log `Loading compressed RDB (algo=X)` exactly when the codec is compressed. |
-| `instance_reload` | boolean | `false` | With `expect_codec`: the saving instance must also have reloaded during the run (`DB loaded from …`), with every compressed load in that codec. |
+| `instance_reload` | boolean | `false` | With `expect_codec`: the saving instance must also have reloaded during the run (`DB loaded from …`), in that codec from `dump.rdb` and with no compressed load from the AOF (Valkey writes an AOF's base RDB plain). |
 | `load_binary` | string or reference, or null | `null` | Load with this binary instead of the saving instance's. |
 | `load_config` | mapping | `{}` | Server config of the loading server, such as `{rdb-version-check: relaxed}`. |
 | `expect` | `loads` or `refused` | `loads` | `refused`: the loading server must refuse every RDB cleanly (exit status 1, `Fatal error loading the DB`, no crash report); a configuration error is not a refusal. |

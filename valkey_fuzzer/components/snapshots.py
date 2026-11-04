@@ -420,13 +420,16 @@ class RdbSnapshotOracle:
     @staticmethod
     def _reload_problems(lines: Sequence[str], codec: str) -> list[str]:
         """The instance's own reloads during the run (e.g. after a restart), in its log ``lines``, must be in
-        ``codec``."""
+        ``codec``: a reload from dump.rdb in that codec, one from the AOF plain (Valkey writes an AOF's base
+        RDB uncompressed whatever rdbcompression is)."""
 
-        if not any(_DB_LOADED.search(line) for line in lines):
+        sources = {match.group(1) for match in map(_DB_LOADED.search, lines) if match}
+        if not sources:
             return ["the instance logged no reload during the run"]
+        expected = codec if "disk" in sources else "none"
         logged = sorted({match.group(1) for match in map(LOADED_COMPRESSED.search, lines) if match})
-        if logged != ([] if codec == "none" else [codec]):
-            return [f"expected the instance to reload codec {codec}, it logged compressed codecs {logged or 'none'}"]
+        if logged != ([] if expected == "none" else [expected]):
+            return [f"expected the instance to reload codec {expected}, it logged compressed codecs {logged or 'none'}"]
         return []
 
     @staticmethod

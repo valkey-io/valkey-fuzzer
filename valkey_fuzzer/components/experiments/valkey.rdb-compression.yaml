@@ -1,15 +1,16 @@
 # BGSAVE in every rdbcompression codec, fork or forkless, under concurrent
 # writes; then, with the workload drained, a final BGSAVE, an AOF rewrite, and
 # a restart of the primary that reloads its data from dump.rdb (appendonly no)
-# or from the AOF, whose base is an RDB preamble in the same codec
-# (appendonly yes).
+# or from the AOF (appendonly yes), whose base RDB Valkey writes plain whatever
+# rdbcompression is.
 #
 # Path evidence: every bgsave result records its RDB's envelope and codec
 # (`rdb_format`). The snapshot oracles require that codec to match
 # rdbcompression (lz4 and zstd: a VCS envelope naming the codec; no, yes, and
 # lzf: a plain RDB), require each private reload to log `Loading compressed
 # RDB (algo=X)` exactly for a compressed codec, and require the restarted
-# primary's own reload to show the same codec. Each RDB must be a consistent
+# primary's own reload to show the same codec (from dump.rdb) or none (from
+# the AOF). Each RDB must be a consistent
 # cut of the write history, and after the restart no acknowledged write may be
 # missing, every replica must hold its primary's dataset, and the deployment
 # state must validate. Evidence records digests of the final RDB, the dataset,
@@ -38,7 +39,7 @@ inputs:
       type: string
       enum: ["yes", "no"]
       default: "no"
-      description: "no: the restart reloads dump.rdb; yes: it reloads the AOF and its RDB preamble"
+      description: "no: the restart reloads dump.rdb; yes: it reloads the AOF and its plain base RDB"
 startup_overlays:
   - overlay_id: save-and-reload
     server_config:
