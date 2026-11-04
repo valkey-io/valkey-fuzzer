@@ -55,14 +55,19 @@ def _validate_liveness(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -
 
 
 def scan_for_crashes(paths: dict[str, str], patterns: Sequence[str]) -> dict[str, list[str]]:
+    """Each log's lines that match ``patterns``, and, in a crash report, the frame its stack trace starts at
+    (the line after ``EIP:``)."""
+
     compiled = [re.compile(pattern) for pattern in patterns]
     findings: dict[str, list[str]] = {}
     for instance_id, path in paths.items():
         try:
             with open(path, encoding="utf-8", errors="replace") as handle:
+                after_eip = False
                 for line in handle:
-                    if any(pattern.search(line) for pattern in compiled):
+                    if (after_eip and instance_id in findings) or any(pattern.search(line) for pattern in compiled):
                         findings.setdefault(instance_id, []).append(line.rstrip()[:500])
+                    after_eip = line.strip() == "EIP:"
         except OSError:
             continue
     return findings
@@ -84,13 +89,23 @@ _CRASH_CAUSES = tuple(
 )
 
 
+# The function a stack frame is in, as backtrace_symbols prints it: "valkey-server *:6379(VM_FreeCallReply+0x16)
+# [0x5f6c528877e6]".
+_FRAME_FUNCTION = re.compile(r"\(([A-Za-z_]\w*)\+0x[0-9a-fA-F]+\) \[0x[0-9a-fA-F]+\]")
+
+
 def crash_cause(lines: Sequence[str]) -> str:
-    """What caused the crash whose report ``lines`` hold (see ``_CRASH_CAUSES``); its first line otherwise."""
+    """What caused the crash whose report ``lines`` hold (see ``_CRASH_CAUSES``), a signal with the function it
+    hit in, when the stack trace names it; its first line otherwise."""
 
     for pattern in _CRASH_CAUSES:
         for line in lines:
             match = pattern.search(line)
             if match:
+                if match.group(1).startswith("crashed by signal"):
+                    frame = next(filter(None, map(_FRAME_FUNCTION.search, lines)), None)
+                    if frame is not None:
+                        return f"{match.group(1)} in {frame.group(1)}"
                 return match.group(1)
     match = LOG_LINE.match(lines[0])
     return (match["message"] if match else lines[0]).strip()

@@ -1,0 +1,23 @@
+15411:M 04 Nov 2026 19:01:57.939 * Ready to accept connections tcp
+15411:M 04 Nov 2026 19:01:57.939 * Ready to accept connections unix
+
+
+=== VALKEY BUG REPORT START: Cut & paste starting from here ===
+15411:M 04 Nov 2026 19:01:58.508 # valkey 255.255.255 crashed by signal: 11, si_code: 1
+15411:M 04 Nov 2026 19:01:58.508 # Accessing address: 0x24
+15411:M 04 Nov 2026 19:01:58.508 # Crashed running the instruction at: 0x5f6c528877e6
+
+------ STACK TRACE ------
+EIP:
+/home/runner/work/valkey-fuzzer/valkey-fuzzer/valkey-src/src/valkey-server 127.0.0.1:50911  valkey-fuzzer-owner=15331-327b5d(VM_FreeCallReply+0x16) [0x5f6c528877e6]
+
+15411 valkey-server
+/usr/lib/x86_64-linux-gnu/libc.so.6(+0xa8910) [0x793788aa8910]
+/usr/lib/x86_64-linux-gnu/libc.so.6(pthread_mutex_lock+0xb4) [0x793788aaf6f4]
+/home/runner/work/valkey-fuzzer/valkey-fuzzer/valkey-src/src/valkey-server 127.0.0.1:50911  valkey-fuzzer-owner=15331-327b5d(afterSleep+0x11b) [0x5f6c529303eb]
+/home/runner/work/valkey-fuzzer/valkey-fuzzer/valkey-src/src/valkey-server 127.0.0.1:50911  valkey-fuzzer-owner=15331-327b5d(aeMain+0x64) [0x5f6c5279e8b4]
+/home/runner/work/valkey-fuzzer/valkey-fuzzer/valkey-src/src/valkey-server 127.0.0.1:50911  valkey-fuzzer-owner=15331-327b5d(main+0x76f) [0x5f6c5278ccdf]
+/usr/lib/x86_64-linux-gnu/libc.so.6(+0x2a8c1) [0x793788a2a8c1]
+/usr/lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0x88) [0x793788a2a9d8]
+/home/runner/work/valkey-fuzzer/valkey-fuzzer/valkey-src/src/valkey-server 127.0.0.1:50911  valkey-fuzzer-owner=15331-327b5d(_start+0x25) [0x5f6c5278e6d5]
+
