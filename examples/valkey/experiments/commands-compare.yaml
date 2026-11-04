@@ -1,0 +1,52 @@
+# Send one command sequence to two builds started the same way, and judge
+# the replies: the build under test (deployment.valkey_binary) must meet
+# every `expect`, and each command marked `expect_difference` must reply
+# differently on the parent build, which shows the sequence reached the
+# change. An unmarked command that replies differently is recorded as an
+# unexplained difference, never filed as a finding by itself.
+#
+# This sequence tests valkey-io/valkey#4823 (LSET on an out-of-range 64-bit
+# index modified an element): the parent build answers OK and the list
+# changes, the fixed build answers an error and the list is intact. Copy it,
+# keep the sequence self-contained (both servers start empty), mark every
+# reply the change means to alter, including the later reads a changed write
+# carries into, and give each marked command an `expect`. `compare:
+# unordered`, `unordered-pairs` and `skip` take care of replies that are not
+# deterministic; `cluster: true` runs both servers as one-node clusters for
+# CLUSTER subcommands and slot-keyed replies.
+#
+# The scenario declares the parent build as an artifact and passes it as the
+# `parent` input: {$ref: artifacts.parent.binary}.
+extends: [valkey.liveness]
+id: example.commands-compare
+deployment:
+  modes: [standalone, cluster]
+metadata:
+  description: One command sequence on the build under test and its parent, replies compared
+inputs:
+  required: [parent]
+  properties:
+    parent:
+      type: environment_reference
+      reference_kinds: [artifacts]
+      description: "The parent commit's build, {$ref: artifacts.parent.binary}"
+    resp: {type: integer, enum: [2, 3], default: 2}
+components:
+  - use: valkey.action.commands
+    id: lset
+    config:
+      compare_with: {$ref: inputs.parent}
+      server_config: {list-max-listpack-size: 4}
+      resp: {$ref: inputs.resp}
+      commands:
+        - {command: [RPUSH, l, a, b, c], expect: {equals: 3}}
+        - {command: [LSET, l, 9223372036854775807, x], expect_difference: true,
+           expect: {error: "index out of range"}}
+        - {command: [LSET, l, -9223372036854775808, x], expect_difference: true,
+           expect: {error: "index out of range"}}
+        - {command: [LRANGE, l, 0, -1], expect_difference: true, expect: {equals: [a, b, c]}}
+        - {command: [LSET, l, 1, y], expect: {equals: OK}}
+        # The parent's list still holds the element the bug overwrote, so this read differs too.
+        - {command: [LRANGE, l, 0, -1], expect_difference: true, expect: {equals: [a, y, c]}}
+required_evidence:
+  - {evidence_id: valkey.command.sequence, source: lset}

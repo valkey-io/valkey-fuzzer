@@ -101,6 +101,7 @@ a retry succeeded makes the fault, and the run, `ERROR`.
 | [`valkey.capability.host-probe`](#valkeycapabilityhost-probe) | capability | any | checks the host (Linux, root, tmpfs, iptables) |
 | [`valkey.workload.key-value`](#valkeyworkloadkey-value) | workload | any | writes keys and records every client-visible result |
 | [`valkey.action.command`](#valkeyactioncommand) | action | any | sends a command and checks the reply |
+| [`valkey.action.commands`](#valkeyactioncommands) | action | any | sends a command sequence on one connection, and compares the replies of two builds |
 | [`valkey.action.bgsave`](#valkeyactionbgsave) | action | any | runs BGSAVE to completion |
 | [`valkey.action.failover`](#valkeyactionfailover) | action | cluster | fails over one shard |
 | [`valkey.action.restart-instance`](#valkeyactionrestart-instance) | action | any | restarts one instance |
@@ -150,6 +151,7 @@ schemas.
 | `valkey.action.cluster-chaos` | `<id>.instance-killed`<br>`<id>.wave-validated` | `valkey.chaos.schedule`<br>`valkey.chaos.test-keys`<br>`valkey.instances.expected-down` | none |
 | `valkey.action.cluster-election` | `<id>.election-completed`<br>`<id>.election-started`<br>`<id>.injected` | `valkey.cluster.election.result`<br>`valkey.fault.injected` | `process.paused`<br>`process.stopped` |
 | `valkey.action.command` | none | `valkey.command.replies` | none |
+| `valkey.action.commands` | none | `valkey.command.sequence` (many) | `process.private-server` |
 | `valkey.action.failover` | none | `valkey.failover.result` | none |
 | `valkey.action.poll` | none | `valkey.poll.satisfied` | none |
 | `valkey.action.replicaof` | none | `valkey.replication.replicaof` | none |
@@ -310,6 +312,97 @@ retried for up to `timeout_s`; only then is its error recorded, with
 `FAIL` when any reply does not match; `ERROR` when every reply that came back
 matched but some command got none. Evidence: `valkey.command.replies`, one
 record per reply.
+
+### `valkey.action.commands`
+
+Sends a command sequence on one connection, so `MULTI`/`EXEC`, `WATCH`,
+`SELECT`, and client state span the commands, and with `compare_with`
+compares every reply with the same sequence on another build.
+
+```yaml
+- use: valkey.action.commands
+  id: lset
+  config:
+    compare_with: {$ref: artifacts.parent.binary}   # the parent commit's build
+    server_config: {list-max-listpack-size: 4}      # both servers start with it
+    resp: 2
+    commands:
+      - {command: [RPUSH, l, a, b, c], expect: {equals: 3}}
+      - {command: [LSET, l, 9223372036854775807, x], expect_difference: true,
+         expect: {error: "index out of range"}}
+      - {command: [LRANGE, l, 0, -1], expect_difference: true, expect: {equals: [a, b, c]}}
+      - {command: [HGETALL, h], compare: unordered-pairs}
+      - {command: [RESTORE, k, 0, !!binary "AA4BAgMEBQ=="], expect: {equals: OK}}
+```
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `compare_with` | binary path or null | `null` | A build to compare with, usually `{$ref: artifacts.parent.binary}`. With it the sequence runs on two private servers the action starts, one of the deployment's binary (the candidate) and one of this (the parent), both from an empty dataset; the deployment's instances are never touched. |
+| `instances` | selector | `primaries` | Without `compare_with`: the instances the sequence runs on, one connection each. |
+| `cluster` | boolean | `false` | With `compare_with`: both private servers run as a one-node cluster serving every slot (`cluster-enabled yes`, `CLUSTER ADDSLOTSRANGE 0 16383`, `cluster_state:ok` awaited within `timeout_s`), so a sequence can test `CLUSTER` subcommands and slot-keyed replies. Without `compare_with` it is a config error: the deployment decides the mode. |
+| `server_config` | mapping | `{}` | Server options both private servers start with, as the deployment's `server_config`; the options the deployment manages (`dir`, `port`, `cluster-enabled`, ...) are refused. `sanitize-dump-payload yes` and `enable-debug-command yes` unless set. An option the parent rejects is dropped on both sides and recorded as `dropped_config`; test an option the change adds with `CONFIG SET` inside the sequence, marked `expect_difference`. |
+| `resp` | 2 or 3 | 2 | The protocol of every connection. |
+| `timeout_s` | number, 0.1 to 3600 | 10 | Per command: a reply that takes longer is `unanswered`, and the sequence stops there. |
+| `commands` | list of mappings | | The sequence, below. |
+
+Each command has:
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `command` | list of strings, numbers, or `!!binary` values | | A `!!binary` argument is sent as bytes (it loads as `{$base64: ...}`). |
+| `expect` | mapping or null | `null` | A [predicate](#predicates) on the reply (`equals` also takes a list or a mapping, compared as JSON data), or `{error: true}`, `{error: false}`, or `{error: "<substring>"}`. `null` accepts any reply that is not an error. |
+| `expect_difference` | boolean | `false` | The change under test means this reply to differ from the parent's: the command the change is in, or a later read it carries into. Needs `expect` and `compare_with`. |
+| `compare` | `equal`, `unordered`, `unordered-pairs`, `skip` | `equal` | How the two builds' replies compare: as sent; a flat reply with its items sorted; a flat field-value reply with its pairs sorted (values swapped between fields still differ; a RESP3 map compares as a map); or recorded and never compared (`TIME`, `TTL`, `INFO`, `CLIENT ID`, `SCAN` cursors, `OBJECT ENCODING`, `MEMORY USAGE`, `DEBUG OBJECT`). Avoid commands that also change state at random (`SPOP`, `SRANDMEMBER`, `HRANDFIELD`, `RANDOMKEY`) in a compared sequence: Valkey seeds its hash function per process. |
+
+Replies are recorded as the server sent them, over a raw connection without
+valkey-py's response callbacks: `SET` replies `OK`, not `true`; `HGETALL` a
+flat list on RESP2 and a map on RESP3; a bulk string that is valid UTF-8 as a
+string, any other as `{$base64: ...}`, so two different binary replies never
+compare equal; an error inside an array (a transaction's) as `{$error: ...}`.
+No timestamps, so two runs' replies compare equal.
+
+The outcome, with `compare_with`:
+
+- `FAIL`: a candidate reply that violates its `expect`, or the candidate
+  exiting (a crash, a sanitizer abort); its cause is `crashes` in the
+  diagnostics. Nothing else: a difference between builds is never, by
+  itself, a Valkey failure.
+- `ERROR` with `diagnostics: {reason: unreached-change}`: a marked command
+  whose parent reply equals the candidate's, the parent alive. The sequence
+  did not reach the change; for a bug fix, the parent is a build with the
+  bug, so a test of the fix must see it there.
+- `ERROR` with `diagnostics: {reason: unexplained-difference, commands:
+  [...]}`: an unmarked command whose replies differ, both replies given.
+  Usually a write the change affects carried into a later read that was not
+  marked; sometimes a change the pull request did not intend. Not a `FAIL`:
+  the fuzzer did not see Valkey do something wrong.
+- A parent that dies on a marked command, the candidate replying as
+  expected, counts as reached: the bug was a crash. A parent that dies on an
+  unmarked command is an unexplained difference.
+- `ERROR` for a private server that does not start, or a command with no
+  reply on the candidate (a connection lost without a crash, a timeout).
+
+Without `compare_with`, `expect` alone judges the sequence: `FAIL` on a
+violated reply, `ERROR` on a command with no reply.
+
+Refused when the scenario compiles, naming the command: `SHUTDOWN`; `DEBUG
+RESTART`, `DEBUG CRASH-AND-RECOVER`, `DEBUG RELOAD`, and `DEBUG SLEEP` longer
+than `timeout_s`; `MODULE LOAD`, `LOADEX`, `UNLOAD`; `CONFIG SET` of an option
+the deployment manages; `MONITOR`, `SUBSCRIBE`, `PSUBSCRIBE`, `SSUBSCRIBE`.
+The private servers are disposable, so `DEBUG SEGFAULT` and friends are
+allowed and simply crash the server they are sent to (a candidate crash is a
+`FAIL`, which is what such a test means); `REPLICAOF`, `CLUSTER`, `SYNC`,
+`PSYNC`, and `REPLCONF` are allowed on them too, and refused on the
+deployment's instances.
+
+Evidence: `valkey.command.sequence`, `{candidate: {replies: [{index, reply |
+error, unanswered?}], digest, exited?}, parent: {...} | null, cluster,
+dropped_config, reached: [indexes], unexplained: [indexes]}` (and
+`instance_id` without `compare_with`, one item per instance). `digest` is the
+SHA-256 of the canonical JSON of the compared replies. Both private servers'
+`server.log` and `output.log` are copied into the run's component folder
+before they are stopped, so a crash or sanitizer report survives, and are the
+evidence's artifacts.
 
 ### `valkey.action.bgsave`
 

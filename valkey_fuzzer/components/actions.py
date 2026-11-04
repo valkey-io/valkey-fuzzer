@@ -6,22 +6,30 @@ action finishing. Events an action publishes itself are also named after its
 component (``<id>.save-started``), so they never collide.
 """
 
+import base64
 import functools
+import hashlib
+import math
 import os
 import shutil
+import socket
+import subprocess
 import time
+from collections.abc import Mapping, Sequence
 from typing import Any, Optional
 
 import valkey
 
-from valkey_fuzzer._data import jsonable
+from valkey_fuzzer._data import canonical_json, jsonable
 from valkey_fuzzer.declarations import Declarations
 from valkey_fuzzer.deployment.local.queries import replication_role
+from valkey_fuzzer.deployment.local.server_config import MANAGED_SERVER_OPTIONS, canonicalize_server_config
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.protocols import component_artifact_dir
 from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
-from valkey_fuzzer.schema import ConfigError, ConfigField, ConfigSchema
+from valkey_fuzzer.schema import BASE64_KEY, ConfigError, ConfigField, ConfigSchema, plain_config
 
+from .capabilities import resolve_binary, starts_with
 from .compression import rdb_format
 from .instances import (
     check_shard,
@@ -37,12 +45,13 @@ from .instances import (
     send_to,
     wait_following,
 )
+from .oracles import CRASH_PATTERNS, crash_cause, fatal_exit, scan_for_crashes
 from .polling import poll_until, read_retrying, remaining
 from .predicates import PREDICATE_FIELDS, compare, validate_predicate
 from .processes import stop_owned, wait_exit_signalling
 from .registration import component_registration, validate_command
 from .schemas import ANY, FLAG, INTEGER, LIST, MAPPING, NUMBER, TEXT, declared, mapping_of, nullable, optional
-from .server import binary_version, instance_identity, instance_role
+from .server import PrivateServer, binary_version, instance_identity, instance_role, server_arguments
 
 # ---------------------------------------------------------------------------
 # valkey.action.command
@@ -126,6 +135,608 @@ class CommandAction:
             + (f", {unanswered} unanswered" if unanswered else ""),
             evidence=(make_evidence(spec, "valkey.command.replies", "action.completed", replies),),
         )
+
+
+# ---------------------------------------------------------------------------
+# valkey.action.commands
+# ---------------------------------------------------------------------------
+
+_COMPARE_MODES = ("equal", "unordered", "unordered-pairs", "skip")
+
+# The predicates of valkey.action.command; ``equals`` also takes a list or a mapping, compared as JSON data.
+_SEQUENCE_EXPECT = {
+    **PREDICATE_FIELDS,
+    "equals": optional((str, int, float, bool, list, dict)),
+    "error": optional((bool, str)),
+}
+_SEQUENCE_COMMAND = mapping_of(
+    {
+        "command": ConfigField(list),
+        "expect": mapping_of(_SEQUENCE_EXPECT, allow_none=True, default=None),
+        # The change under test means this reply to differ from the parent's.
+        "expect_difference": ConfigField(bool, default=False),
+        "compare": ConfigField(str, default="equal", choices=_COMPARE_MODES),
+    }
+)
+_COMMANDS_FIELDS = {
+    "instances": ConfigField((str, list), default="primaries"),
+    # A parent build, usually {$ref: artifacts.parent.binary}: the sequence then runs on two private servers,
+    # one of the deployment's binary and one of this, never on the deployment's instances.
+    "compare_with": ConfigField(str, allow_none=True, default=None, reference=True),
+    # Both private servers run as a one-node cluster serving every slot.
+    "cluster": ConfigField(bool, default=False),
+    # Both private servers start with it; an option the parent rejects is dropped on both sides.
+    "server_config": ConfigField(dict, default=dict),
+    "resp": ConfigField(int, default=2, choices=(2, 3)),
+    "timeout_s": ConfigField(float, default=10.0, minimum=0.1, maximum=3600),
+    "commands": ConfigField(list, items=_SEQUENCE_COMMAND),
+}
+
+# Refused in every sequence: they end or restart the server the sequence talks to, or hold its connection.
+_REFUSED = {
+    "SHUTDOWN": "it stops the server",
+    "MONITOR": "it holds the connection",
+    "SUBSCRIBE": "it holds the connection",
+    "PSUBSCRIBE": "it holds the connection",
+    "SSUBSCRIBE": "it holds the connection",
+}
+_REFUSED_DEBUG = ("RESTART", "CRASH-AND-RECOVER", "RELOAD")
+_REFUSED_MODULE = ("LOAD", "LOADEX", "UNLOAD")
+# Refused on the deployment's instances, whose topology the deployment owns; allowed on the private servers.
+_REFUSED_ON_INSTANCES = ("REPLICAOF", "SLAVEOF", "CLUSTER", "SYNC", "PSYNC", "REPLCONF")
+# Commands a refusal names with their subcommand.
+_CONTAINER_COMMANDS = ("DEBUG", "MODULE", "CONFIG", "CLUSTER")
+# What both private servers run with unless server_config sets it: a crafted RESTORE payload that crashes the
+# server is a real bug, and DEBUG is allowed (a DEBUG SEGFAULT crashes the server it is sent to, which is the
+# test). An option the parent rejects is dropped on both sides, these included.
+_PRIVATE_SERVER_DEFAULTS = {"sanitize-dump-payload": "yes", "enable-debug-command": "yes"}
+# How long a private server may take to start, and how long a lost connection waits for its process to exit
+# before the loss counts as anything but a crash.
+_START_TIMEOUT_S = 15.0
+_EXIT_WAIT_S = 5.0
+
+
+def _is_binary(item: Any) -> bool:
+    """Whether ``item`` is a binary argument, ``{"$base64": ...}``, as YAML ``!!binary`` loads."""
+
+    return isinstance(item, Mapping) and set(item) == {BASE64_KEY} and isinstance(item[BASE64_KEY], str)
+
+
+def _validate_sequence_command(command: Any, name: str) -> list[str]:
+    """``command`` is a non-empty list of strings, numbers, and binary arguments; its words, upper-cased (a
+    binary argument is an empty word)."""
+
+    if not command or not all(
+        _is_binary(item) or (isinstance(item, (str, int, float)) and not isinstance(item, bool)) for item in command
+    ):
+        raise ConfigError(f"{name} must be a non-empty list of strings, numbers, or !!binary values")
+    return ["" if _is_binary(item) else str(item).upper() for item in command]
+
+
+def _refusal(words: list[str], timeout_s: float, on_instances: bool) -> Optional[str]:
+    """Why a command with these ``words`` is refused, or None."""
+
+    name, rest = words[0], words[1:]
+    if name in _REFUSED:
+        return _REFUSED[name]
+    if name == "DEBUG" and rest:
+        if rest[0] in _REFUSED_DEBUG:
+            return "it ends or restarts the server"
+        if rest[0] == "SLEEP" and len(rest) > 1:
+            try:
+                if float(rest[1]) > timeout_s:
+                    return f"it sleeps longer than timeout_s ({timeout_s:g}s)"
+            except ValueError:
+                pass
+    if name == "MODULE" and rest and rest[0] in _REFUSED_MODULE:
+        return "it loads or unloads a module"
+    if name == "CONFIG" and rest and rest[0] == "SET":
+        managed = [option for option in rest[1::2] if option.lower() in MANAGED_SERVER_OPTIONS]
+        if managed:
+            return f"{managed[0].lower()} is an option the harness manages"
+    if on_instances and name in _REFUSED_ON_INSTANCES:
+        return "it changes the deployment's topology; a sequence with compare_with may send it"
+    return None
+
+
+def _validate_commands(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -> None:
+    compared = config["compare_with"] is not None
+    if config["cluster"] and not compared:
+        raise ConfigError("cluster needs compare_with: on the deployment's instances the deployment decides the mode")
+    try:
+        canonicalize_server_config(config["server_config"])
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"server_config: {exc}") from exc
+    if not config["commands"]:
+        raise ConfigError("commands must list at least one command")
+    for index, item in enumerate(config["commands"]):
+        where = f"commands[{index}]"
+        words = _validate_sequence_command(item["command"], f"{where}.command")
+        refused = _refusal(words, config["timeout_s"], not compared)
+        if refused is not None:
+            named = " ".join(words[:2]) if words[0] in _CONTAINER_COMMANDS and len(words) > 1 else words[0]
+            raise ConfigError(f"{where}: {named} is refused: {refused}")
+        if item["expect"] is not None:
+            if "error" in item["expect"]:
+                if set(item["expect"]) != {"error"}:
+                    raise ConfigError(f"{where}.expect.error cannot be combined with a reply predicate")
+            else:
+                validate_predicate(item["expect"], f"{where}.expect")
+        if item["expect_difference"]:
+            if not compared:
+                raise ConfigError(f"{where}: expect_difference needs compare_with")
+            if item["expect"] is None:
+                raise ConfigError(f"{where}: a command marked expect_difference needs an expect")
+
+
+def _argument(item: Any) -> Any:
+    return base64.b64decode(item[BASE64_KEY]) if _is_binary(item) else item
+
+
+def _text(value: bytes) -> Any:
+    """A bulk string as the evidence records it: the string when it is valid UTF-8, else ``{"$base64": ...}``."""
+
+    try:
+        return value.decode("utf-8")
+    except UnicodeDecodeError:
+        return {BASE64_KEY: base64.b64encode(value).decode("ascii")}
+
+
+def raw_reply(value: Any) -> Any:
+    """A reply as the connection parsed it, as JSON data: bytes through :func:`_text`, a RESP3 set sorted, an
+    error inside an array (a transaction's) as ``{"$error": ...}``, and nothing reshaped."""
+
+    if isinstance(value, bytes):
+        return _text(value)
+    if isinstance(value, (list, tuple)):
+        return [raw_reply(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return sorted((raw_reply(item) for item in value), key=canonical_json)
+    if isinstance(value, Mapping):
+        keys = ((_text(key) if isinstance(key, bytes) else key) for key in value)
+        return {
+            (f"{BASE64_KEY}:{key[BASE64_KEY]}" if isinstance(key, dict) else str(key)): raw_reply(item)
+            for key, item in zip(keys, value.values())
+        }
+    if isinstance(value, valkey.exceptions.ResponseError):
+        return {"$error": str(value)}
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    return str(value)
+
+
+class RawConnection:
+    """One connection for a whole sequence: arguments go as bytes, replies come back as the server sent them
+    (``decode_responses=False``, no response callbacks), and the protocol is the ``resp`` the sequence asks."""
+
+    def __init__(self, connection: Any):
+        self.connection = connection
+
+    def send(self, command: Sequence[Any]) -> dict[str, Any]:
+        """``{"reply": ...}``, the server's error as ``{"error": ...}``, or a lost connection or a reply that
+        timed out as ``{"error": ..., "unanswered": True}``."""
+
+        try:
+            self.connection.send_command(*[_argument(item) for item in command])
+            return {"reply": raw_reply(self.connection.read_response())}
+        except valkey.exceptions.ResponseError as exc:
+            return {"error": str(exc)}
+        except (valkey.exceptions.ConnectionError, valkey.exceptions.TimeoutError, OSError) as exc:
+            return {"error": f"{type(exc).__name__}: {exc}", "unanswered": True}
+
+    def close(self) -> None:
+        try:
+            self.connection.disconnect()
+        except Exception:
+            pass
+
+
+def open_raw_connection(
+    resp: int, timeout_s: float, *, path: Optional[str] = None, host: Any = None, port: Any = None
+) -> RawConnection:
+    """A :class:`RawConnection` to the unix socket ``path``, or to ``host:port``, connected."""
+
+    options = {"socket_timeout": timeout_s, "socket_connect_timeout": timeout_s, "protocol": resp}
+    if path is not None:
+        connection = valkey.connection.UnixDomainSocketConnection(path=path, **options)
+    else:
+        connection = valkey.connection.Connection(host=str(host), port=int(port), **options)
+    connection.connect()
+    return RawConnection(connection)
+
+
+def _run_sequence(connection: RawConnection, commands: Sequence[Mapping[str, Any]], context: Any) -> list[dict]:
+    """Every command in order on ``connection``, each with its index; it stops at the first that got no reply,
+    since the connection's state is unknown after it, and when the call is cancelled."""
+
+    replies: list[dict[str, Any]] = []
+    for index, item in enumerate(commands):
+        if context.cancelled:
+            break
+        record = {"index": index, **connection.send(item["command"])}
+        replies.append(record)
+        if record.get("unanswered"):
+            break
+    return replies
+
+
+def _compared(record: Mapping[str, Any], mode: str) -> Any:
+    """What a reply record compares as under ``mode``: the reply, its items sorted (``unordered``), or its
+    field-value pairs sorted (``unordered-pairs``; a RESP3 map compares as a map); an error as itself."""
+
+    if "reply" not in record:
+        return {key: value for key, value in record.items() if key != "index"}
+    reply = record["reply"]
+    if isinstance(reply, list):
+        if mode == "unordered":
+            reply = sorted(reply, key=canonical_json)
+        elif mode == "unordered-pairs" and len(reply) % 2 == 0:
+            reply = sorted((reply[index : index + 2] for index in range(0, len(reply), 2)), key=canonical_json)
+    return {"reply": reply}
+
+
+def _sequence_matches(expect: Optional[Mapping[str, Any]], record: Mapping[str, Any]) -> bool:
+    expect = None if expect is None else plain_config(expect)
+    if expect is not None and isinstance(expect.get("equals"), (list, dict)):
+        return "reply" in record and canonical_json(record["reply"]) == canonical_json(expect["equals"])
+    return _matches(expect, record.get("reply"), record.get("error"))
+
+
+def _side(replies: Sequence[Mapping[str, Any]], commands: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """One server's evidence: its replies and the SHA-256 of the canonical JSON of the compared ones."""
+
+    compared = [
+        _compared(record, commands[record["index"]]["compare"])
+        for record in replies
+        if commands[record["index"]]["compare"] != "skip"
+    ]
+    return {"replies": list(replies), "digest": hashlib.sha256(canonical_json(compared).encode()).hexdigest()}
+
+
+def _command_text(command: Sequence[Any]) -> str:
+    return " ".join("<binary>" if _is_binary(item) else str(item) for item in command)
+
+
+class _Server:
+    """One private server of a compared sequence: started, owned until stopped, its logs kept."""
+
+    def __init__(self, label: str, binary: str):
+        self.label, self.binary = label, binary
+        # The server options of this server alone (its cluster port), beside the shared server_config.
+        self.options: dict[str, Any] = {}
+        self.server: Any = None
+        self.owned: Any = None
+        self.connection: Optional[RawConnection] = None
+        self.replies: list[dict[str, Any]] = []
+        self.exited: Optional[int] = None
+        self.logs: list[str] = []
+
+    def start(
+        self, context: Any, spec: ComponentSpec, server_config: Mapping[str, Any], resp: int, timeout_s: float
+    ) -> str:
+        """Start it with ``server_config`` and its own options, and connect; what went wrong, or an empty string."""
+
+        arguments = server_arguments({**server_config, **self.options})
+        self.server = PrivateServer(self.binary, arguments, timeout_s=_START_TIMEOUT_S, prefix="vfc-")
+        self.owned = context.obligations.open(spec, "process.private-server", self.server.workdir, self.server.stop)
+        try:
+            # PrivateServer.start polls with time.sleep: not cancellable, but bounded by its timeout.
+            exit_output = self.server.start()
+        except (OSError, TimeoutError) as exc:
+            return f"the {self.label} server did not start: {exc}"
+        if exit_output is not None:
+            return f"the {self.label} server exited at startup: {exit_output[-500:]}"
+        try:
+            self.connection = open_raw_connection(resp, timeout_s, path=self.server.socket_path)
+        except (valkey.exceptions.ValkeyError, OSError) as exc:
+            return f"cannot connect to the {self.label} server with RESP{resp}: {type(exc).__name__}: {exc}"
+        return ""
+
+    def finish(self, context: Any, spec: ComponentSpec) -> None:
+        """Note whether the process exited (a lost connection waits for it), keep its logs, stop it."""
+
+        if self.connection is not None:
+            self.connection.close()
+        if self.server is not None and self.server.process is not None:
+            if self.replies and self.replies[-1].get("unanswered"):
+                try:
+                    self.server.process.wait(timeout=_EXIT_WAIT_S)
+                except subprocess.TimeoutExpired:
+                    pass
+            self.exited = self.server.process.poll()
+            directory = component_artifact_dir(context, spec)
+            for name, path in (("server.log", self.server.log_path), ("output.log", self.server.output_path)):
+                destination = os.path.join(directory, f"{self.label}.{name}")
+                try:
+                    shutil.copyfile(path, destination)
+                    self.logs.append(destination)
+                except OSError:
+                    pass
+        if self.owned is not None:
+            self.owned.discharge()
+
+    def crash_cause(self) -> str:
+        """Why it exited, from its kept logs: the crash report's cause, else its fatal line, else its status."""
+
+        reports = scan_for_crashes({path: path for path in self.logs}, CRASH_PATTERNS)
+        if reports:
+            return crash_cause(next(iter(reports.values())))
+        fatal = next((line for line in map(fatal_exit, self.logs) if line), None)
+        return fatal or f"exited with status {self.exited}"
+
+
+def _free_ports(count: int) -> list[int]:
+    """``count`` distinct TCP ports free on the loopback address right now."""
+
+    ports: list[int] = []
+    while len(ports) < count:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        if port not in ports:
+            ports.append(port)
+    return ports
+
+
+def _cluster_ready(connection: RawConnection, context: Any, timeout_s: float) -> Optional[str]:
+    """Give a one-node cluster every slot and wait until its state is ok; why that did not happen, or None."""
+
+    added = connection.send(["CLUSTER", "ADDSLOTSRANGE", "0", "16383"])
+    if "reply" not in added:
+        return f"CLUSTER ADDSLOTSRANGE failed: {added.get('error')}"
+
+    def state_ok() -> tuple[bool, Any]:
+        info = connection.send(["CLUSTER", "INFO"])
+        return "cluster_state:ok" in str(info.get("reply", "")), info
+
+    done, last = poll_until(state_ok, timeout_s=timeout_s, interval_s=0.1, context=context)
+    return None if done else f"cluster_state is not ok within {timeout_s:g}s: {last}"
+
+
+class CommandsAction:
+    """Send a command sequence on one connection, and with ``compare_with`` compare the replies of two builds.
+
+    With ``compare_with`` the sequence runs on two private servers the action starts from an empty dataset
+    with the same ``server_config`` (``sanitize-dump-payload yes`` unless set, and ``cluster-enabled yes``
+    with ``cluster``), one of the deployment's binary (the candidate) and one of ``compare_with`` (the
+    parent); the deployment's instances are never touched. An option the parent rejects is dropped on both
+    sides and recorded. Only the candidate is judged: a reply that violates its ``expect``, or a candidate
+    that exits, is FAIL. A difference between the builds is never a FAIL by itself: a marked command whose
+    replies are equal leaves the run ERROR ``unreached-change``, an unmarked command whose replies differ
+    ERROR ``unexplained-difference``; a parent that dies on a marked command reached the change. Without
+    ``compare_with`` the sequence runs on each selected instance, and ``expect`` alone judges it.
+    """
+
+    def run(self, context: Any, spec: ComponentSpec):
+        config = spec.config
+        if config["compare_with"] is None:
+            return self._run_on_instances(context, spec, config)
+        return self._run_compared(context, spec, config)
+
+    def _run_on_instances(self, context: Any, spec: ComponentSpec, config: Mapping[str, Any]):
+        handle = deployment(context)
+        evidence, problems, unanswered = [], [], []
+        for instance_id in select_instances(handle, config["instances"]):
+            instance = handle.instance(instance_id)
+            try:
+                connection = open_raw_connection(
+                    config["resp"], config["timeout_s"], host=instance.host, port=instance.port
+                )
+            except (valkey.exceptions.ValkeyError, OSError) as exc:
+                return make_result(spec, ComponentStatus.ERROR, f"cannot connect to {instance_id}: {exc}")
+            try:
+                replies = _run_sequence(connection, config["commands"], context)
+            finally:
+                connection.close()
+            problems.extend(f"{instance_id}: {text}" for text in _violations(config["commands"], replies))
+            unanswered.extend(f"{instance_id}: {text}" for text in _unanswered(config["commands"], replies))
+            record = _record(config, _side(replies, config["commands"]), None, [], [], [])
+            record["instance_id"] = instance_id
+            evidence.append(make_evidence(spec, "valkey.command.sequence", "action.completed", record))
+        status = ComponentStatus.FAIL if problems else ComponentStatus.ERROR if unanswered else ComponentStatus.PASS
+        summary = (
+            "; ".join([*problems, *unanswered]) or f"{len(config['commands'])} commands on {len(evidence)} instance(s)"
+        )
+        return make_result(spec, status, summary, evidence=evidence)
+
+    def _run_compared(self, context: Any, spec: ComponentSpec, config: Mapping[str, Any]):
+        commands = config["commands"]
+        try:
+            candidate_binary = resolve_binary(plain_config(context.plan.deployment).get("valkey_binary") or "")
+            parent_binary = resolve_binary(config["compare_with"])
+        except OSError as exc:
+            return make_result(spec, ComponentStatus.ERROR, str(exc))
+        candidate, parent = _Server("candidate", candidate_binary), _Server("parent", parent_binary)
+        server_config = {**_PRIVATE_SERVER_DEFAULTS, **canonicalize_server_config(config["server_config"])}
+        if config["cluster"]:
+            # Each server needs a cluster bus port of its own; with no TCP port, Valkey would give both 10000.
+            ports = iter(_free_ports(2))
+            for server in (candidate, parent):
+                server.options = {"cluster-enabled": "yes", "cluster-port": next(ports)}
+
+        def starts(server: _Server, options: Mapping[str, Any]) -> ComponentStatus:
+            probed = {**options, **server.options}
+            return starts_with(context, spec, server.binary, probed, _START_TIMEOUT_S)[0]
+
+        # Configuration both builds accept: an option the parent rejects is dropped on both sides.
+        dropped: list[str] = []
+        if starts(parent, server_config) is ComponentStatus.SKIP:
+            dropped = [
+                name for name, value in server_config.items() if starts(parent, {name: value}) is ComponentStatus.SKIP
+            ]
+            server_config = {name: value for name, value in server_config.items() if name not in dropped}
+        for server in (parent, candidate):
+            status = starts(server, server_config)
+            if status is not ComponentStatus.PASS:
+                return make_result(
+                    spec,
+                    ComponentStatus.ERROR,
+                    f"the {server.label} build ({server.binary}) does not start with {server_config}"
+                    + ("" if status is ComponentStatus.SKIP else ": the probe could not run"),
+                )
+
+        try:
+            for server in (candidate, parent):
+                failed = server.start(context, spec, server_config, config["resp"], config["timeout_s"])
+                if not failed and config["cluster"]:
+                    failed = _cluster_ready(server.connection, context, config["timeout_s"])
+                    failed = failed and f"the {server.label} server: {failed}"
+                if failed:
+                    return make_result(spec, ComponentStatus.ERROR, failed)
+            for server in (candidate, parent):
+                server.replies = _run_sequence(server.connection, commands, context)
+        finally:
+            for server in (candidate, parent):
+                server.finish(context, spec)
+
+        reached, unexplained, unreached, uncompared = _compare(commands, candidate, parent)
+        record = _record(
+            config, _side(candidate.replies, commands), _side(parent.replies, commands), dropped, reached, unexplained
+        )
+        for server in (candidate, parent):
+            if server.exited is not None:
+                record[server.label]["exited"] = server.exited
+        evidence = (
+            make_evidence(
+                spec, "valkey.command.sequence", "action.completed", record, artifacts=[*candidate.logs, *parent.logs]
+            ),
+        )
+        violations = _violations(commands, candidate.replies)
+        if candidate.exited is not None:
+            cause = candidate.crash_cause()
+            at = candidate.replies[-1]["index"] if candidate.replies else None
+            where = (
+                "before the first command"
+                if at is None
+                else f"on command {at} ({_command_text(commands[at]['command'])})"
+            )
+            return make_result(
+                spec,
+                ComponentStatus.FAIL,
+                f"the candidate exited {where}: {cause}",
+                evidence=evidence,
+                diagnostics={"crashes": {"candidate": cause}},
+                crash=True,
+            )
+        if violations:
+            return make_result(spec, ComponentStatus.FAIL, "; ".join(violations), evidence=evidence)
+        unanswered = _unanswered(commands, candidate.replies) + [
+            f"the parent did not answer {text}" for text in uncompared
+        ]
+        if unanswered:
+            return make_result(spec, ComponentStatus.ERROR, "; ".join(unanswered), evidence=evidence)
+        if unexplained:
+            differences = [
+                {
+                    "index": index,
+                    "command": _command_text(commands[index]["command"]),
+                    "candidate": _reply_at(candidate.replies, index),
+                    "parent": _reply_at(parent.replies, index),
+                }
+                for index in unexplained
+            ]
+            return make_result(
+                spec,
+                ComponentStatus.ERROR,
+                "unmarked commands reply differently on the two builds: "
+                + ", ".join(f"{item['index']} ({item['command']})" for item in differences),
+                evidence=evidence,
+                diagnostics={"reason": "unexplained-difference", "commands": differences},
+            )
+        if unreached:
+            return make_result(
+                spec,
+                ComponentStatus.ERROR,
+                "marked commands reply the same on both builds, so the sequence did not reach the change: "
+                + ", ".join(f"{index} ({_command_text(commands[index]['command'])})" for index in unreached),
+                evidence=evidence,
+                diagnostics={"reason": "unreached-change"},
+            )
+        return make_result(
+            spec,
+            ComponentStatus.PASS,
+            f"{len(commands)} commands on both builds, {len(reached)} marked command(s) reached the change"
+            + (f", dropped {', '.join(dropped)}" if dropped else ""),
+            evidence=evidence,
+        )
+
+
+def _record(
+    config: Mapping[str, Any],
+    candidate: dict[str, Any],
+    parent: Optional[dict[str, Any]],
+    dropped: Sequence[str],
+    reached: Sequence[int],
+    unexplained: Sequence[int],
+) -> dict[str, Any]:
+    return {
+        "candidate": candidate,
+        "parent": parent,
+        "cluster": config["cluster"],
+        "dropped_config": list(dropped),
+        "reached": list(reached),
+        "unexplained": list(unexplained),
+    }
+
+
+def _without_index(record: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in record.items() if key != "index"}
+
+
+def _reply_at(replies: Sequence[Mapping[str, Any]], index: int) -> Optional[dict[str, Any]]:
+    return next((_without_index(record) for record in replies if record["index"] == index), None)
+
+
+def _violations(commands: Sequence[Mapping[str, Any]], replies: Sequence[Mapping[str, Any]]) -> list[str]:
+    """The answered replies that violate their command's ``expect``, described."""
+
+    return [
+        f"command {record['index']} ({_command_text(commands[record['index']]['command'])}) replied "
+        f"{canonical_json(_without_index(record))}, not {canonical_json(plain_config(commands[record['index']]['expect']))}"
+        for record in replies
+        if not record.get("unanswered") and not _sequence_matches(commands[record["index"]]["expect"], record)
+    ]
+
+
+def _unanswered(commands: Sequence[Mapping[str, Any]], replies: Sequence[Mapping[str, Any]]) -> list[str]:
+    return [
+        f"command {record['index']} ({_command_text(commands[record['index']]['command'])}) got no reply: {record['error']}"
+        for record in replies
+        if record.get("unanswered")
+    ]
+
+
+def _compare(commands, candidate: _Server, parent: _Server) -> tuple[list[int], list[int], list[int], list[str]]:
+    """Judge the parent's replies against the candidate's: the marked commands that reached the change, the
+    unmarked ones that differ, the marked ones that do not, and the commands the parent did not answer
+    without dying (described)."""
+
+    reached: list[int] = []
+    unexplained: list[int] = []
+    unreached: list[int] = []
+    uncompared: list[str] = []
+    # The command the parent died on: its last record (the one that got no reply, or the last it answered).
+    died_at = parent.replies[-1]["index"] if parent.exited is not None and parent.replies else None
+    for record in candidate.replies:
+        index = record["index"]
+        item = commands[index]
+        if record.get("unanswered") or item["compare"] == "skip":
+            continue
+        other = _reply_at(parent.replies, index)
+        if other is None or other.get("unanswered"):
+            if index == died_at:
+                (reached if item["expect_difference"] else unexplained).append(index)
+            elif parent.exited is None and other is not None:
+                uncompared.append(f"command {index} ({_command_text(item['command'])}): {other['error']}")
+            continue
+        if _compared(record, item["compare"]) == _compared({**other, "index": index}, item["compare"]):
+            if item["expect_difference"]:
+                unreached.append(index)
+        else:
+            (reached if item["expect_difference"] else unexplained).append(index)
+    return reached, unexplained, unreached, uncompared
 
 
 # ---------------------------------------------------------------------------
@@ -973,6 +1584,38 @@ _REPLY = mapping_of(
 )
 _COMMAND_DECLARES = Declarations(evidence={"valkey.command.replies": declared(ConfigField(list, items=_REPLY))})
 
+# One reply of a sequence: the reply as the server sent it, or the error it answered; no timestamps, so two
+# runs' replies compare equal.
+_SEQUENCE_REPLY = mapping_of(
+    {"index": INTEGER, "reply": optional(object), "error": optional(str), "unanswered": optional(bool)}
+)
+# One server's side of a sequence: its replies, the digest of the compared ones, and its exit status if it exited.
+_SEQUENCE_SIDE = mapping_of(
+    {"replies": ConfigField(list, items=_SEQUENCE_REPLY), "digest": TEXT, "exited": optional(int)}
+)
+_COMMANDS_DECLARES = Declarations(
+    evidence={
+        "valkey.command.sequence": declared(
+            mapping_of(
+                {
+                    "candidate": _SEQUENCE_SIDE,
+                    # The parent's side with compare_with; null on a deployment instance.
+                    "parent": ConfigField(dict, allow_none=True, schema=_SEQUENCE_SIDE.schema),
+                    "cluster": FLAG,
+                    "dropped_config": ConfigField(list, items=TEXT),
+                    # Marked commands whose replies differ, and unmarked ones whose replies differ, by index.
+                    "reached": ConfigField(list, items=INTEGER),
+                    "unexplained": ConfigField(list, items=INTEGER),
+                    # Without compare_with: the instance the sequence ran on.
+                    "instance_id": optional(str),
+                }
+            ),
+            many=True,
+        )
+    },
+    changes=("process.private-server",),
+)
+
 _BGSAVE_DECLARES = Declarations(
     events={
         "{id}.save-started": ConfigSchema({"instances": LIST, "accepted": LIST}),
@@ -1051,6 +1694,14 @@ REGISTRATIONS = (
         check=_validate_command,
         selectors={"instances": ()},
         declares=_COMMAND_DECLARES,
+    ),
+    component_registration(
+        "valkey.action.commands",
+        CommandsAction,
+        _COMMANDS_FIELDS,
+        check=_validate_commands,
+        selectors={"instances": ()},
+        declares=_COMMANDS_DECLARES,
     ),
     component_registration(
         "valkey.action.bgsave",

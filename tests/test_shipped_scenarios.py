@@ -19,7 +19,9 @@ DOCUMENTS = sorted([*EXAMPLES.glob("*.yaml"), *(EXAMPLES / "valkey").glob("*.yam
 
 @pytest.fixture(scope="module")
 def runtime():
-    return valkey_service(experiment_directories=[str(EXAMPLES / "experiments")])
+    return valkey_service(
+        experiment_directories=[str(EXAMPLES / "experiments"), str(EXAMPLES / "valkey" / "experiments")]
+    )
 
 
 @pytest.mark.parametrize("path", DOCUMENTS, ids=lambda path: str(path.relative_to(EXAMPLES)))
