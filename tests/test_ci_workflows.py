@@ -424,7 +424,7 @@ def test_the_pr_batch_builds_a_parent_commit_the_same_way_and_declares_it_to_eve
         assert option in build["run"]
     assert build["run"].count("BUILD_ZSTD=yes") == len(CI.BUILDS)
     (batch,) = [step for step in job["steps"] if step.get("id") == "batch"]
-    assert batch["env"]["ASAN_OPTIONS"] == "allocator_may_return_null=1", "what Valkey's test harness sets"
+    assert batch["env"]["ASAN_OPTIONS"] == "allocator_may_return_null=1:quarantine_size_mb=16"
     (summary,) = _step_env("fuzzer-pr-batch.yml", "summary")
     assert {"VALKEY_PARENT_SHA", "BUILD"} <= set(summary)
     assert job["env"]["PARENT_BINARY"].endswith("/valkey-parent/src/valkey-server")

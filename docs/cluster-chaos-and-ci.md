@@ -377,8 +377,11 @@ references `artifacts.parent`. The modules are always plain builds, whatever
 SANITIZER=undefined LUA_DEBUG=yes`), the lines Valkey's own CI uses. The
 batch runs with `ASAN_OPTIONS=allocator_may_return_null=1`, what Valkey's
 test harness sets for every server it starts, so a server that expects an
-allocation to fail sees NULL rather than a sanitizer error; valgrind is not
-offered.
+allocation to fail sees NULL rather than a sanitizer error, and with
+`quarantine_size_mb=16`: by default each ASan server holds back 256 MB of
+freed memory, and a random `cluster-chaos` scenario of 75 servers then needs
+about 15 GB, the whole runner. With 16 MB it needs under 5 GB, at the cost of
+a shorter window for catching a use after free. Valgrind is not offered.
 
 valkey-ci-agent's fuzzer monitor reads one run report per run. In the
 scheduled run's artifact, a PR fuzzer run's (`batch/`), and the dispatched PR

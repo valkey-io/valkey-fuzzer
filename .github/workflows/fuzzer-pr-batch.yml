@@ -279,8 +279,10 @@ jobs:
           # Checked by check-inputs: experiment IDs separated by spaces.
           EXCLUDE_EXPERIMENTS: ${{ inputs.exclude_experiments }}
           # What Valkey's own test harness sets for every server it starts (tests/support/server.tcl): a test
-          # that expects an allocation to fail must see NULL, not an address sanitizer error. Harmless elsewhere.
-          ASAN_OPTIONS: allocator_may_return_null=1
+          # that expects an allocation to fail must see NULL, not an address sanitizer error. And a smaller
+          # quarantine than the 256 MB each process holds by default: a random cluster-chaos scenario of 75
+          # servers otherwise fills the runner's 16 GB, and the runner is lost. Harmless elsewhere.
+          ASAN_OPTIONS: allocator_may_return_null=1:quarantine_size_mb=16
         run: |
           # Each bundle's own data-only experiments, for the scenarios translated from it.
           experiment_dirs=()
