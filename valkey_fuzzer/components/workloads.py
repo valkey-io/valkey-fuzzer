@@ -9,6 +9,20 @@ observed: ``ok`` (acknowledged), ``error`` (an error reply: definitely not
 applied), or ``ambiguous`` (timeout/disconnect; may or may not be applied).
 Oracles reconstruct the set of acceptable final values from this ledger under
 an explicit durability policy instead of guessing.
+
+A ``rename`` in the ``mix`` is ``RENAME src dst`` between two mutable keys of
+the same name length whose values the workload knows for certain (their last
+operation was an acknowledged SET or the preload), so ``dst`` exists. The
+ledger records it as two entries with one outcome: a ``del`` of ``src`` and a
+``set`` of ``dst`` with the value ``src`` held, which is exactly what the
+oracles' model needs. A rename whose source or destination is not known for
+certain (its last write was ambiguous, or it was deleted) becomes a SET.
+
+``list_keys`` lists of ``list_length`` compressible elements are preloaded
+beside the keys, never mutated, and read by the ``lrange`` and ``lindex``
+operations of the mix (``list_read_batch`` reads per operation, pipelined).
+The reads are not ledger entries, only counted. Each list's length and element
+digest go to ``lists.jsonl`` for the RDB snapshot oracle.
 """
 
 import hashlib
@@ -18,6 +32,7 @@ import random
 import string
 import threading
 import time
+from collections.abc import Iterable, Iterator
 from typing import Any, Optional
 
 import valkey
@@ -35,6 +50,9 @@ from .registration import component_registration
 from .schemas import FLAG, INTEGER, NUMBER, TEXT, declared, mapping_of, nullable, optional
 
 LEDGER_EVIDENCE = "valkey.workload.ledger"
+OPERATIONS = ("set", "del", "get", "rename", "lrange", "lindex")
+# Elements an lrange operation reads from its random start index.
+_LRANGE_SPAN = 30
 
 _WORKLOAD_FIELDS = {
     "stable_keys": ConfigField(int, default=0, minimum=0, maximum=5_000_000),
@@ -45,9 +63,14 @@ _WORKLOAD_FIELDS = {
     "compressible": ConfigField(bool, default=False),
     # Relative weights of the operations; one left out never runs.
     "mix": mapping_of(
-        {name: optional(float, minimum=0) for name in ("set", "del", "get")},
+        {name: optional(float, minimum=0) for name in OPERATIONS},
         default=lambda: {"set": 0.7, "del": 0.1, "get": 0.2},
     ),
+    # Lists preloaded beside the keys for the lrange and lindex operations.
+    "list_keys": ConfigField(int, default=0, minimum=0, maximum=1000),
+    "list_length": ConfigField(int, default=100_000, minimum=1, maximum=10_000_000),
+    "list_element_size": ConfigField(int, default=120, minimum=1, maximum=65536),
+    "list_read_batch": ConfigField(int, default=1, minimum=1, maximum=1000),
     "prefix": ConfigField(str, allow_none=True, default=None),
     "op_timeout_s": ConfigField(float, default=2.0, minimum=0.05, maximum=60),
     "preload_batch": ConfigField(int, default=1000, minimum=1, maximum=100_000),
@@ -62,8 +85,17 @@ _WORKLOAD_FIELDS = {
 
 
 def _validate_workload(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -> None:
-    if sum(config["mix"].values()) <= 0:
-        raise ConfigError("mix needs a positive weight for set, del, or get")
+    mix = config["mix"]
+    if sum(mix.values()) <= 0:
+        raise ConfigError(f"mix needs a positive weight for one of {', '.join(OPERATIONS)}")
+    if mix.get("rename", 0) > 0:
+        # RENAME needs both keys in one slot, and mutable keys are not hash-tagged.
+        if plan.deployment_mode != "standalone":
+            raise ConfigError("mix.rename needs a standalone deployment: a cluster rejects it with CROSSSLOT")
+        if config["mutable_keys"] < 2:
+            raise ConfigError("mix.rename needs at least 2 mutable_keys")
+    if (mix.get("lrange", 0) > 0 or mix.get("lindex", 0) > 0) and config["list_keys"] == 0:
+        raise ConfigError("mix.lrange and mix.lindex read lists: set list_keys above 0")
     if config["drain_on_stop"]:
         if config["max_ops"] is None:
             raise ConfigError("drain_on_stop requires max_ops")
@@ -104,6 +136,28 @@ def make_value(rng: random.Random, size: int, compressible: bool, tag: str) -> s
         return body[:size]
     alphabet = string.ascii_letters + string.digits
     return (tag + ":" + "".join(rng.choice(alphabet) for _ in range(size)))[: max(size, len(tag) + 1)]
+
+
+def list_key(prefix: str, index: int) -> str:
+    return f"{prefix}:list:{index}"
+
+
+def list_elements(index: int, length: int, size: int) -> Iterator[str]:
+    """The elements of list ``index``: compressible, so quicklist nodes compress under ``list-compress-depth``."""
+
+    for position in range(length):
+        tag = f"l{index}:{position}:"
+        yield (tag * (size // len(tag) + 1))[:size]
+
+
+def list_digest(elements: Iterable[str]) -> str:
+    """Digest of a list's elements in order, as the RDB snapshot oracle recomputes it after a reload."""
+
+    digest = hashlib.sha256()
+    for element in elements:
+        digest.update(element.encode("utf-8", errors="surrogatepass"))
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 class _Target:
@@ -211,6 +265,11 @@ class KeyValueWorkload:
         # Per preloaded key: when its batch was acknowledged and which instance did.
         self._preload_acks: dict[str, tuple[float, Optional[str]]] = {}
         self._counters = {"ok": 0, "error": 0, "ambiguous": 0}
+        # Keys whose current value is certain: their last write was an acknowledged SET (or the preload).
+        self._known: dict[str, str] = {}
+        # Per preloaded list: key, length, and element digest.
+        self._lists: list[dict[str, Any]] = []
+        self._list_reads = {"ok": 0, "failed": 0}
         self._started_at = 0.0
         self._target: Optional[_Target] = None
         self._config: dict[str, Any] = {}
@@ -238,12 +297,15 @@ class KeyValueWorkload:
                 for index, key in enumerate(mutable_keys)
             }
         preload = {**stable, **mutable_initial}
+        list_keys = [list_key(prefix, index) for index in range(config["list_keys"])]
         try:
             self._load(context, preload, config["preload_batch"])
+            self._load_lists(list_keys, config["list_length"], config["list_element_size"], config["preload_batch"])
         except Exception as exc:
             self._target.reset()
             return make_result(spec, ComponentStatus.ERROR, f"preload failed: {exc}")
         self._preload = preload
+        self._known = dict(preload)
         context.event_bus.publish(
             f"{spec.id}.seeded",
             source=spec.id,
@@ -251,7 +313,7 @@ class KeyValueWorkload:
         )
 
         if config["rate"] > 0 and mutable_keys:
-            ops = [name for name in ("set", "del", "get") if config["mix"].get(name, 0) > 0]
+            ops = [name for name in OPERATIONS if config["mix"].get(name, 0) > 0]
             weights = [config["mix"][name] for name in ops]
             interval = 1.0 / config["rate"]
             sequence = {"value": 0}
@@ -273,10 +335,22 @@ class KeyValueWorkload:
                     key = op_rng.choice(mutable_keys)
                     sequence["value"] += 1
                     op_id = sequence["value"]
-                    value = None
-                    if op == "set":
-                        value = make_value(rng, config["value_size"], config["compressible"], f"w{op_id}")
-                    if self._execute(op_id, op, key, value) != "ok":
+                    if op in ("lrange", "lindex"):
+                        outcome = self._read_list(op, op_rng.choice(list_keys), op_rng, config)
+                    else:
+                        value = dst = None
+                        if op == "rename":
+                            value = self._known.get(key)
+                            peers = [peer for peer in self._known if len(peer) == len(key) and peer != key]
+                            if value is None or not peers:
+                                op = "set"  # The source or a same-length destination is not known for certain.
+                            else:
+                                dst = op_rng.choice(peers)
+                                sequence["value"] += 1  # A rename is two ledger entries.
+                        if op == "set":
+                            value = make_value(rng, config["value_size"], config["compressible"], f"w{op_id}")
+                        outcome = self._execute(op_id, op, key, value, dst)
+                    if outcome != "ok":
                         stop_event.wait(0.02)
                     next_at += interval
                     delay = next_at - time.monotonic()
@@ -325,45 +399,108 @@ class KeyValueWorkload:
                         raise
                     context.sleep(0.2)
 
-    def _execute(self, op_id: int, op: str, key: str, value: Optional[str]) -> str:
+    def _load_lists(self, keys: list[str], length: int, size: int, batch: int) -> None:
+        """RPUSH every list in batches; a failure stops the preload (an RPUSH sent again would append twice)."""
+
+        for index, key in enumerate(keys):
+            client = self._target.connect()
+            digest = hashlib.sha256()
+            chunk: list[str] = []
+            for element in list_elements(index, length, size):
+                digest.update(element.encode("utf-8"))
+                digest.update(b"\0")
+                chunk.append(element)
+                if len(chunk) == batch:
+                    client.rpush(key, *chunk)
+                    chunk = []
+            if chunk:
+                client.rpush(key, *chunk)
+            self._lists.append({"key": key, "length": length, "digest": digest.hexdigest()})
+
+    def _read_list(self, op: str, key: str, op_rng: random.Random, config: dict[str, Any]) -> str:
+        """Pipeline ``list_read_batch`` reads of ``key``; ``ok`` when every reply came back, else ``failed``."""
+
+        length = config["list_length"]
+        try:
+            client = self._target.connect()
+            pipe = client.pipeline(transaction=False)
+            for _ in range(config["list_read_batch"]):
+                start = op_rng.randrange(length)
+                if op == "lrange":
+                    pipe.lrange(key, start, start + _LRANGE_SPAN - 1)
+                else:
+                    pipe.lindex(key, start)
+            pipe.execute()
+        except _CLIENT_ERRORS as exc:
+            self._list_reads["failed"] += 1
+            self._target.reset()
+            return f"failed: {type(exc).__name__}: {exc}"
+        self._list_reads["ok"] += 1
+        return "ok"
+
+    def _execute(self, op_id: int, op: str, key: str, value: Optional[str], dst: Optional[str] = None) -> str:
+        """Run one operation and record it; a ``rename`` of ``key`` to ``dst`` records a ``del`` and a ``set``."""
+
         entry: dict[str, Any] = {"id": op_id, "op": op, "key": key, "t_start": time.time()}
         if value is not None:
             entry["value"] = value
+        entries = [entry]
+        if op == "rename":
+            entries = [
+                {**entry, "op": "del", "rename": [key, dst]},
+                {**entry, "id": op_id + 1, "op": "set", "key": dst, "rename": [key, dst]},
+            ]
+            del entries[0]["value"]
         try:
             client = self._target.connect()
         except Exception as exc:
             # Nothing was sent (e.g. no reachable primary): the operation was not applied.
-            return self._record(entry, "error", exc)
+            return self._record(entries, "error", exc)
         try:
-            entry["instance_id"] = self._target.instance_id
+            for item in entries:
+                item["instance_id"] = self._target.instance_id
             if op == "set":
                 reply = client.set(key, value)
                 entry["reply"] = "OK" if reply is True else reply
             elif op == "del":
                 entry["reply"] = client.delete(key)
+            elif op == "rename":
+                reply = client.rename(key, dst)
+                for item in entries:
+                    item["reply"] = "OK" if reply is True else reply
             else:
                 entry["reply"] = client.get(key)
             # Which instance acknowledged it: under a partition or a forced
             # failover only the old primary's acknowledgements may be lost.
-            entry["instance_id"] = self._target.served_by(key)
+            for item in entries:
+                item["instance_id"] = self._target.served_by(item["key"])
         except _CLIENT_ERRORS as exc:
-            return self._record(entry, _classify(exc), exc)
+            return self._record(entries, _classify(exc), exc)
         if op != "get" and self._config.get("wait_replicas"):
             # The write's own reply ends it; WAIT only adds how far it replicated.
             entry["t_end"] = time.time()
             self._wait(client, entry)
-        return self._record(entry, "ok")
+            for item in entries[1:]:
+                item.update({field: entry[field] for field in ("t_end", "wait", "wait_error") if field in entry})
+        return self._record(entries, "ok")
 
-    def _record(self, entry: dict[str, Any], outcome: str, exc: Optional[BaseException] = None) -> str:
-        entry["outcome"] = outcome
+    def _record(self, entries: list[dict[str, Any]], outcome: str, exc: Optional[BaseException] = None) -> str:
         if exc is not None:
-            entry["error"] = f"{type(exc).__name__}: {exc}"
             # Reconnect after any failure: an error reply such as READONLY means
             # the endpoint stopped being the writable primary (e.g. failover).
             self._target.reset()
-        entry.setdefault("t_end", time.time())
-        self._counters[outcome] += 1
-        self._ledger.append(entry)
+        t_end = time.time()
+        for entry in entries:
+            entry["outcome"] = outcome
+            if exc is not None:
+                entry["error"] = f"{type(exc).__name__}: {exc}"
+            entry.setdefault("t_end", t_end)
+            self._counters[outcome] += 1
+            self._ledger.append(entry)
+            if entry["op"] == "set" and outcome == "ok":
+                self._known[entry["key"]] = entry["value"]
+            elif entry["op"] != "get" and outcome != "error":
+                self._known.pop(entry["key"], None)
         return outcome
 
     def _wait(self, client: Any, entry: dict[str, Any]) -> None:
@@ -399,6 +536,10 @@ class KeyValueWorkload:
         directory = component_artifact_dir(context, spec)
         ledger_path = os.path.join(directory, "ledger.jsonl")
         preload_path = os.path.join(directory, "preload.jsonl")
+        lists_path = None
+        if self._lists:
+            lists_path = os.path.join(directory, "lists.jsonl")
+            write_jsonl(lists_path, self._lists)
         write_jsonl(ledger_path, self._ledger)
         write_jsonl(
             preload_path,
@@ -427,6 +568,9 @@ class KeyValueWorkload:
             "replies_digest": replies_digest(self._ledger),
             "drained": self._drained.is_set(),
             "wait_replicas": self._config.get("wait_replicas", 0),
+            "list_keys": len(self._lists),
+            "lists_path": lists_path,
+            "list_reads": dict(self._list_reads),
         }
         evidence = (
             make_evidence(
@@ -434,7 +578,7 @@ class KeyValueWorkload:
                 LEDGER_EVIDENCE,
                 "workload.quiesced",
                 summary,
-                artifacts=(ledger_path, preload_path),
+                artifacts=(ledger_path, preload_path, *([lists_path] if lists_path else [])),
             ),
         )
         if problem is not None:
@@ -501,6 +645,9 @@ _WORKLOAD_DECLARES = Declarations(
                     "replies_digest": TEXT,
                     "drained": FLAG,
                     "wait_replicas": INTEGER,
+                    "list_keys": INTEGER,
+                    "lists_path": nullable(str),
+                    "list_reads": mapping_of({"ok": INTEGER, "failed": INTEGER}),
                 }
             )
         )
