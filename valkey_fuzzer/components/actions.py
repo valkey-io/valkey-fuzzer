@@ -148,10 +148,11 @@ class CommandAction:
 _COMPARE_MODES = ("equal", "unordered", "unordered-pairs", "json", "skip")
 _MAX_NODES = 6
 
-# The predicates of valkey.action.command; ``equals`` also takes a list or a mapping, compared as JSON data.
+# The predicates of valkey.action.command; ``equals`` also takes a list or a mapping, compared as JSON data, or
+# null, a null reply.
 _SEQUENCE_EXPECT = {
     **PREDICATE_FIELDS,
-    "equals": optional((str, int, float, bool, list, dict)),
+    "equals": optional((str, int, float, bool, list, dict), allow_none=True),
     "error": optional((bool, str)),
 }
 _SEQUENCE_COMMAND = mapping_of(
@@ -607,6 +608,8 @@ def _json_expected(expected: Any, reply: Any) -> Any:
 
 def _sequence_matches(expect: Optional[Mapping[str, Any]], record: Mapping[str, Any], compare: str) -> bool:
     expect = None if expect is None else plain_config(expect)
+    if expect is not None and "equals" in expect and expect["equals"] is None:
+        return record.get("error") is None and record.get("reply") is None
     if compare == "json" and expect is not None and "equals" in expect:
         return "reply" in record and canonical_json(_compared(record, "json")["reply"]) == canonical_json(
             _json_expected(expect["equals"], record["reply"])

@@ -386,6 +386,16 @@ def test_under_json_an_expect_holds_for_the_value_the_reply_holds(builds, reply,
     assert (result.status.value == "PASS") is holds, result.summary
 
 
+@pytest.mark.parametrize(("reply", "holds"), [(None, True), (b"", False), (0, False)])
+def test_an_expect_equal_to_null_holds_for_a_null_reply(builds, reply, holds):
+    # As in a proposed test for valkey-io/valkey#4424, which validation refused.
+    for build in builds.values():
+        BUILDS[build].replies = {("REPLY",): reply}
+    result, _ = run(builds, [{"command": ["REPLY"], "expect": {"equals": None}}])
+
+    assert (result.status.value == "PASS") is holds, result.summary
+
+
 def test_a_candidate_reply_that_never_came_leaves_the_run_untested(builds):
     BUILDS[builds["candidate"]].replies = {("SLOW",): TIMEOUT}
     result, value = run(builds, [{"command": ["SLOW"]}, {"command": ["PING"]}])
