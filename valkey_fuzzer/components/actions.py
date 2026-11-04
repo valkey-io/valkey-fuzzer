@@ -544,7 +544,7 @@ def _run_step(target: Any, item: Mapping[str, Any], context: Any) -> dict[str, A
 
     def attempt() -> tuple[bool, dict[str, Any]]:
         record = target.mask(connection.send(command))
-        return bool(record.get("unanswered")) or _sequence_matches(item["expect"], record), record
+        return bool(record.get("unanswered")) or _sequence_matches(item["expect"], record, item["compare"]), record
 
     return poll_until(attempt, timeout_s=item["wait_s"], interval_s=_WAIT_INTERVAL_S, context=context)[1]
 
@@ -591,8 +591,26 @@ def _compared(record: Mapping[str, Any], mode: str) -> Any:
     return {"reply": reply}
 
 
-def _sequence_matches(expect: Optional[Mapping[str, Any]], record: Mapping[str, Any]) -> bool:
+def _json_expected(expected: Any, reply: Any) -> Any:
+    """``expected`` as :func:`_compared` makes ``reply`` under ``json``: where the reply holds JSON text, the
+    expectation may be that text or the value it holds."""
+
+    def one(value: Any, item: Any) -> Any:
+        if isinstance(item, str) and not isinstance(value, str):
+            return _json_value(json.dumps(value))
+        return _json_value(value)
+
+    if isinstance(reply, list) and isinstance(expected, list) and len(reply) == len(expected):
+        return [one(value, item) for value, item in zip(expected, reply)]
+    return one(expected, reply)
+
+
+def _sequence_matches(expect: Optional[Mapping[str, Any]], record: Mapping[str, Any], compare: str) -> bool:
     expect = None if expect is None else plain_config(expect)
+    if compare == "json" and expect is not None and "equals" in expect:
+        return "reply" in record and canonical_json(_compared(record, "json")["reply"]) == canonical_json(
+            _json_expected(expect["equals"], record["reply"])
+        )
     if expect is not None and isinstance(expect.get("equals"), (list, dict)):
         return "reply" in record and canonical_json(record["reply"]) == canonical_json(expect["equals"])
     return _matches(expect, record.get("reply"), record.get("error"))
@@ -1155,7 +1173,9 @@ def _violations(commands: Sequence[Mapping[str, Any]], replies: Sequence[Mapping
         f"command {record['index']} ({_step_text(commands[record['index']])}) replied "
         f"{canonical_json(_without_index(record))}, not {canonical_json(plain_config(commands[record['index']]['expect']))}"
         for record in replies
-        if not record.get("unanswered") and not _sequence_matches(commands[record["index"]]["expect"], record)
+        if not record.get("unanswered") and not _sequence_matches(
+            commands[record["index"]]["expect"], record, commands[record["index"]]["compare"]
+        )
     ]
 
 
@@ -1166,7 +1186,9 @@ def _violating(commands: Sequence[Mapping[str, Any]], replies: Sequence[Mapping[
     return [
         record["index"]
         for record in replies
-        if not record.get("unanswered") and not _sequence_matches(commands[record["index"]]["expect"], record)
+        if not record.get("unanswered") and not _sequence_matches(
+            commands[record["index"]]["expect"], record, commands[record["index"]]["compare"]
+        )
     ]
 
 

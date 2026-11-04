@@ -364,6 +364,28 @@ def test_an_expect_both_builds_violate_alike_is_disputed_not_fail(builds):
     }
 
 
+@pytest.mark.parametrize(
+    ("reply", "equals", "holds"),
+    [
+        # As in the proposed tests for valkey-json#109 and #120: JSON.GET's text against the value it holds.
+        (b"[]", [], True),
+        (b"[[0]]", [[0]], True),
+        (b'{"b": [1, 2], "a": 1.0}', '{"a":1,"b":[1,2]}', True),
+        (b"[true]", [1], False),
+        ([b"[1]", None], [[1], None], True),
+        ([b"[1]", 2], ["[1]", 2], True),
+        (2, 2, True),
+        (b"OK", "OK", True),
+    ],
+)
+def test_under_json_an_expect_holds_for_the_value_the_reply_holds(builds, reply, equals, holds):
+    for build in builds.values():
+        BUILDS[build].replies = {("REPLY",): reply}
+    result, _ = run(builds, [{"command": ["REPLY"], "compare": "json", "expect": {"equals": equals}}])
+
+    assert (result.status.value == "PASS") is holds, result.summary
+
+
 def test_a_candidate_reply_that_never_came_leaves_the_run_untested(builds):
     BUILDS[builds["candidate"]].replies = {("SLOW",): TIMEOUT}
     result, value = run(builds, [{"command": ["SLOW"]}, {"command": ["PING"]}])
