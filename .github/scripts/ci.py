@@ -275,10 +275,12 @@ def summarize(env, results):
     return "\n".join(lines) + "\n", "\n".join(comment) + "\n", overall_failed
 
 
-def batch_summary(title, batch_dir, valkey=""):
+def batch_summary(title, batch_dir, valkey="", parent="", build=""):
     """The job summary of one batch folder: its status, each run, and the failure signatures."""
 
     lines = [f"## {title}", ""] + ([f"- Valkey: {valkey}"] if valkey else [])
+    lines += [f"- Parent commit (artifacts.parent): `{parent}`"] if parent else []
+    lines += [f"- Build: `{build}`"] if build else []
     summary, runs = batch_runs(batch_dir)
     if summary is None:
         return "\n".join([*lines, "- The batch wrote no summary; see the step log."]) + "\n"
@@ -342,6 +344,59 @@ def _yaml_mapping(text, what):
     return document
 
 
+# The builds the PR batch offers; the make lines are in the workflow.
+BUILDS = ("default", "asan", "ubsan")
+
+
+def parent_artifact_block(binary):
+    """The YAML appended to every scenario when the batch built a parent commit: ``artifacts.parent`` is its build."""
+
+    # A JSON string is a YAML double-quoted scalar, whatever the path holds.
+    return (
+        f"artifacts:\n  parent:\n    use: valkey.artifact.local-binary\n    with:\n      path: {json.dumps(binary)}\n"
+    )
+
+
+def with_parent_artifact(text, document, binary, what):
+    """``text`` with :func:`parent_artifact_block` appended, once the result parses to ``document`` plus it.
+
+    The block is appended to the text, not merged into the parsed document, so the scenario runs byte for byte
+    as it was sent; a flow-style top-level mapping or a missing final newline makes the append change or break
+    the document, and the scenario is refused.
+    """
+
+    import yaml
+
+    appended = text + parent_artifact_block(binary)
+    try:
+        after = yaml.safe_load(appended)
+    except yaml.YAMLError:
+        after = None
+    expected = {**document, "artifacts": yaml.safe_load(parent_artifact_block(binary))["artifacts"]}
+    if after != expected:
+        raise SystemExit(
+            f"{what}: appending the artifacts.parent block does not add exactly that key (a flow-style top-level "
+            "mapping, or no final newline?)"
+        )
+    return appended
+
+
+def artifact_references(value):
+    """Every ``artifacts.<id>`` an authored ``{$ref: artifacts.<id>.<output>}`` in ``value`` names, in order seen."""
+
+    found = []
+    if isinstance(value, dict):
+        reference = value.get("$ref")
+        if isinstance(reference, str) and reference.startswith("artifacts."):
+            found.append(".".join(reference.split(".")[:2]))
+        for item in value.values():
+            found += artifact_references(item)
+    elif isinstance(value, list):
+        for item in value:
+            found += artifact_references(item)
+    return found
+
+
 def check_inputs(env):
     """Check fuzzer-pr-batch.yml's inputs, and write its scenarios to CANDIDATES_DIR and its bundles to SPEC_DIR."""
 
@@ -355,6 +410,13 @@ def check_inputs(env):
         raise SystemExit("valkey_repository must be OWNER/NAME")
     if not re.fullmatch(r"[0-9a-f]{40}", env["INPUT_VALKEY_SHA"]):
         raise SystemExit("valkey_sha must be a full 40-character lowercase commit SHA")
+    parent_sha = env["INPUT_VALKEY_PARENT_SHA"]
+    if parent_sha and not re.fullmatch(r"[0-9a-f]{40}", parent_sha):
+        raise SystemExit("valkey_parent_sha must be empty or a full 40-character lowercase commit SHA")
+    if parent_sha == env["INPUT_VALKEY_SHA"]:
+        raise SystemExit("valkey_parent_sha is valkey_sha: a comparison with the same build shows nothing")
+    if env["INPUT_BUILD"] not in BUILDS:
+        raise SystemExit(f"build must be one of {', '.join(BUILDS)}")
     # 4 seeds of the 17 one-build experiments is 68 runs: what two workers finish inside the job's timeout.
     if not re.fullmatch(r"[0-4]", env["INPUT_RANDOM_SEEDS"]):
         raise SystemExit("random_seeds must be 0 to 4")
@@ -388,7 +450,18 @@ def check_inputs(env):
             if field in (document.get("deployment") or {}):
                 raise SystemExit(f"scenario {name} sets deployment.{field}; the batch runs valkey_sha's build")
         if "artifacts" in document:
-            raise SystemExit(f"scenario {name} declares artifacts; the batch runs valkey_sha's build")
+            raise SystemExit(f"scenario {name} declares artifacts; the batch declares them (artifacts.parent)")
+        # The batch declares artifacts.parent, and only with a parent build; a reference to anything else
+        # would fail to compile once the batch runs.
+        declared = {"artifacts.parent"} if parent_sha else set()
+        for reference in artifact_references(document):
+            if reference not in declared:
+                raise SystemExit(
+                    f"scenario {name} references {reference}, which the batch does not declare"
+                    + ("" if parent_sha else " (no valkey_parent_sha)")
+                )
+        if parent_sha:
+            text = with_parent_artifact(text, document, env["PARENT_BINARY"], f"scenario {name}")
         (out / f"{name}.yaml").write_text(text, encoding="utf-8")
     print(f"{len(scenarios)} scenario(s) written to {out}")
 
@@ -475,7 +548,15 @@ def main(command):
         if env.get("VALKEY_SHA"):
             valkey = f"`{env['VALKEY_REPOSITORY']}` `{env['VALKEY_REF'] or '-'}` `{env['VALKEY_SHA']}`"
         with open(env["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as handle:
-            handle.write(batch_summary(env["SUMMARY_TITLE"], env["BATCH_DIR"], valkey))
+            handle.write(
+                batch_summary(
+                    env["SUMMARY_TITLE"],
+                    env["BATCH_DIR"],
+                    valkey,
+                    parent=env.get("VALKEY_PARENT_SHA", ""),
+                    build=env.get("BUILD", ""),
+                )
+            )
     else:
         raise SystemExit(
             f"unknown command {command!r}; expected resolve, matrix, metadata, summarize, check-inputs, drop-ledgers, "

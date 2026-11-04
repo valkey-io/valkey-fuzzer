@@ -316,13 +316,23 @@ def test_the_pr_batch_workflow_holds_no_credentials_and_splices_no_input_into_a_
         assert "${{ inputs." not in step.get("run", "")
 
 
-SCENARIO = yaml.safe_dump(
-    {"scenario_id": "s", "seed": 1, "experiment": {"id": "toy.register"}, "deployment": {"mode": "standalone"}}
-)
+SCENARIO_DOCUMENT = {
+    "scenario_id": "s", "seed": 1, "experiment": {"id": "toy.register"}, "deployment": {"mode": "standalone"},
+}  # fmt: skip
+SCENARIO = yaml.safe_dump(SCENARIO_DOCUMENT)
 BUNDLE = {str(path.relative_to(REGISTER)): path.read_text() for path in sorted(REGISTER.rglob("*")) if path.is_file()}
 BINARY = yaml.safe_dump({"deployment": {"valkey_binary": "/bin/sh"}})
 INSTANCE_BINARIES = yaml.safe_dump({"deployment": {"mode": "standalone", "instance_binaries": {"replica": "/bin/sh"}}})
 ARTIFACT = yaml.safe_dump({"artifacts": {"old": {"use": "valkey.artifact.local-binary", "with": {"path": "/bin/sh"}}}})
+# A scenario that compares the parent build: what a valkey.action.commands scenario holds.
+COMPARES_PARENT = yaml.safe_dump(
+    {**SCENARIO_DOCUMENT, "experiment": {"id": "x", "inputs": {"with": {"$ref": "artifacts.parent.binary"}}}}
+)
+OTHER_ARTIFACT = yaml.safe_dump(
+    {**SCENARIO_DOCUMENT, "experiment": {"id": "x", "inputs": {"with": {"$ref": "artifacts.other.binary"}}}}
+)
+PARENT = "b" * 40
+PARENT_BINARY = "/work/valkey-parent/src/valkey-server"
 
 
 def _check_pr_batch_inputs(tmp_path, scenarios, inputs):
@@ -333,11 +343,14 @@ def _check_pr_batch_inputs(tmp_path, scenarios, inputs):
         "INPUT_SPEC_BUNDLES": json.dumps(inputs["bundles"]) if "bundles" in inputs else "",
         "INPUT_VALKEY_REPOSITORY": inputs.get("repository", "valkey-io/valkey"),
         "INPUT_VALKEY_SHA": inputs.get("sha", "a" * 40),
+        "INPUT_VALKEY_PARENT_SHA": inputs.get("parent_sha", ""),
+        "INPUT_BUILD": inputs.get("build", "default"),
         "INPUT_RANDOM_SEEDS": inputs.get("random_seeds", "0"),
         "INPUT_REQUEST_ID": inputs.get("request_id", ""),
         "INPUT_EXCLUDE_EXPERIMENTS": inputs.get("exclude_experiments", ""),
         "CANDIDATES_DIR": str(tmp_path / "candidates"),
         "SPEC_DIR": str(tmp_path / "spec"),
+        "PARENT_BINARY": PARENT_BINARY,
     }
     with patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()):
         try:
@@ -366,6 +379,58 @@ def test_the_pr_batch_writes_the_scenarios_and_bundles_it_is_sent(tmp_path):
     assert {str(path.relative_to(written)) for path in written.rglob("*") if path.is_file()} == set(BUNDLE)
 
 
+def test_the_pr_batch_builds_a_parent_commit_the_same_way_and_declares_it_to_every_scenario(tmp_path):
+    workflow = _workflow("fuzzer-pr-batch.yml")
+    inputs = workflow["on"]["workflow_dispatch"]["inputs"]
+    assert inputs["valkey_parent_sha"]["required"] is False and inputs["valkey_parent_sha"]["default"] == ""
+    assert inputs["build"]["type"] == "choice" and inputs["build"]["default"] == "default"
+    assert tuple(inputs["build"]["options"]) == CI.BUILDS
+    (job,) = workflow["jobs"].values()
+    (parent,) = [step for step in job["steps"] if step.get("with", {}).get("path") == "valkey-parent"]
+    assert parent["if"] == "inputs.valkey_parent_sha != ''"
+    assert parent["with"]["ref"] == "${{ inputs.valkey_parent_sha }}" and "fetch-depth" in parent["with"]
+    (build,) = [step for step in job["steps"] if step.get("name") == "Build Valkey"]
+    assert {"INPUT_VALKEY_SHA", "INPUT_VALKEY_PARENT_SHA", "INPUT_BUILD"} <= set(build["env"])
+    # Both checkouts get the chosen build; the sanitizer lines are Valkey's own CI's.
+    assert "build valkey-src" in build["run"] and "build valkey-parent" in build["run"]
+    for option in ("SANITIZER=address", "SANITIZER=undefined LUA_DEBUG=yes", "CC=clang"):
+        assert option in build["run"]
+    assert build["run"].count("BUILD_ZSTD=yes") == len(CI.BUILDS)
+    (batch,) = [step for step in job["steps"] if step.get("id") == "batch"]
+    assert batch["env"]["ASAN_OPTIONS"] == "allocator_may_return_null=1", "what Valkey's test harness sets"
+    (summary,) = _step_env("fuzzer-pr-batch.yml", "summary")
+    assert {"VALKEY_PARENT_SHA", "BUILD"} <= set(summary)
+    assert job["env"]["PARENT_BINARY"].endswith("/valkey-parent/src/valkey-server")
+
+    # With a parent build, the block is appended to the text as sent, and the result is the scenario plus it.
+    scenarios = {"compare": COMPARES_PARENT, "plain": SCENARIO}
+    assert _check_pr_batch_inputs(tmp_path, scenarios, {"parent_sha": PARENT, "build": "asan"}) is None
+    block = CI.parent_artifact_block(PARENT_BINARY)
+    assert block == (
+        f'artifacts:\n  parent:\n    use: valkey.artifact.local-binary\n    with:\n      path: "{PARENT_BINARY}"\n'
+    )
+    for name, text in scenarios.items():
+        written = (tmp_path / "candidates" / f"{name}.yaml").read_text(encoding="utf-8")
+        assert written == text + block
+        assert yaml.safe_load(written) == {
+            **yaml.safe_load(text),
+            "artifacts": {"parent": {"use": "valkey.artifact.local-binary", "with": {"path": PARENT_BINARY}}},
+        }
+
+
+def test_the_batch_summary_names_the_parent_commit_and_the_build(tmp_path):
+    (tmp_path / "summary.json").write_text(json.dumps({"status": "PASS", "counts": {}, "runs": [], "signatures": []}))
+
+    summary = CI.batch_summary("Batch", str(tmp_path), "`v` `-` `abc`", parent=PARENT, build="asan")
+
+    assert summary.startswith(
+        f"## Batch\n\n- Valkey: `v` `-` `abc`\n- Parent commit (artifacts.parent): `{PARENT}`\n- Build: `asan`\n"
+    )
+    assert "Parent" not in CI.batch_summary("Batch", str(tmp_path)) and "Build" not in CI.batch_summary(
+        "B", str(tmp_path)
+    )
+
+
 @pytest.mark.parametrize(
     ("scenarios", "inputs", "message"),
     [
@@ -381,7 +446,19 @@ def test_the_pr_batch_writes_the_scenarios_and_bundles_it_is_sent(tmp_path):
         ({"a": "[1, 2]"}, {}, "must be a mapping"),
         ({"a": BINARY}, {}, "sets deployment.valkey_binary; the batch runs valkey_sha's build"),
         ({"a": INSTANCE_BINARIES}, {}, "sets deployment.instance_binaries; the batch runs valkey_sha's build"),
-        ({"a": ARTIFACT}, {}, "declares artifacts; the batch runs valkey_sha's build"),
+        ({"a": ARTIFACT}, {}, "declares artifacts; the batch declares them"),
+        ({"a": ARTIFACT}, {"parent_sha": PARENT}, "declares artifacts; the batch declares them"),
+        (
+            {"a": COMPARES_PARENT},
+            {},
+            "references artifacts.parent, which the batch does not declare (no valkey_parent_sha)",
+        ),
+        ({"a": OTHER_ARTIFACT}, {"parent_sha": PARENT}, "references artifacts.other, which the batch does not declare"),
+        ({"a": SCENARIO.rstrip("\n")}, {"parent_sha": PARENT}, "does not add exactly that key"),
+        ({"a": json.dumps(SCENARIO_DOCUMENT)}, {"parent_sha": PARENT}, "does not add exactly that key"),
+        ({"a": SCENARIO}, {"parent_sha": "B" * 40}, "valkey_parent_sha must be empty or a full"),
+        ({"a": SCENARIO}, {"parent_sha": "a" * 40}, "valkey_parent_sha is valkey_sha"),
+        ({"a": SCENARIO}, {"build": "valgrind"}, "build must be one of default, asan, ubsan"),
         ({"a": SCENARIO}, {"sha": "main"}, "full 40-character lowercase commit SHA"),
         ({"a": SCENARIO}, {"repository": "evil; rm -rf /"}, "OWNER/NAME"),
         ({"a": SCENARIO}, {"bundles": {"../up": {}}}, "must be lowercase letters"),
@@ -477,8 +554,9 @@ def test_the_batch_workflows_summarize_through_the_ci_script():
         assert "python - <<" not in (WORKFLOWS / workflow).read_text(), "no workflow keeps a script of its own"
     (env,) = _step_env("fuzzer-pr-batch.yml", "check-inputs")
     names = {"INPUT_SCENARIOS", "INPUT_SPEC_BUNDLES", "INPUT_VALKEY_REPOSITORY", "INPUT_VALKEY_SHA"}
-    names |= {"INPUT_RANDOM_SEEDS", "INPUT_REQUEST_ID", "INPUT_EXCLUDE_EXPERIMENTS"}
-    assert names | {"CANDIDATES_DIR", "SPEC_DIR"} <= set(env)
+    names |= {"INPUT_VALKEY_PARENT_SHA", "INPUT_BUILD", "INPUT_RANDOM_SEEDS", "INPUT_REQUEST_ID"}
+    names |= {"INPUT_EXCLUDE_EXPERIMENTS"}
+    assert names | {"CANDIDATES_DIR", "SPEC_DIR", "PARENT_BINARY"} <= set(env)
 
 
 def test_the_pr_batch_drops_the_write_ledgers_of_the_runs_that_passed(tmp_path):
