@@ -551,6 +551,49 @@ def test_a_node_that_dies_fails_the_candidate_with_its_own_logs_kept(builds):
 
 
 # ---------------------------------------------------------------------------
+# Waiting
+# ---------------------------------------------------------------------------
+
+
+def _done_after(attempts, reply):
+    """A reply that is ``pending`` on each server until its ``attempts``-th time, ``reply`` from then on."""
+
+    seen = {}
+
+    def answer(server):
+        seen[server.workdir] = seen.get(server.workdir, 0) + 1
+        return reply if seen[server.workdir] >= attempts else b"pending"
+
+    return answer
+
+
+def test_a_command_with_wait_s_is_sent_again_until_its_expect_holds(builds):
+    for build in BUILDS.values():
+        build.replies = {("CLUSTER", "GETSLOTMIGRATIONS"): _done_after(3, b"success")}
+    commands = [
+        {"command": ["CLUSTER", "GETSLOTMIGRATIONS"], "wait_s": 5, "expect": {"equals": "success"}},
+        {"command": ["PING"]},
+    ]
+    result, value = run(builds, commands)
+
+    assert result.status.value == "PASS", result.summary
+    assert _replies(value["candidate"]) == [{"reply": "success"}, {"reply": "OK"}]
+    for build in BUILDS.values():
+        assert build.sent == [("CLUSTER", "GETSLOTMIGRATIONS")] * 3 + [("PING",)]
+
+
+def test_a_wait_that_times_out_records_the_last_reply_against_its_expect(builds):
+    BUILDS[builds["candidate"]].replies = {("INFO", "replication"): b"master_link_status:down"}
+    BUILDS[builds["parent"]].replies = {("INFO", "replication"): b"master_link_status:up"}
+    commands = [{"command": ["INFO", "replication"], "wait_s": 0.3, "expect": {"contains": "status:up"}}]
+    result, _ = run(builds, commands)
+
+    assert result.status.value == "FAIL"
+    assert 'command 0 (INFO replication) replied {"reply":"master_link_status:down"}' in result.summary
+    assert len(BUILDS[builds["candidate"]].sent) > 1 and len(BUILDS[builds["parent"]].sent) == 1
+
+
+# ---------------------------------------------------------------------------
 # Without compare_with: the deployment's instances
 # ---------------------------------------------------------------------------
 
@@ -619,6 +662,8 @@ _PARENT = {"compare_with": "/opt/parent/valkey-server"}
         ({"commands": [{"command": ["PING"], "expect": {"error": True, "equals": 1}}]}, "cannot be combined"),
         ({"commands": [{"command": ["PING"], "compare": "sorted"}]}, "must be one of"),
         ({"commands": [{"command": ["PING"], "expect_difference": True}]}, "needs compare_with"),
+        ({"commands": [{"command": ["PING"], "wait_s": 5}]}, r"commands\[0\]: wait_s needs an expect to wait for"),
+        ({"commands": [{"command": ["PING"], "wait_s": 0, "expect": {"equals": "PONG"}}]}, "wait_s"),
         ({"nodes": 2, "commands": [{"command": ["PING"]}]}, "nodes needs compare_with or modules_parent"),
         ({**_PARENT, "nodes": 7, "commands": [{"command": ["PING"]}]}, "nodes"),
         ({**_PARENT, "nodes": 2, "commands": [{"command": ["PING"], "node": 2}]}, r"commands\[0\]\.node is 2, but each side runs on 2 node\(s\)"),

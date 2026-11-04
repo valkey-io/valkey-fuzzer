@@ -158,6 +158,9 @@ _SEQUENCE_COMMAND = mapping_of(
         # The node it goes to, by index (see nodes).
         "node": ConfigField(int, default=0, minimum=0, maximum=_MAX_NODES - 1),
         "expect": mapping_of(_SEQUENCE_EXPECT, allow_none=True, default=None),
+        # Send the command again until its reply meets expect, for this long at most: for asynchronous work the
+        # sequence started (a slot migration, a replica's sync). Its last reply is the one recorded.
+        "wait_s": ConfigField(float, allow_none=True, default=None, minimum=0.1, maximum=3600),
         # The change under test means this reply to differ from the parent's.
         "expect_difference": ConfigField(bool, default=False),
         "compare": ConfigField(str, default="equal", choices=_COMPARE_MODES),
@@ -209,6 +212,8 @@ _PRIVATE_SERVER_DEFAULTS = {"sanitize-dump-payload": "yes", "enable-debug-comman
 # before the loss counts as anything but a crash.
 _START_TIMEOUT_S = 15.0
 _EXIT_WAIT_S = 5.0
+# How often a command with wait_s is sent again.
+_WAIT_INTERVAL_S = 0.1
 # A node of the side a command runs on, in an argument: <node.1.id>, <node.1.host>, <node.1.port>,
 # <node.1.cluster-port>. Angle brackets, not braces: YAML reads {node.1.id} as a mapping, and Valkey braces as a
 # hash tag.
@@ -319,6 +324,8 @@ def _validate_commands(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -
                     raise ConfigError(f"{where}.expect.error cannot be combined with a reply predicate")
             else:
                 validate_predicate(item["expect"], f"{where}.expect")
+        if item["wait_s"] is not None and item["expect"] is None:
+            raise ConfigError(f"{where}: wait_s needs an expect to wait for")
         if item["expect_difference"]:
             if not compared:
                 raise ConfigError(f"{where}: expect_difference needs compare_with or modules_parent")
@@ -413,12 +420,26 @@ def _run_sequence(target: Any, commands: Sequence[Mapping[str, Any]], context: A
     for index, item in enumerate(commands):
         if context.cancelled:
             break
-        command = [target.substitute(argument) for argument in item["command"]]
-        record = {"index": index, **target.mask(target.connection(item["node"]).send(command))}
+        record = {"index": index, **_run_step(target, item, context)}
         replies.append(record)
         if record.get("unanswered"):
             break
     return replies
+
+
+def _run_step(target: Any, item: Mapping[str, Any], context: Any) -> dict[str, Any]:
+    """One command of a sequence on ``target``: its record, with ``wait_s`` the last of its attempts."""
+
+    command = [target.substitute(argument) for argument in item["command"]]
+    connection = target.connection(item["node"])
+    if item["wait_s"] is None:
+        return target.mask(connection.send(command))
+
+    def attempt() -> tuple[bool, dict[str, Any]]:
+        record = target.mask(connection.send(command))
+        return bool(record.get("unanswered")) or _sequence_matches(item["expect"], record), record
+
+    return poll_until(attempt, timeout_s=item["wait_s"], interval_s=_WAIT_INTERVAL_S, context=context)[1]
 
 
 def _json_value(item: Any) -> Any:

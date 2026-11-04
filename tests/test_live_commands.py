@@ -133,6 +133,19 @@ def test_two_node_clusters_compare_equal_through_their_placeholders():
     assert (first, last, primary[:3]) == (0, 16383, ["127.0.0.1", "<node.0.port>", "<node.0.id>"])
 
 
+def test_a_slot_migration_is_waited_for():
+    commands = [
+        {"command": ["SET", "k", "v"], "expect": {"equals": "OK"}},
+        {"command": ["CLUSTER", "MIGRATESLOTS", "SLOTSRANGE", 7629, 7629, "NODE", "<node.1.id>"]},
+        {"command": ["GET", "k"], "node": 1, "wait_s": 30, "expect": {"equals": "v"}},
+        {"command": ["GET", "k"], "expect": {"error": "MOVED 7629 127.0.0.1:<node.1.port>"}},
+    ]
+    result, value = run(BINARY, commands, compare_with=BINARY, cluster=True, nodes=2)
+
+    assert result.status.value == "PASS", result.summary
+    assert value["candidate"]["digest"] == value["parent"]["digest"]
+
+
 @needs_lset_builds
 @pytest.mark.parametrize("resp", [2, 3])
 def test_the_lset_example_reaches_the_change_on_the_fix_and_its_parent(tmp_path, resp):
