@@ -18,7 +18,7 @@ import shutil
 import socket
 import subprocess
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from typing import Any, Optional
 
 import valkey
@@ -202,6 +202,18 @@ _COMMANDS_FIELDS = {
     "resp": ConfigField(int, default=2, choices=(2, 3)),
     "timeout_s": ConfigField(float, default=10.0, minimum=0.1, maximum=3600),
     "commands": ConfigField(list, items=_SEQUENCE_COMMAND),
+    # Checks that run the sequence again on fresh candidate servers (see checks.py); each is off unless set.
+    "checks": mapping_of(
+        {
+            "variants": ConfigField(bool, default=False),
+            "replica": ConfigField(bool, default=False),
+            "acl": ConfigField(bool, default=False),
+            "concurrency": ConfigField(int, default=0, minimum=0, maximum=16),
+            "compat": ConfigField(bool, default=False),
+        },
+        allow_none=True,
+        default=None,
+    ),
 }
 
 # Refused in every sequence: they end or restart the server the sequence talks to, or hold its connection.
@@ -329,6 +341,11 @@ def _validate_commands(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -
         )
     if config["modules_parent"] is not None and not config["modules"]:
         raise ConfigError("modules_parent needs modules: it replaces the candidate's modules on the parent")
+    if config["checks"] is not None:
+        if not compared:
+            raise ConfigError("checks needs compare_with or modules_parent: they run on private servers")
+        if config["checks"]["compat"] and config["compare_with"] is None:
+            raise ConfigError("checks.compat needs compare_with: it loads the parent build's data into the candidate")
     try:
         server_config = canonicalize_server_config(config["server_config"])
     except (TypeError, ValueError) as exc:
@@ -910,6 +927,22 @@ def _free_ports(count: int) -> list[int]:
     return ports
 
 
+def new_side(label: str, binary: str, config: Mapping[str, Any], modules: Sequence[str], ports: Iterator[int]) -> _Side:
+    """A side of ``config``'s nodes, not started: every node listens on a loopback port of its own (and a cluster
+    bus port) from ``ports``, so nodes can meet and replicate; the sequence talks to it over its unix socket."""
+
+    side = _Side(label, binary, config["nodes"], config["resp"], config["timeout_s"])
+    for node in side.nodes:
+        node.options = {"bind": "127.0.0.1", "port": next(ports)}
+        if config["cluster"]:
+            node.options["cluster-port"] = next(ports)
+    if config["cluster"]:
+        side.options["cluster-enabled"] = "yes"
+    if modules:
+        side.options["loadmodule"] = list(modules)
+    return side
+
+
 class CommandsAction:
     """Send a command sequence, and with ``compare_with`` compare the replies of two builds.
 
@@ -969,26 +1002,14 @@ class CommandsAction:
             )
         except OSError as exc:
             return make_result(spec, ComponentStatus.ERROR, str(exc))
-        candidate = _Side("candidate", candidate_binary, config["nodes"], config["resp"], config["timeout_s"])
-        parent = _Side("parent", parent_binary, config["nodes"], config["resp"], config["timeout_s"])
         server_config = {**_PRIVATE_SERVER_DEFAULTS, **canonicalize_server_config(config["server_config"])}
-        # Every node listens on a loopback port of its own (and a cluster bus port), so nodes can meet and replicate;
-        # the sequence talks to it over its unix socket.
-        ports = iter(_free_ports(2 * config["nodes"] * (2 if config["cluster"] else 1)))
-        for server in (candidate, parent):
-            for node in server.nodes:
-                node.options = {"bind": "127.0.0.1", "port": next(ports)}
-                if config["cluster"]:
-                    node.options["cluster-port"] = next(ports)
-            if config["cluster"]:
-                server.options["cluster-enabled"] = "yes"
         modules = {
             "candidate": list(config["modules"]),
             "parent": list(config["modules"] if config["modules_parent"] is None else config["modules_parent"]),
         }
-        for server in (candidate, parent):
-            if modules[server.label]:
-                server.options["loadmodule"] = modules[server.label]
+        ports = iter(_free_ports(2 * config["nodes"] * (2 if config["cluster"] else 1)))
+        candidate = new_side("candidate", candidate_binary, config, modules["candidate"], ports)
+        parent = new_side("parent", parent_binary, config, modules["parent"], ports)
 
         files = {
             name: _argument(content) if _is_binary(content) else content.encode()
@@ -1049,9 +1070,22 @@ class CommandsAction:
             if server.exited is not None:
                 record[server.label]["exited"] = server.exited
                 record[server.label]["exited_node"] = server.exited_node
+        checks: dict[str, dict[str, Any]] = {}
+        check_logs: list[str] = []
+        if config["checks"] is not None:
+            # checks.py builds on this module, so it is imported where it is used.
+            from .checks import run_checks
+
+            checks, check_logs = run_checks(context, spec, config, candidate, parent_binary, server_config, files)
+            record["checks"] = checks
+        failed = next((outcome for outcome in checks.values() if outcome["outcome"] == "fail"), None)
         evidence = (
             make_evidence(
-                spec, "valkey.command.sequence", "action.completed", record, artifacts=[*candidate.logs, *parent.logs]
+                spec,
+                "valkey.command.sequence",
+                "action.completed",
+                record,
+                artifacts=[*candidate.logs, *parent.logs, *check_logs],
             ),
         )
         violations = _violations(commands, candidate.replies)
@@ -1080,6 +1114,15 @@ class CommandsAction:
             )
         if violations:
             return make_result(spec, ComponentStatus.FAIL, "; ".join(violations), evidence=evidence)
+        if failed is not None:
+            return make_result(
+                spec,
+                ComponentStatus.FAIL,
+                failed["summary"],
+                evidence=evidence,
+                diagnostics=failed["diagnostics"],
+                crash=failed["crash"],
+            )
         unanswered = _unanswered(commands, candidate.replies) + [
             f"the parent did not answer {text}" for text in uncompared
         ]
@@ -1135,7 +1178,8 @@ class CommandsAction:
             spec,
             ComponentStatus.PASS,
             f"{len(commands)} commands on both builds, {len(reached)} marked command(s) reached the change"
-            + (f", dropped {', '.join(dropped)}" if dropped else ""),
+            + (f", dropped {', '.join(dropped)}" if dropped else "")
+            + "".join(f", {name} {outcome['outcome']}" for name, outcome in checks.items()),
             evidence=evidence,
         )
 
@@ -2141,6 +2185,8 @@ _COMMANDS_DECLARES = Declarations(
                     "unexplained": ConfigField(list, items=INTEGER),
                     # Without compare_with: the instance the sequence ran on.
                     "instance_id": optional(str),
+                    # With checks: each enabled check's outcome, by name (see checks.py).
+                    "checks": optional(dict),
                 }
             ),
             many=True,

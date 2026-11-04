@@ -14,7 +14,7 @@ from valkey.exceptions import TimeoutError as ValkeyTimeoutError
 
 from tests.valkey_experiments_support import registration_for, resolved, unit_plan
 from valkey_fuzzer._data import canonical_json, to_plain_data
-from valkey_fuzzer.components import actions, capabilities, server
+from valkey_fuzzer.components import actions, capabilities, checks, server
 from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.schema import ConfigError, load_yaml
@@ -26,6 +26,10 @@ DIE, TIMEOUT, SILENT, CLOSE = "<die>", "<timeout>", "<silent>", "<close>"
 
 class Error(str):
     """An error reply."""
+
+
+class ByResp(dict):
+    """A reply by the protocol of the connection it goes to: ``{2: ..., 3: ...}``."""
 
 
 class Build:
@@ -120,8 +124,8 @@ class FakeWire:
     """A valkey-py connection to one fake server: ``send_command``, ``send_packed_command``, ``can_read``,
     ``read_response``, ``disconnect``."""
 
-    def __init__(self, server):
-        self.server, self.pending = server, None
+    def __init__(self, server, resp=2):
+        self.server, self.pending, self.resp = server, None, resp
         # Its channels, and the messages published to them, waiting to be read.
         self.channels: set[str] = set()
         self.waiting: list = []
@@ -163,6 +167,8 @@ class FakeWire:
         reply = self.server.build.replies.get(pending, defaults.get(pending, b"OK"))
         if callable(reply):
             reply = reply(self.server)
+        if isinstance(reply, ByResp):
+            reply = reply[self.resp]
         if reply == DIE:
             self.server.die()
             raise ValkeyConnectionError("Connection closed by server.")
@@ -180,7 +186,7 @@ class FakeWire:
 
 def fake_open_raw_connection(resp, timeout_s, *, path=None, host=None, port=None):
     server = SERVERS[path] if path is not None else SERVERS[f"{host}:{port}"]
-    return actions.RawConnection(FakeWire(server))
+    return actions.RawConnection(FakeWire(server, resp))
 
 
 @pytest.fixture
@@ -948,6 +954,10 @@ _PARENT = {"compare_with": "/opt/parent/valkey-server"}
         ({"modules": ["/m.so"], "commands": [{"command": ["PING"]}]}, "modules needs compare_with or modules_parent: the deployment's instances load modules through deployment.server_config.loadmodule"),
         ({"modules_parent": ["/m.so"], "commands": [{"command": ["PING"]}]}, "modules_parent needs modules"),
         ({**_PARENT, "server_config": {"loadmodule": "/m.so"}, "commands": [{"command": ["PING"]}]}, r"server_config\.loadmodule: list the modules in modules"),
+        ({"checks": {"variants": True}, "commands": [{"command": ["PING"]}]}, "checks needs compare_with or modules_parent"),
+        ({"modules": ["/n.so"], "modules_parent": ["/o.so"], "checks": {"compat": True}, "commands": [{"command": ["PING"]}]}, "checks.compat needs compare_with"),
+        ({**_PARENT, "checks": {"concurrency": 17}, "commands": [{"command": ["PING"]}]}, "concurrency"),
+        ({**_PARENT, "checks": {"acl": "yes"}, "commands": [{"command": ["PING"]}]}, "acl"),
     ],
 )  # fmt: skip
 def test_a_bad_sequence_config_fails_to_compile(config, error):
@@ -1022,3 +1032,288 @@ def test_modules_parent_without_compare_with_compares_two_module_builds_on_the_d
     candidate = BUILDS[builds["candidate"]]
     assert {tuple(_loaded(arguments)) for arguments in candidate.starts} == {("/m/new.so",), ("/m/old.so",)}
     assert candidate.connections == 2 and not BUILDS[builds["parent"]].starts
+
+
+# ---------------------------------------------------------------------------
+# Checks
+# ---------------------------------------------------------------------------
+
+
+def _check(value, name):
+    return value["checks"][name]
+
+
+def _replicating(digest=b"d1"):
+    """Every server's replication caught up, with ``digest`` (a reply, or a function of the server)."""
+
+    for build in BUILDS.values():
+        build.replies[("INFO", "replication")] = b"# Replication\r\nmaster_link_status:up\r\nmaster_repl_offset:42\r\n"
+        build.replies[("DEBUG", "DIGEST")] = digest
+
+
+def _encodings_off(server):
+    return server.option("hash-max-listpack-entries") == "0"
+
+
+def test_variants_compare_replies_as_multisets_of_their_resp2_values(builds):
+    for build in BUILDS.values():
+        build.replies = {
+            ("HGETALL", "h"): ByResp({2: [b"f1", b"v1", b"f2", b"v2"], 3: {b"f2": b"v2", b"f1": b"v1"}}),
+            ("ZRANGE", "z", "0", "-1", "WITHSCORES"): ByResp({2: [b"a", b"1.5", b"b", b"2"], 3: [[b"a", 1.5], [b"b", 2.0]]}),
+            ("EVAL", "return true", "0"): ByResp({2: 1, 3: True}),
+            ("SMEMBERS", "s"): lambda server: [b"b", b"a"] if _encodings_off(server) else [b"a", b"b"],
+            ("OBJECT", "ENCODING", "s"): lambda server: b"hashtable" if _encodings_off(server) else b"listpack",
+        }
+    commands = [
+        {"command": ["HGETALL", "h"]},
+        {"command": ["ZRANGE", "z", 0, -1, "WITHSCORES"]},
+        {"command": ["EVAL", "return true", 0]},
+        {"command": ["SMEMBERS", "s"], "compare": "unordered"},
+        {"command": ["OBJECT", "ENCODING", "s"]},
+    ]
+    result, value = run(builds, commands, checks={"variants": True})
+
+    assert result.status.value == "PASS", result.summary
+    assert _check(value, "variants") == {"outcome": "pass", "encodings": {"outcome": "pass"}, "protocol": {"outcome": "pass"}}
+    assert result.summary.endswith(", variants pass")
+    encodings, protocol = [server for server in SERVERS.values() if server.node][2:]
+    assert [encodings.option(name) for name in ("set-max-intset-entries", "list-max-listpack-size")] == ["0", "0"]
+    assert {wire.resp for wire in protocol.wires} == {3} and protocol.option("hash-max-listpack-entries") is None
+    kept = {os.path.basename(path) for path in result.evidence[0].artifacts}
+    assert {"candidate.encodings.server.log", "candidate.protocol.server.log"} <= kept
+
+
+def test_a_reply_that_changes_with_the_encoding_is_a_variant_mismatch(builds):
+    for build in BUILDS.values():
+        build.replies = {("SCARD", "s"): lambda server: 0 if _encodings_off(server) else 2}
+    result, value = run(builds, [{"command": ["SADD", "s", 1, 2]}, {"command": ["SCARD", "s"]}], checks={"variants": True})
+
+    assert result.status.value == "FAIL" and not result.crash
+    assert result.summary.startswith('command 1 (SCARD s) replies otherwise with server_config {"hash-max-listpack-entries"')
+    assert result.diagnostics["reason"] == "variant-mismatch" and result.diagnostics["variant"] == "encodings"
+    assert to_plain_data(result.diagnostics["commands"]) == [
+        {"index": 1, "command": "SCARD s", "base": {"reply": 2}, "variant": {"reply": 0}}
+    ]
+    assert (_check(value, "variants")["outcome"], _check(value, "variants")["protocol"]) == ("fail", {"outcome": "pass"})
+
+
+def test_encodings_are_not_varied_with_modules_loaded(builds):
+    result, value = run(builds, [{"command": ["PING"]}], modules=["/m/a.so"], checks={"variants": True})
+
+    assert result.status.value == "PASS", result.summary
+    assert _check(value, "variants")["encodings"] == {"outcome": "skipped", "reason": "modules are loaded"}
+
+
+def test_a_replica_of_node_0_reaches_the_primarys_digest(builds):
+    _replicating()
+    result, value = run(builds, [{"command": ["SET", "k", "v"]}], checks={"replica": True})
+
+    assert result.status.value == "PASS", result.summary
+    assert _check(value, "replica") == {"outcome": "pass"}
+    primary, replica = _nodes(BUILDS[builds["candidate"]])[1:]
+    assert primary.option("repl-diskless-sync-delay") == "0"
+    assert ("REPLICAOF", "127.0.0.1", str(primary.port)) in replica.sent
+    assert ("SET", "k", "v") in primary.sent and ("SET", "k", "v") not in replica.sent
+
+
+def test_a_replica_whose_digest_stays_apart_diverged(builds, monkeypatch):
+    monkeypatch.setattr(checks, "_SYNC_TIMEOUT_S", 0.2)
+    # The fake replica never receives the write.
+    _replicating(lambda server: b"d2" if ("SET", "k", "v") in server.sent else b"d1")
+    result, value = run(builds, [{"command": ["SET", "k", "v"]}], checks={"replica": True})
+
+    assert result.status.value == "FAIL" and not result.crash
+    assert result.diagnostics["reason"] == "replica-diverged"
+    assert result.diagnostics["primary"]["digest"] == {"reply": "d2"}
+    assert result.diagnostics["replica"]["digest"] == {"reply": "d1"}
+    assert _check(value, "replica")["outcome"] == "fail"
+
+
+def test_the_replica_check_skips_several_nodes(builds):
+    result, value = run(builds, [{"command": ["PING"]}], nodes=2, checks={"replica": True})
+
+    assert result.status.value == "PASS", result.summary
+    assert _check(value, "replica")["outcome"] == "skipped"
+
+
+_CATEGORIES = {"SET": [b"@write", b"@string", b"@slow"], "GET": [b"@read", b"@string", b"@fast"], "PING": [b"@fast"]}
+_ACL_SEQUENCE = [{"command": ["SET", "k", "v"]}, {"command": ["GET", "k"]}, {"command": ["PING"]}]
+
+
+def _enforcing_acls(wrong=()):
+    """Every build answers COMMAND INFO and GETKEYS for SET k v, GET k, and PING, and refuses each as the default
+    user's last ACL rule says; the commands in ``wrong`` the other way."""
+
+    def answer(name, reply):
+        def respond(server):
+            rule = next((sent[3:] for sent in reversed(server.sent) if sent[:3] == ("ACL", "SETUSER", "default")), ())
+            refused = any(part[1:].encode() in _CATEGORIES[name] for part in rule if part.startswith("-")) or (
+                "resetkeys" in rule and name != "PING"
+            )
+            if refused != (name in wrong):
+                return Error(f"NOPERM User default has no permissions to run the '{name.lower()}' command")
+            return reply
+
+        return respond
+
+    for build in BUILDS.values():
+        build.replies = {
+            ("SET", "k", "v"): answer("SET", b"OK"),
+            ("GET", "k"): answer("GET", b"v"),
+            ("PING",): answer("PING", b"PONG"),
+            ("COMMAND", "GETKEYS", "SET", "k", "v"): [b"k"],
+            ("COMMAND", "GETKEYS", "GET", "k"): [b"k"],
+            ("COMMAND", "GETKEYS", "PING"): Error("ERR The command has no key arguments"),
+        }
+        for name, categories in _CATEGORIES.items():
+            build.replies[("COMMAND", "INFO", name)] = [[name.lower().encode(), -1, [], 0, 0, 0, categories, [], [], []]]
+
+
+def test_acl_users_are_refused_exactly_the_commands_their_rules_deny(builds):
+    _enforcing_acls()
+    result, value = run(builds, _ACL_SEQUENCE, checks={"acl": True})
+
+    assert result.status.value == "PASS", result.summary
+    acl = _check(value, "acl")
+    # @string covers two of the three commands; @fast and @slow are never chosen.
+    assert acl["category"] == {"outcome": "pass", "user": "default +@all -@string"}
+    assert acl["keys"] == {"outcome": "pass", "user": "default +@all resetkeys ~nomatch-*"}
+    rules = [sent[3:] for sent in BUILDS[builds["candidate"]].sent if sent[:3] == ("ACL", "SETUSER", "default")]
+    assert rules == [("+@all", "-@string"), ("+@all", "resetkeys", "~nomatch-*")]
+
+
+@pytest.mark.parametrize(
+    ("wrong", "reason", "command"), [("GET", "acl-bypass", "GET k"), ("PING", "acl-overreach", "PING")]
+)
+def test_a_command_run_against_its_rule_or_refused_by_none_fails(builds, wrong, reason, command):
+    _enforcing_acls((wrong,))
+    result, value = run(builds, _ACL_SEQUENCE, checks={"acl": True})
+
+    assert result.status.value == "FAIL" and not result.crash
+    assert (result.diagnostics["reason"], result.diagnostics["user"]) == (reason, "default +@all -@string")
+    (found,) = result.diagnostics["commands"]
+    assert found["command"] == command
+    assert _check(value, "acl")["outcome"] == "fail"
+
+
+def test_the_acl_check_skips_a_sequence_that_manages_users(builds):
+    result, value = run(builds, [{"command": ["ACL", "SETUSER", "u", "on"]}], checks={"acl": True})
+
+    assert result.status.value == "PASS", result.summary
+    assert _check(value, "acl") == {"outcome": "skipped", "reason": "the sequence manages users itself"}
+
+
+def test_concurrent_connections_each_run_the_whole_sequence(builds):
+    for build in BUILDS.values():
+        build.replies = {("INCR", "n"): 1}
+    commands = [{"command": ["SET", "k", "v"]}, {"command": ["INCR", "n"], "wait_s": 5, "expect": {"equals": 1}}]
+    result, value = run(builds, commands, checks={"concurrency": 3})
+
+    assert result.status.value == "PASS", result.summary
+    assert _check(value, "concurrency") == {"outcome": "pass"}
+    side = _nodes(BUILDS[builds["candidate"]])[1]
+    # Its main connection, and one per client.
+    assert len(side.wires) == 4 and side.sent.count(("SET", "k", "v")) == side.sent.count(("INCR", "n")) == 3
+
+
+def _concurrent(server):
+    """Whether ``server`` serves several clients: the concurrency check's."""
+
+    return len(server.wires) > 1
+
+
+def test_a_command_unanswered_while_the_server_answers_no_ping_is_a_hang(builds):
+    for build in BUILDS.values():
+        build.replies = {
+            ("BLPOP", "l", "1"): lambda server: TIMEOUT if _concurrent(server) else None,
+            ("PING",): lambda server: TIMEOUT if _concurrent(server) else b"PONG",
+        }
+    result, _ = run(builds, [{"command": ["BLPOP", "l", 1]}], checks={"concurrency": 2})
+
+    assert result.status.value == "FAIL" and result.crash
+    assert result.summary.startswith("command 0 (BLPOP l 1) on connection 0 of 2 got no reply, and the server")
+    assert result.diagnostics["reason"] == "hang" and len(result.diagnostics["commands"]) == 2
+
+
+def test_a_command_unanswered_while_the_server_answers_others_is_no_hang(builds):
+    for build in BUILDS.values():
+        build.replies = {("BLPOP", "l", "0"): lambda server: TIMEOUT if _concurrent(server) else None}
+    result, _ = run(builds, [{"command": ["BLPOP", "l", 0]}], checks={"concurrency": 2})
+
+    assert result.status.value == "PASS", result.summary
+
+
+def test_a_crash_during_a_check_is_a_crash_with_its_cause(builds):
+    for build in BUILDS.values():
+        build.replies = {("INCR", "n"): lambda server: DIE if _concurrent(server) else 1}
+    result, value = run(builds, [{"command": ["INCR", "n"]}], checks={"concurrency": 2, "variants": True})
+
+    assert result.status.value == "FAIL" and result.crash
+    assert result.summary == "the candidate exited during the concurrency check: crashed by signal: 11"
+    assert to_plain_data(result.diagnostics) == {
+        "check": "concurrency",
+        "connections": 2,
+        "crashes": {"candidate": "crashed by signal: 11"},
+    }
+    assert _check(value, "variants")["outcome"] == "pass"
+    assert "candidate.concurrency.server.log" in {os.path.basename(path) for path in result.evidence[0].artifacts}
+
+
+def _saving(build):
+    def save(server):
+        with open(os.path.join(server.workdir, "dump.rdb"), "wb") as rdb:
+            rdb.write(b"RDB")
+        return b"OK"
+
+    build.replies[("SAVE",)] = save
+
+
+@pytest.mark.parametrize(
+    ("loads", "syncs", "reason"),
+    [(True, True, None), (False, True, "compat-load"), (True, False, "compat-sync")],
+)
+def test_the_parents_data_loads_and_replicates_into_the_candidate(builds, monkeypatch, loads, syncs, reason):
+    monkeypatch.setattr(checks, "_SYNC_TIMEOUT_S", 0.2)
+
+    def digest(server):
+        if server.build is BUILDS[builds["parent"]]:
+            return b"d1" if ("SET", "k", "v") in server.sent else b"empty"
+        if server.files.get("dump.rdb") == b"RDB":
+            return b"d1" if loads else b"empty"
+        return b"d1" if syncs and any(sent[0] == "REPLICAOF" for sent in server.sent) else b"empty"
+
+    _replicating(digest)
+    _saving(BUILDS[builds["parent"]])
+    result, value = run(builds, [{"command": ["SET", "k", "v"]}], checks={"compat": True})
+
+    compat = _check(value, "compat")
+    assert (compat["load"]["outcome"], compat["sync"]["outcome"]) == ("pass" if loads else "fail", "pass" if syncs else "fail")
+    rdb = next(path for path in result.evidence[0].artifacts if os.path.basename(path) == "parent.compat.rdb")
+    # The candidate that loads it loads it again as a replica, which keeps keys expired since the parent saved.
+    (loaded,) = [server for server in _nodes(BUILDS[builds["candidate"]]) if server.files.get("dump.rdb")]
+    assert [sent[0] for sent in loaded.sent] == ["REPLICAOF", "DEBUG", "DEBUG"]
+    assert loaded.sent[1] == ("DEBUG", "RELOAD", "NOSAVE")
+    if reason is None:
+        assert result.status.value == "PASS", result.summary
+        return
+    assert result.status.value == "FAIL"
+    assert result.diagnostics["reason"] == reason
+    if reason == "compat-load":
+        assert to_plain_data(result.diagnostics) == {
+            "reason": "compat-load",
+            "check": "compat",
+            "rdb": rdb,
+            "parent": {"reply": "d1"},
+            "candidate": {"reply": "empty"},
+        }
+
+
+def test_checks_are_skipped_when_the_sequence_did_not_complete(builds):
+    BUILDS[builds["candidate"]].replies = {("SLOW",): TIMEOUT}
+    result, value = run(builds, [{"command": ["SLOW"]}], checks={"variants": True, "concurrency": 2})
+
+    assert result.status.value == "ERROR"
+    assert value["checks"] == {
+        name: {"outcome": "skipped", "reason": "the sequence did not complete on the candidate"}
+        for name in ("variants", "concurrency")
+    }

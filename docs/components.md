@@ -379,6 +379,7 @@ and `modules_parent`, on another build of a module.
 | `resp` | 2 or 3 | 2 | The protocol of every connection. |
 | `timeout_s` | number, 0.1 to 3600 | 10 | Per command: a reply that takes longer is `unanswered`, and the sequence stops there. |
 | `commands` | list of mappings | | The sequence, below. |
+| `checks` | mapping or null | `null` | With `compare_with` (or `modules_parent`): `{variants: bool, replica: bool, acl: bool, concurrency: 0 to 16, compat: bool}`, each off unless set, below. `compat` needs `compare_with`. |
 
 Each command has:
 
@@ -429,8 +430,9 @@ The outcome, with `compare_with`:
 
 - `FAIL`: a candidate reply that violates its `expect` where the parent
   replied otherwise, or a node of the candidate exiting (a crash, a sanitizer abort);
-  its cause is `crashes` in the diagnostics. Nothing else: a difference
-  between builds is never, by itself, a Valkey failure.
+  its cause is `crashes` in the diagnostics; or a failing check (below).
+  Nothing else: a difference between builds is never, by itself, a Valkey
+  failure.
 - `ERROR` with `diagnostics: {reason: expect-disputed, commands: [...]}`: an
   `expect` the candidate violates but the parent replied the same to. The
   expectation is about behaviour the change did not touch, nearly always the
@@ -451,6 +453,35 @@ The outcome, with `compare_with`:
 - `ERROR` for a private server that does not start, or a command with no
   reply on the candidate (a connection lost without a crash, a timeout).
 
+`checks` run the sequence again on fresh candidate servers once the compared
+run completed on the candidate. A check that sees Valkey do something wrong
+is `FAIL` with `diagnostics.reason` and what reproduces it; a candidate that
+exits during one is a crash. `variants`: compact encodings off
+(`*-max-listpack-entries 0`, `set-max-intset-entries 0`,
+`list-max-listpack-size 0`; not with `modules`), then the other `resp`;
+replies compare as multisets of their values shaped as RESP2's, except
+`compare: skip`, `raw`, `read`, `OBJECT ENCODING`, `MEMORY USAGE`, `DEBUG
+OBJECT`, `CLIENT INFO`/`LIST`, `HELLO`, and `INFO` (`variant-mismatch`).
+`replica`: node 0 gets a synced replica, whose offset and `DEBUG DIGEST` must
+reach the primary's within 30 s of the sequence (`replica-diverged`). `acl`:
+as the default user with `+@all -@<category>` (from `COMMAND INFO`, the one
+most commands but not all are in, never `@fast` or `@slow`), then with `+@all
+resetkeys ~nomatch-*`, a refused command (in the category; with keys, from
+`COMMAND GETKEYS`) must reply NOPERM or an error Valkey replies before it
+checks permissions (`acl-bypass`), and no other NOPERM (`acl-overreach`);
+scripts are not judged, and a sequence sending `ACL`, `AUTH`, or `HELLO ...
+AUTH` is skipped. `concurrency`: N connections run it at once, replies
+unjudged; a command unanswered while the server answers no `PING` within
+`timeout_s` is `hang` (a crash), and with `replica` the replica must catch
+up. `compat`: a fresh parent runs it and `SAVE`s; its RDB (kept as
+`parent.compat.rdb`) must load into a fresh candidate with the parent's
+digest, compared after a reload as a replica, which keeps keys expired since
+the save (`compat-load`), and a fresh candidate replicating the parent must
+reach it (`compat-sync`). `acl` and `concurrency` leave restarts out and do
+not wait (`wait_s`); `replica` and `compat` skip several nodes and `cluster`,
+`compat` also a module loaded on one build only. A check that could not run
+is recorded as `error` and leaves the verdict alone.
+
 Without `compare_with`, `expect` alone judges the sequence: `FAIL` on a
 violated reply, `ERROR` on a command with no reply.
 
@@ -469,8 +500,13 @@ deployment's instances.
 Evidence: `valkey.command.sequence`, `{candidate: {replies: [{index, reply |
 error | no_reply | closed, unanswered?}], digest, exited?, exited_node?}, parent: {...} | null, modules:
 {candidate: [paths], parent: [paths]} | null, cluster, nodes, dropped_config,
-reached: [indexes], unexplained: [indexes]}` (and
-`instance_id` without `compare_with`, one item per instance). `digest` is the
+reached: [indexes], unexplained: [indexes], checks?}` (and
+`instance_id` without `compare_with`, one item per instance). `checks` has
+each enabled check's outcome by name: `{outcome: pass | skipped | error |
+fail}`, with `reason` (skipped, error) or `summary` and `diagnostics` (fail),
+and for a check of two parts each part's (`encodings` and `protocol`,
+`category` and `keys`, `load` and `sync`). Every check server's logs are kept
+beside the others (`candidate.encodings.server.log`). `digest` is the
 SHA-256 of the canonical JSON of the compared replies. `exited` is the exit
 status of a side's node that exited, and `exited_node` that node; any node of
 the candidate that exits is a `FAIL`. Every private server's
