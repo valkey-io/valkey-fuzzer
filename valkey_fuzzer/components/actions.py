@@ -591,7 +591,7 @@ def _run_step(target: Any, item: Mapping[str, Any], context: Any) -> dict[str, A
     """One command of a sequence on ``target``: its record, with ``wait_s`` the last of its attempts."""
 
     if item["restart"]:
-        return target.restart(item["node"])
+        return target.restart(item["node"], context)
     try:
         connection = target.connection(item["node"], item["connection"])
     except (valkey.exceptions.ValkeyError, OSError) as exc:
@@ -870,9 +870,11 @@ class _Side:
                 )
         return None
 
-    def restart(self, index: int) -> dict[str, Any]:
+    def restart(self, index: int, context: Any) -> dict[str, Any]:
         """Stop node ``index`` gracefully and start it again from its directory and config file: ``{"reply": "OK"}``
-        once it answers again, or why not as a command that got no reply."""
+        once it answers again, or why not as a command that got no reply. A cluster node answers once its
+        cluster_state is ok again, as it was when the cluster formed: until then it refuses keys with CLUSTERDOWN.
+        One whose state stays otherwise answers with that state, an error both builds compare on."""
 
         node = self.nodes[index]
         for connection in node.connections.values():
@@ -886,6 +888,16 @@ class _Side:
             return {"error": f"the server did not start again: {exc}", "unanswered": True}
         if exit_output is not None:
             return {"error": f"the server exited at startup: {exit_output[-500:]}", "unanswered": True}
+        if "cluster-port" in node.options:
+
+            def settled() -> tuple[bool, str]:
+                info = self.connection(index, "main").send(["CLUSTER", "INFO"])
+                fields = dict(line.split(":", 1) for line in str(info.get("reply", "")).split() if ":" in line)
+                return fields.get("cluster_state") == "ok", fields.get("cluster_state") or str(info)
+
+            done, state = poll_until(settled, timeout_s=self.timeout_s, interval_s=0.1, context=context)
+            if not done:
+                return {"error": f"cluster_state is not ok within {self.timeout_s:g}s of the restart: {state}"}
         return {"reply": "OK"}
 
     def name_nodes(self) -> None:

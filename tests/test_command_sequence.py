@@ -923,6 +923,34 @@ def test_a_restart_stops_the_node_and_starts_it_again_with_new_connections(build
         assert len(second.wires) == 3 and second.sent[-1] == ("CONFIG", "GET", "maxmemory")
 
 
+@pytest.mark.parametrize("settles", [True, False])
+def test_a_restarted_cluster_node_answers_once_its_cluster_state_is_ok_again(builds, settles):
+    # As in the walk's test of valkey-search #1402: a cluster node restarted is down for a moment, and every
+    # write right after the restart got CLUSTERDOWN on both builds.
+    info = ("CLUSTER", "INFO")
+
+    def state(server):
+        # Ok at once when the cluster forms (one CLUSTER INFO), and only on the third CLUSTER INFO after the restart.
+        ok = not server.shut_downs or (settles and server.sent.count(info) >= 4)
+        return f"cluster_state:{'ok' if ok else 'fail'}\r\ncluster_known_nodes:1\r\n".encode()
+
+    for build in BUILDS.values():
+        build.replies = {info: state}
+    result, value = run(builds, [{"restart": True}, {"command": ["SET", "k", "v"]}], cluster=True, timeout_s=0.5)
+
+    restarted = _replies(value["candidate"])[0]
+    if settles:
+        assert result.status.value == "PASS", result.summary
+        assert restarted == {"reply": "OK"}
+        for build in BUILDS.values():
+            (node,) = _nodes(build)
+            assert node.sent.count(info) == 4 and node.sent[-1] == ("SET", "k", "v") and node.sent[-2] == info
+    else:
+        # Both builds answer it alike: no crash, no hang, and the sequence goes on.
+        assert not result.crash and restarted == {"error": "cluster_state is not ok within 0.5s of the restart: fail"}
+        assert _replies(value["candidate"])[1] == {"reply": "OK"}
+
+
 def test_a_candidate_that_does_not_come_back_from_a_restart_fails(builds):
     BUILDS[builds["candidate"]].restart_exits = True
     result, value = run(builds, [{"restart": True}, {"command": ["PING"]}])
