@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 from valkey.exceptions import BusyLoadingError
 
-from tests.support import VirtualClock
+from tests.support import VirtualClock, valkey_build
 from tests.valkey_experiments_support import fake_context, resolved, unit_plan
 from valkey_fuzzer.components import capabilities, server, snapshots
 from valkey_fuzzer.components.compression import ReplCompressionOracle, unsettled_links
@@ -80,9 +80,7 @@ _SETTABLE = {"repl-compression": ("no", "lz4")}
 def test_the_build_probe_skips_only_a_build_that_cannot_run_the_scenario(
     monkeypatch, tmp_path, zstd, overlay, probe, configs, settable, status, summary
 ):
-    binary = tmp_path / "valkey-server"
-    binary.write_bytes(b"")
-    binary.chmod(0o755)
+    binary = valkey_build(tmp_path, "bgsave-default-method")
     monkeypatch.setattr(capabilities, "PrivateServer", lambda *a, **k: _ProbeServer(zstd, configs, settable, *a, **k))
     overlays = (StartupOverlay("o", InstanceSelector.parse({}), overlay),) if overlay else ()
     plan = unit_plan(document={"mode": "standalone", "valkey_binary": str(binary)}, startup_overlays=overlays)
@@ -99,6 +97,29 @@ def test_the_build_probe_skips_only_a_build_that_cannot_run_the_scenario(
     result = capabilities.BuildProbe().probe(FakeContext(plan=plan), spec)
     assert result.status.value == status, result.summary
     assert summary in result.summary
+
+
+@pytest.mark.parametrize("written", ["bgsave-default-method", "forkless-policy"])
+@pytest.mark.parametrize("knows", ["bgsave-default-method", "forkless-policy"])
+def test_the_build_probe_reads_and_sets_a_renamed_config_by_the_name_the_build_knows(
+    monkeypatch, tmp_path, written, knows
+):
+    forkless = {"bgsave-default-method": "forkless", "forkless-policy": "prefer-forkless"}
+    # The build runs with forkless saves under the name it knows, as PrivateServer.start gives it.
+    monkeypatch.setattr(
+        capabilities,
+        "PrivateServer",
+        lambda binary, *_, **__: _ProbeServer(True, {knows: forkless[knows]}, {knows: (forkless[knows],)}, binary, []),
+    )
+    config = {"config_get": {written: [forkless[written]]}, "config_set": {written: [forkless[written]]}}
+    spec = resolved(
+        ComponentSpec(role=ComponentRole.CAPABILITY, use="valkey.capability.build-probe", id="b", config=config)
+    )
+    status, summary, facts = capabilities.probe_binary(
+        FakeContext(), spec, str(valkey_build(tmp_path, knows)), spec.config
+    )
+    assert status.value == "PASS", summary
+    assert facts["config"] == {knows: forkless[knows]}
 
 
 def test_a_probe_of_a_binary_that_is_not_executable_says_so(tmp_path):

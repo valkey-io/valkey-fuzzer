@@ -39,6 +39,7 @@ import valkey
 
 from valkey_fuzzer.declarations import Declarations
 from valkey_fuzzer.deployment.local.processes import SOURCE_BUILD_DIR
+from valkey_fuzzer.deployment.local.server_config import config_for_build
 from valkey_fuzzer.hoststate import run_iptables
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
@@ -309,7 +310,11 @@ def _check_capabilities(config: Mapping[str, Any], client: Any, facts: dict[str,
         return ComponentStatus.SKIP, f"version {version} is older than {config['min_version']}", facts
 
     config_values: dict[str, Any] = {}
-    for name, accepted in config["config_get"].items():
+    for written, accepted in config["config_get"].items():
+        # A config Valkey renamed is read by the name the build knows, as the server started with it.
+        name = config_for_build(facts["binary"], written, None)[0]
+        if accepted is not None:
+            accepted = [config_for_build(facts["binary"], written, item)[1] for item in accepted]
         reply = client.config_get(name)
         if name not in reply:
             return ComponentStatus.SKIP, f"build does not support config {name!r}", facts
@@ -321,8 +326,9 @@ def _check_capabilities(config: Mapping[str, Any], client: Any, facts: dict[str,
                 {**facts, "config": config_values},
             )
     facts["config"] = config_values
-    for name, values in config["config_set"].items():
+    for written, values in config["config_set"].items():
         for value in values:
+            name, value = config_for_build(facts["binary"], written, value)
             try:
                 client.config_set(name, server_arguments({name: value})[1])
             except valkey.exceptions.ResponseError as exc:

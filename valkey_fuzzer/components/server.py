@@ -19,6 +19,7 @@ import valkey
 
 from valkey_fuzzer.deployment.local.processes import kill_server
 from valkey_fuzzer.deployment.local.queries import parse_replication, replication_role
+from valkey_fuzzer.deployment.local.server_config import arguments_for_build
 from valkey_fuzzer.hoststate import server_tag_arguments, tag_directory
 
 from .instances import close_quietly, replication_info
@@ -143,7 +144,7 @@ class PrivateServer:
             "--appendonly", "no",
             "--daemonize", "no",
             *server_tag_arguments(),
-            *self.arguments,
+            *arguments_for_build(self.binary, self.arguments),
         ]  # fmt: skip
         if self.config_file:
             path = os.path.join(self.workdir, "valkey.conf")

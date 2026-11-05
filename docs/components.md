@@ -226,7 +226,7 @@ evidence, which makes it `ERROR`; it is never hidden as unsupported.
 | `startup_config` | mapping | `{}` | Server config the probe server starts with; a directive the build rejects means `SKIP`. |
 | `deployment_config` | list | `[]` | Settings the build may lack, such as `[rdbcompression, repl-compression]`. Non-empty: also start each binary with each distinct config the deployment gives its instances (`server_config`, `instance_configs`, and startup overlays), on top of `startup_config`; `SKIP` when the build refuses it but starts without these settings, `ERROR` when it refuses something else. |
 | `scope` | `all` or `listed` | `all` | `listed` probes only `binaries` (which it then requires), not the deployment's. |
-| `config_get` | mapping | `{}` | Config name to `null` (must exist) or a list of accepted values. |
+| `config_get` | mapping | `{}` | Config name to `null` (must exist) or a list of accepted values. A renamed config, such as `bgsave-default-method`, is read by the name the build knows ([Effective server config](contracts.md#effective-server-config)). |
 | `info_fields` | mapping | `{}` | INFO section to the field names it must report. |
 | `lacks_configs` | list | `[]` | Configs the build must not know (`CONFIG GET` returns nothing), such as `repl-compression` for an older build; a build that knows one is `ERROR`. |
 | `config_set` | mapping | `{}` | Config name to the values `CONFIG SET` must accept at runtime. |

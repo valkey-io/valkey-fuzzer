@@ -1,7 +1,11 @@
 """Shared validation and argv conversion for Valkey server configuration, and the provider's defaults."""
 
+import functools
+import os
 import re
-from collections.abc import Iterable, Mapping
+import shutil
+import subprocess
+from collections.abc import Iterable, Mapping, Sequence
 from enum import Enum
 from typing import Any, Optional
 
@@ -158,3 +162,52 @@ def build_server_config_arguments(server_config: Mapping[str, Any]) -> list[str]
         for value in server_config_values(option, raw_value)
         for argument in (f"--{option}", value)
     ]
+
+
+# The configs Valkey renamed, {old name: (new name, {old value: new value})}: a build knows one name or the
+# other, and either may be written. valkey-io/valkey#5261 renamed bgsave-default-method (fork, forkless) to
+# forkless-policy (require-fork, prefer-forkless). Every server start, and the build probe's CONFIG GET and
+# CONFIG SET, give each build the name it knows (config_for_build).
+RENAMED_CONFIGS = {
+    "bgsave-default-method": ("forkless-policy", {"fork": "require-fork", "forkless": "prefer-forkless"}),
+}
+_RENAMED_NAMES = {name for old, (new, _) in RENAMED_CONFIGS.items() for name in (old, new)}
+
+
+def knows_config(binary: str, name: str, value: str) -> bool:
+    """Whether ``binary`` knows config ``name`` (``value`` being one of its values), without starting a server:
+    Valkey stops at the first directive it rejects, so with a known ``name`` it is the bad port after it."""
+
+    path = shutil.which(binary) or binary
+    stat = os.stat(path)
+    return _knows_config(os.path.realpath(path), stat.st_mtime_ns, stat.st_size, name, value)
+
+
+@functools.cache
+def _knows_config(path: str, mtime_ns: int, size: int, name: str, value: str) -> bool:
+    command = [path, f"--{name}", value, "--port", "-1"]
+    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=30)
+    return "Bad directive" not in result.stdout
+
+
+def config_for_build(binary: str, name: str, value: Any) -> tuple[str, Any]:
+    """Config ``name`` and ``value`` as ``binary`` knows them, for a config Valkey renamed (:data:`RENAMED_CONFIGS`);
+    any other config, and a value the rename does not name, as it is."""
+
+    for old, (new, values) in RENAMED_CONFIGS.items():
+        if name in (old, new):
+            if knows_config(binary, new, next(iter(values.values()))):
+                return new, values.get(str(value), value)
+            return old, {to: was for was, to in values.items()}.get(str(value), value)
+    return name, value
+
+
+def arguments_for_build(binary: str, arguments: Sequence[str]) -> list[str]:
+    """valkey-server ``arguments`` (``--option value`` pairs) with each renamed config as ``binary`` knows it."""
+
+    translated = list(arguments)
+    for index in range(0, len(translated) - 1, 2):
+        if translated[index][2:] in _RENAMED_NAMES:
+            name, value = config_for_build(binary, translated[index][2:], translated[index + 1])
+            translated[index : index + 2] = [f"--{name}", value]
+    return translated

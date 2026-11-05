@@ -100,7 +100,7 @@ components:
         - {evidence_id: valkey.forkless.log-started, pattern: "Beginning forklessSaveToDisk", instances: all, required: true}
         - {evidence_id: valkey.forkless.log-completed, pattern: "forkless-save: forkless save complete", instances: all}
       forbidden:
-        - {pattern: "forkless-save: forkless save failed"}
+        - {pattern: "forkless-save: (forkless )?save failed"}
         - {pattern: "Falling back to fork-based save"}
 
   - use: valkey.workload.key-value

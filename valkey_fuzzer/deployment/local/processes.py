@@ -42,7 +42,7 @@ from .models import (
 )
 from .ports import ensure_ports_free
 from .queries import query_cluster_info, query_replication, response_text, valkey_client, wait_until
-from .server_config import build_server_config_arguments, effective_server_config
+from .server_config import arguments_for_build, build_server_config_arguments, effective_server_config
 
 logger = logging.getLogger(__name__)
 
@@ -312,8 +312,9 @@ class ProcessManager:
         """Build a shell-safe valkey-server command for the configured deployment mode."""
         mode = self.config.mode
         cluster_enabled = mode == DeploymentMode.CLUSTER
+        binary = valkey_binary or self.config.valkey_binary
         command = [
-            valkey_binary or self.config.valkey_binary,
+            binary,
             "--port",
             str(port),
             "--bind",
@@ -335,7 +336,8 @@ class ProcessManager:
 
         command.extend(["--dir", data_dir, "--logfile", log_file, *server_tag_arguments()])
         # The provider's defaults under the instance's own config: what the plan records.
-        command.extend(build_server_config_arguments(effective_server_config(cluster_enabled, server_config)))
+        arguments = build_server_config_arguments(effective_server_config(cluster_enabled, server_config))
+        command.extend(arguments_for_build(binary, arguments))
         return command
 
     def spawn_all(self, instance_plans: list[InstancePlan], context: Optional[RunContext] = None) -> list[InstanceInfo]:

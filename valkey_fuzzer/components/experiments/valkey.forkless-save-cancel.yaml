@@ -48,7 +48,7 @@ components:
         - {evidence_id: valkey.forkless.log-cancelled, pattern: "forkless-save: forkless save cancelled", instances: all}
         - {evidence_id: valkey.forkless.log-completed, pattern: "forkless-save: forkless save complete", instances: all}
       forbidden:
-        - {pattern: "forkless-save: forkless save failed"}
+        - {pattern: "forkless-save: (forkless )?save failed"}
 
   - use: valkey.fault.command
     id: cancel-save
