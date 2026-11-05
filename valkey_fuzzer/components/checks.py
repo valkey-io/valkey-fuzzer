@@ -602,7 +602,14 @@ class _Checks:
         # nothing is waited for.
         steps = [index for index, item in enumerate(self.commands) if not item["restart"]]
         commands = [{**self.commands[index], "wait_s": None} for index in steps]
-        replica = self.config["checks"]["replica"] and self.config["nodes"] == 1 and not self.config["cluster"]
+        # With a replica too, as the replica check would run one (see replica).
+        replica = (
+            self.config["checks"]["replica"]
+            and self.config["nodes"] == 1
+            and not self.config["cluster"]
+            and not _sets_replication(self.commands)
+            and not _writes_unreplicated(self.commands)
+        )
         side, failed = self.start("candidate.concurrency", **({"nodes": 2, "options": _QUICK_SYNC} if replica else {}))
         workers: list[_Worker] = []
         hung = []

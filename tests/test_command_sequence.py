@@ -1308,15 +1308,19 @@ def test_a_sequence_that_sets_its_replication_itself_skips_the_replica_checks(bu
     assert result.status.value != "FAIL", result.summary
 
 
-def test_a_sequence_that_writes_without_replicating_skips_the_replica_check(builds):
-    # DEBUG POPULATE adds its keys on the primary alone, so a replica never holds them (fuzzer#62).
+def test_a_sequence_that_writes_without_replicating_runs_no_replica(builds):
+    # DEBUG POPULATE adds its keys on the primary alone, so a replica never holds them (fuzzer#62, fuzzer#64): the
+    # replica check is skipped, and the concurrency check runs without one.
     BUILDS[builds["candidate"]].replies[("DEBUG", "POPULATE", "10")] = b"OK"
-    result, value = run(builds, [{"command": ["DEBUG", "POPULATE", "10"]}], checks={"replica": True})
+    checks_on = {"replica": True, "concurrency": 2}
+    result, value = run(builds, [{"command": ["DEBUG", "POPULATE", "10"]}], checks=checks_on)
 
     assert _check(value, "replica") == {
         "outcome": "skipped",
         "reason": "the sequence writes keys its node does not replicate (DEBUG POPULATE)",
     }
+    assert _check(value, "concurrency") == {"outcome": "pass"}
+    assert not any(sent[0] == "REPLICAOF" for server in _nodes(BUILDS[builds["candidate"]]) for sent in server.sent)
     assert result.status.value != "FAIL", result.summary
 
 
