@@ -1549,6 +1549,44 @@ def test_the_parents_data_loads_and_replicates_into_the_candidate(builds, monkey
         }
 
 
+@pytest.mark.parametrize(("categories", "outcome"), [([b"@write", b"@string"], "skipped"), ([b"@read"], "fail")])
+def test_the_parents_data_need_not_load_when_the_merge_changes_what_a_write_makes(
+    builds, monkeypatch, categories, outcome
+):
+    # As in the walk's test of valkey-io/valkey#4880 (fuzzer#67): the parent overflows a relative expire into a
+    # negative one, the merge refuses it, and drops any negative expire it loads, so the parent's key never loads.
+    monkeypatch.setattr(checks, "_SYNC_TIMEOUT_S", 0.2)
+    write = ("SET", "k", "v", "PX", "9223372036854775807")
+    parent = BUILDS[builds["parent"]]
+
+    def digest(server):
+        if server.build is parent:
+            return b"d1"
+        # The candidate that ran the sequence holds k0; one that loaded or replicated the parent's data, nothing.
+        return b"d0" if ("SET", "k0", "v") in server.sent else b"empty"
+
+    _replicating(digest)
+    _saving(parent)
+    parent.replies[write] = b"OK"
+    BUILDS[builds["candidate"]].replies[write] = Error("ERR invalid expire time in 'set' command")
+    for build in BUILDS.values():
+        build.replies[("COMMAND", "INFO", "SET")] = [[b"set", -3, [], 1, 1, 1, categories, [], [], []]]
+    commands = [
+        {"command": ["SET", "k0", "v"]},
+        {"command": list(write), "expect_difference": True, "expect": {"error": "invalid expire"}},
+    ]
+    result, value = run(builds, commands, checks={"compat": True})
+
+    compat = _check(value, "compat")
+    assert (compat["load"]["outcome"], compat["sync"]["outcome"]) == (outcome, outcome)
+    if outcome == "skipped":
+        assert compat["load"]["reason"] == (
+            "the merge changes what command 1 (SET k v PX 9223372036854775807) writes, so the parent's data "
+            "may hold what the candidate never makes"
+        )
+        assert result.status.value == "PASS", result.summary
+
+
 def test_a_parent_that_crashes_making_the_replicas_rdb_fails_no_candidate(builds, monkeypatch):
     # The parent's fork child asserts saving data the merge fixed, so no RDB reaches the candidate (fuzzer#63).
     monkeypatch.setattr(checks, "_SYNC_TIMEOUT_S", 0.2)

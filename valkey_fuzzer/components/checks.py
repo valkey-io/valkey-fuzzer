@@ -52,6 +52,8 @@ _ENCODINGS = {
 # compare them. DEBUG, OBJECT and MEMORY report internals (DEBUG HTSTATS-KEY a hashtable's buckets), DUMP serializes
 # a key in its encoding, and CONFIG reports the encoding thresholds the variant changed.
 _VARIES = ("DEBUG", "OBJECT", "MEMORY", "DUMP", "CONFIG", "CLIENT INFO", "CLIENT LIST", "HELLO", "INFO")
+# Why the compat check leaves the parent's data uncompared: see changed_write.
+_CHANGED = "the merge changes what {} writes, so the parent's data may hold what the candidate never makes"
 # Commands that reply with the NOPERM of the commands they run: the ACL check does not judge them.
 _RUNS_OTHERS = ("EVAL", "EVALSHA", "EVAL_RO", "EVALSHA_RO", "FCALL", "FCALL_RO")
 # A NOPERM error, as the connection records it: valkey-py drops the NOPERM (and ERR) code, so it is known by its
@@ -696,15 +698,26 @@ class _Checks:
                     failed = f"the parent's RDB could not be kept: {exc}"
             if not failed:
                 self.kept.append(rdb)
-                load = self.compat_load(rdb, dbfilename, digest)
-                sync = self.compat_sync(parent)
+                changed = self.changed_write(parent)
+                load = self.compat_load(rdb, dbfilename, digest, changed)
+                sync = self.compat_sync(parent, changed)
         finally:
             self.finish(parent)
         if failed:
             return _errored(failed)
         return _combine(load=load, sync=sync)
 
-    def compat_load(self, rdb: str, dbfilename: str, digest: Mapping[str, Any]) -> dict[str, Any]:
+    def changed_write(self, parent: Any) -> str:
+        """The first write command the sequence marks as the merge's change and whose reply on the parent shows it,
+        described, or an empty string: the merge changes what that command writes, so the parent's data may hold
+        what the candidate never makes (a negative expire it refuses to write, and drops when it loads one)."""
+
+        for index in actions._compare(self.commands, self.base, parent)[0]:
+            if "@write" in (_categories(parent, _words(self.commands[index])) or ()):
+                return f"command {index} ({actions._step_text(self.commands[index])})"
+        return ""
+
+    def compat_load(self, rdb: str, dbfilename: str, digest: Mapping[str, Any], changed: str) -> dict[str, Any]:
         with open(rdb, "rb") as handle:
             files = {**self.files, dbfilename: handle.read()}
         # The RDB is what it loads, whatever server_config says of the AOF.
@@ -733,6 +746,8 @@ class _Checks:
         if decided is not None:
             return decided
         if mine != digest and mine != self.own_digest():
+            if changed:
+                return _skipped(_CHANGED.format(changed))
             return _failed(
                 f"the parent's RDB loads into the candidate with DEBUG DIGEST {canonical_json(mine)}, "
                 f"not the parent's {canonical_json(digest)}",
@@ -740,7 +755,7 @@ class _Checks:
             )
         return {"outcome": "pass"}
 
-    def compat_sync(self, parent: Any) -> dict[str, Any]:
+    def compat_sync(self, parent: Any, changed: str) -> dict[str, Any]:
         if _sets_replication(self.commands):
             return _skipped("the sequence sets its node's replication itself")
         side, failed = self.start("candidate.compat-sync")
@@ -761,6 +776,8 @@ class _Checks:
         reports = scan_for_crashes({log: log}, CRASH_PATTERNS)
         if reports:
             return _errored(f"the parent crashed as the replica's primary: {crash_cause(next(iter(reports.values())))}")
+        if changed and state.get("link") == "up" and state["primary"]["offset"] == state["replica"]["offset"]:
+            return _skipped(_CHANGED.format(changed))
         return self.diverged("compat", "compat-sync", synced, state)
 
     def own_digest(self) -> Optional[Mapping[str, Any]]:
