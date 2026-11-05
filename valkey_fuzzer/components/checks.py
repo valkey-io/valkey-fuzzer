@@ -130,6 +130,13 @@ def _words(item: Mapping[str, Any]) -> list[str]:
     return [] if item["command"] is None else actions._validate_sequence_command(item["command"], "command")
 
 
+def _sets_replication(commands: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether the sequence makes its node a replica (or a primary) itself: a replica whose own link is down
+    refuses replicas of its own (NOMASTERLINK), so no replica of it can catch up."""
+
+    return any(words and words[0].upper() in ("REPLICAOF", "SLAVEOF") for words in map(_words, commands))
+
+
 def _set_on_replica(side: Any, commands: Sequence[Mapping[str, Any]]) -> None:
     """Make on node 1 the settings the sequence makes on node 0. They are not replicated, and some change how
     a replica applies the stream: DEBUG SET-SKIP-CHECKSUM-VALIDATION lets in a RESTORE the replica would
@@ -437,6 +444,8 @@ class _Checks:
     def replica(self) -> dict[str, Any]:
         if self.config["nodes"] > 1 or self.config["cluster"]:
             return _skipped("the sequence runs on several nodes or a cluster, whose topology it sets up itself")
+        if _sets_replication(self.commands):
+            return _skipped("the sequence sets its node's replication itself")
         # Node 1 is the replica; the sequence names node 0 only.
         side, failed = self.start("candidate.replica", nodes=2, options=_QUICK_SYNC)
         synced, state = False, {}
@@ -694,6 +703,8 @@ class _Checks:
         return {"outcome": "pass"}
 
     def compat_sync(self, parent: Any) -> dict[str, Any]:
+        if _sets_replication(self.commands):
+            return _skipped("the sequence sets its node's replication itself")
         side, failed = self.start("candidate.compat-sync")
         synced, state = False, {}
         try:

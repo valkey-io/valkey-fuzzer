@@ -1271,6 +1271,16 @@ def test_the_replica_check_skips_several_nodes(builds):
     assert _check(value, "replica")["outcome"] == "skipped"
 
 
+def test_a_sequence_that_sets_its_replication_itself_skips_the_replica_checks(builds):
+    # A replica whose own link is down refuses replicas of its own, so none can catch up with it (fuzzer#53).
+    _saving(BUILDS[builds["parent"]])
+    result, value = run(builds, [{"command": ["REPLICAOF", "127.0.0.1", 1]}], checks={"replica": True, "compat": True})
+
+    assert _check(value, "replica") == {"outcome": "skipped", "reason": "the sequence sets its node's replication itself"}
+    assert _check(value, "compat")["sync"]["outcome"] == "skipped"
+    assert result.status.value != "FAIL", result.summary
+
+
 _CATEGORIES = {"SET": [b"@write", b"@string", b"@slow"], "GET": [b"@read", b"@string", b"@fast"], "PING": [b"@fast"]}
 _ACL_SEQUENCE = [{"command": ["SET", "k", "v"]}, {"command": ["GET", "k"]}, {"command": ["PING"]}]
 
