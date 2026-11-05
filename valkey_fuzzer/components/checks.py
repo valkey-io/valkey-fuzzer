@@ -12,9 +12,11 @@ servers, each check its own way, and a check that sees Valkey do something wrong
 - ``compat``: the parent's data after the sequence, saved, must load into the candidate (``compat-load``) and
   replicate to it (``compat-sync``) with the parent's digest.
 
-A candidate server that exits during a check crashed, and is reported as a crash.
+A candidate server that exits during a check crashed, and is reported as a crash. The checks run at once, each on
+servers of its own.
 """
 
+import contextvars
 import fnmatch
 import math
 import os
@@ -23,6 +25,7 @@ import shutil
 import threading
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
 import valkey
@@ -70,6 +73,8 @@ _QUICK_SYNC = {"repl-diskless-sync-delay": 0}
 _SYNC_TIMEOUT_S = 30.0
 _NUMBER = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
 _INTEGER = re.compile(r"[-+]?\d+")
+# Guards the ports the checks of a sequence took (see _Checks.free_ports).
+_PORTS_LOCK = threading.Lock()
 
 
 def run_checks(
@@ -91,8 +96,15 @@ def run_checks(
     enabled = [name for name in _ORDER if config["checks"][name]]
     if candidate.exited is not None or any(record.get("unanswered") for record in candidate.replies):
         return {name: _skipped("the sequence did not complete on the candidate") for name in enabled}, []
-    checks = _Checks(context, spec, config, candidate, parent_binary, server_config, files)
-    return {name: getattr(checks, name)() for name in enabled}, checks.kept
+    taken: set[int] = set()
+    checks = {
+        name: _Checks(context, spec, config, candidate, parent_binary, server_config, files, taken) for name in enabled
+    }
+    # Each check runs in a copy of this call's context, so the runner's cancellation of the call reaches it; every
+    # check returns, its servers stopped, before the outcomes are read, in _ORDER whichever finished first.
+    with ThreadPoolExecutor(max_workers=max(len(enabled), 1)) as pool:
+        futures = {name: pool.submit(contextvars.copy_context().run, getattr(checks[name], name)) for name in enabled}
+    return {name: futures[name].result() for name in enabled}, [path for name in enabled for path in checks[name].kept]
 
 
 def _skipped(reason: str) -> dict[str, Any]:
@@ -232,8 +244,8 @@ class _Worker:
 
 
 class _Checks:
-    """The checks of one compared sequence, each a method named after it that returns its outcome; every server
-    they start is fresh, from the compared run's configuration."""
+    """The checks of one compared sequence, each a method named after it that returns its outcome, and each run
+    on an instance of its own; every server they start is fresh, from the compared run's configuration."""
 
     def __init__(
         self,
@@ -244,6 +256,7 @@ class _Checks:
         parent_binary: str,
         server_config: Mapping[str, Any],
         files: Mapping[str, bytes],
+        taken: set[int],
     ):
         self.context, self.spec, self.config = context, spec, config
         self.commands = config["commands"]
@@ -255,7 +268,19 @@ class _Checks:
             "parent": config["modules"] if config["modules_parent"] is None else config["modules_parent"],
         }
         self.server_config, self.files = server_config, files
+        # The ports every check of the sequence took, shared.
+        self.taken = taken
         self.kept: list[str] = []
+
+    def free_ports(self, count: int) -> list[int]:
+        """``count`` loopback ports, free now, that no check of the sequence took before: a port stays free until
+        its server binds it, so a check running at once could be given it too."""
+
+        with _PORTS_LOCK:
+            # Of that many free ports, at most len(self.taken) were taken.
+            ports = [port for port in actions._free_ports(count + len(self.taken)) if port not in self.taken][:count]
+            self.taken.update(ports)
+        return ports
 
     def start(
         self,
@@ -272,7 +297,7 @@ class _Checks:
         or an empty string. The caller finishes it either way."""
 
         config = {**self.config, "nodes": nodes or self.config["nodes"], "resp": resp or self.config["resp"]}
-        ports = iter(actions._free_ports(config["nodes"] * (2 if config["cluster"] else 1)))
+        ports = iter(self.free_ports(config["nodes"] * (2 if config["cluster"] else 1)))
         side = actions.new_side(label, self.binaries[build], config, self.modules[build], ports)
         side.options.update(options or {})
         failed = side.start(
@@ -624,7 +649,7 @@ class _Checks:
             if not failed:
                 # It loaded the RDB as a primary at startup, which drops the keys that expired since the parent saved;
                 # loaded again as a replica (of no server that answers), it keeps them, as the parent's digest does.
-                mine = _ask(side, 0, "REPLICAOF", "127.0.0.1", actions._free_ports(1)[0])
+                mine = _ask(side, 0, "REPLICAOF", "127.0.0.1", self.free_ports(1)[0])
                 if "reply" in mine:
                     mine = _ask(side, 0, "DEBUG", "RELOAD", "NOSAVE")
                 if "reply" in mine:

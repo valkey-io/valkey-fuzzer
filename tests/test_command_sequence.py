@@ -6,6 +6,9 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
+from types import SimpleNamespace
 
 import libvalkey
 import pytest
@@ -14,6 +17,7 @@ from valkey.exceptions import InvalidResponse, ResponseError
 from valkey.exceptions import TimeoutError as ValkeyTimeoutError
 
 from tests.valkey_experiments_support import registration_for, resolved, unit_plan
+from valkey_fuzzer import deadlines
 from valkey_fuzzer._data import canonical_json, to_plain_data
 from valkey_fuzzer.components import actions, capabilities, checks, server
 from valkey_fuzzer.plan import ComponentSpec
@@ -1412,3 +1416,45 @@ def test_checks_are_skipped_when_the_sequence_did_not_complete(builds):
         name: {"outcome": "skipped", "reason": "the sequence did not complete on the candidate"}
         for name in ("variants", "concurrency")
     }
+
+
+@pytest.mark.parametrize("finishing", [checks._ORDER, checks._ORDER[::-1]], ids=["in-order", "reversed"])
+def test_checks_run_at_once_and_combine_in_their_order_whichever_finishes_first(monkeypatch, finishing):
+    # Every check waits until all five started, so they run at once, and then finishes in the order ``finishing``.
+    started = threading.Barrier(len(checks._ORDER))
+    seen = []
+
+    def fake(name):
+        def check(self):
+            started.wait(timeout=5)
+            time.sleep(0.05 * finishing.index(name))
+            # The call's context reaches the check: the runner's cancellation of the call does too.
+            seen.append(deadlines.current_call.get())
+            self.kept.append(f"{name}.log")
+            return (
+                checks._failed(f"{name} failed", {"check": name}) if name in ("acl", "compat") else {"outcome": "pass"}
+            )
+
+        return check
+
+    for name in checks._ORDER:
+        monkeypatch.setattr(checks._Checks, name, fake(name))
+    config = {"checks": dict.fromkeys(checks._ORDER, True), "commands": [], "modules": [], "modules_parent": None}
+    call = deadlines.current_call.set("the call")
+    try:
+        outcomes, kept = checks.run_checks(
+            None, None, config, SimpleNamespace(exited=None, replies=[], binary="b"), "p", {}, {}
+        )
+    finally:
+        deadlines.current_call.reset(call)
+
+    assert seen == ["the call"] * len(checks._ORDER)
+    # In _ORDER, so the first failing check, acl, decides the reason.
+    assert list(outcomes.items()) == [
+        ("variants", {"outcome": "pass"}),
+        ("replica", {"outcome": "pass"}),
+        ("acl", checks._failed("acl failed", {"check": "acl"})),
+        ("concurrency", {"outcome": "pass"}),
+        ("compat", checks._failed("compat failed", {"check": "compat"})),
+    ]
+    assert kept == [f"{name}.log" for name in checks._ORDER]
