@@ -53,6 +53,8 @@ class FakeCluster:
             log_dir,
         )
         self.seed_error = None
+        # Replicas whose replication link is not up: one that just migrated has not synced yet.
+        self.unsynced = set()
         self.mode = SimpleNamespace(value="cluster")
         self.calls, self.draws, self.validations, self.stopped = [], [], [], []
         self.loaded = None
@@ -122,7 +124,8 @@ class FakeCluster:
     def new_client(self, node_id, timeout=5.0):
         client = MagicMock()
         client.__enter__.return_value = client
-        client.info.return_value = {"loading": 0}
+        link = "down" if node_id in self.unsynced else "up"
+        client.info.return_value = {"loading": 0, "master_link_status": link, "master_sync_in_progress": 0}
         return client
 
     def log_file(self, node_id):
@@ -515,3 +518,19 @@ def test_the_cluster_chaos_experiment_passes_or_fails_with_its_waves_and_always_
     }  # fmt: skip
     assert outcome.status.value == ("FAIL" if wave_fails else "PASS"), outcome.summary
     assert "stopped on purpose" in results["liveness"].summary
+
+
+def test_a_replica_that_has_not_synced_is_no_survivor_of_its_shard():
+    # The cluster-chaos soak (seed 620078145): a replica migrated to an orphaned primary, which was killed before
+    # the replica's first sync; the replica, counted as the shard's survivor, won its election with offset 0 and
+    # the shard's data was lost.
+    handle = FakeCluster()
+    handle.unsynced.add("valkey-1")
+    result, _ = run_chaos(handle, waves=[[kill("valkey-0"), failover(1)]])
+    assert chaos_operation(result, "1.0")["skipped"] == "no shard-safe target", result.summary
+    assert ("kill", "valkey-0", signal.SIGKILL) not in handle.calls
+    # Killing the unsynced replica itself takes nothing of the shard's data.
+    handle = FakeCluster()
+    handle.unsynced.add("valkey-1")
+    result, _ = run_chaos(handle, waves=[[kill("valkey-1"), failover(1)]])
+    assert chaos_operation(result, "1.0").get("skipped") is None, result.summary

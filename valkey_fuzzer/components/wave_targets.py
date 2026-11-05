@@ -31,7 +31,8 @@ class TargetSelector:
 
     A kill never takes a shard's last live member: shards are the live ones
     (a replica belongs to its primary's shard), so a replica that migrated
-    counts where it replicates now. With ``quorum`` it also keeps a
+    counts where it replicates now, once it synced: until then the cluster
+    chaos view gives it no shard (see ``ClusterWaves.members``). With ``quorum`` it also keeps a
     majority of the planned shards' primaries live; a dead primary still
     counts toward the failover majority until a replica replaces it, so the
     majority is of the planned shards, and only slot owners count as live.
