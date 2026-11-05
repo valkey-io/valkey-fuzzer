@@ -776,6 +776,18 @@ def test_a_reply_the_client_cannot_parse_is_a_protocol_error_with_its_bytes_on_e
     assert result.status.value == "FAIL" and result.diagnostics["reason"] == "protocol-error"
 
 
+def test_what_a_replicas_link_reads_is_no_protocol_error(builds):
+    # A connection that sent SYNC reads the replication stream, newlines and all (fuzzer#59).
+    for build in BUILDS.values():
+        build.replies = {b"SYNC\r\n": Wire(b"+OK\r\n"), b"REPLICAOF NO ONE\r\n": Wire(b"\r+OK\r\n")}
+    commands = [{"raw": "SYNC\r\n", "connection": "fake"}, {"raw": "REPLICAOF NO ONE\r\n", "connection": "fake"}]
+    result, _ = run(builds, commands)
+    assert result.status.value == "PASS", result.summary
+    other = [commands[0], {**commands[1], "connection": "main"}]
+    result, _ = run(builds, other)
+    assert result.status.value == "FAIL" and result.diagnostics["reason"] == "protocol-error"
+
+
 # ---------------------------------------------------------------------------
 # Connections and Pub/Sub
 # ---------------------------------------------------------------------------

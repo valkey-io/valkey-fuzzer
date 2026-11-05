@@ -1333,10 +1333,31 @@ def _same_on_parent(commands: Sequence[Mapping[str, Any]], index: int, candidate
     )
 
 
+def _replication_links(commands: Sequence[Mapping[str, Any]]) -> set[int]:
+    """The commands sent on a connection after it sent SYNC or PSYNC: it is a replica's link since, and what it
+    reads is the replication stream, not replies."""
+
+    links, found = set(), set()
+    for index, item in enumerate(commands):
+        if item["command"] is not None:
+            words = [str(word) for word in item["command"][:1]]
+        elif isinstance(item["raw"], str):
+            words = item["raw"].split()[:1]
+        else:
+            continue
+        key = (item["node"], item["connection"])
+        if key in links:
+            found.add(index)
+        elif words and words[0].upper() in ("SYNC", "PSYNC"):
+            links.add(key)
+    return found
+
+
 def _protocol_errors(commands: Sequence[Mapping[str, Any]], replies: Sequence[Mapping[str, Any]]) -> list[dict]:
     """The commands whose reply the client could not parse: each with its index, the client's message, and the
-    reply's bytes."""
+    reply's bytes. A replica's link reads the replication stream, which is no reply."""
 
+    links = _replication_links(commands)
     return [
         {
             "index": record["index"],
@@ -1345,7 +1366,7 @@ def _protocol_errors(commands: Sequence[Mapping[str, Any]], replies: Sequence[Ma
             "raw": record["raw"],
         }
         for record in replies
-        if "protocol_error" in record
+        if "protocol_error" in record and record["index"] not in links
     ]
 
 
