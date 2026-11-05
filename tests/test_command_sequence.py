@@ -1191,7 +1191,8 @@ def test_a_reply_that_changes_with_the_encoding_is_a_variant_mismatch(builds):
 
 
 @pytest.mark.parametrize(
-    "command", [["DEBUG", "HTSTATS-KEY", "z", "full"], ["OBJECT", "FREQ", "z"], ["CONFIG", "GET", "*"]]
+    "command",
+    [["DEBUG", "HTSTATS-KEY", "z", "full"], ["OBJECT", "FREQ", "z"], ["CONFIG", "GET", "*"], ["DUMP", "z"]],
 )
 def test_variants_leave_internals_and_configuration_alone(builds, command):
     # As in the walk's test of valkey-io/valkey#5170: DEBUG HTSTATS-KEY reports a hashtable's buckets, by design
