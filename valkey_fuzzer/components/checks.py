@@ -50,8 +50,22 @@ _ENCODINGS = {
 }
 # Commands whose replies depend on the encoding, the protocol or the configuration by design: variants never
 # compare them. DEBUG, OBJECT and MEMORY report internals (DEBUG HTSTATS-KEY a hashtable's buckets), DUMP serializes
-# a key in its encoding, and CONFIG reports the encoding thresholds the variant changed.
-_VARIES = ("DEBUG", "OBJECT", "MEMORY", "DUMP", "CONFIG", "CLIENT INFO", "CLIENT LIST", "HELLO", "INFO")
+# a key in its encoding, CONFIG reports the encoding thresholds the variant changed, a SCAN's call returns as much as
+# the encoding holds together, and SLOWLOG, LATENCY and TIME report times.
+_VARIES = (
+    "DEBUG",
+    "OBJECT",
+    "MEMORY",
+    "DUMP",
+    "CONFIG",
+    "CLIENT INFO",
+    "CLIENT LIST",
+    "HELLO",
+    "INFO",
+    "SLOWLOG",
+    "LATENCY",
+    "TIME",
+)
 # Why the compat check leaves the parent's data uncompared: see changed_write.
 _CHANGED = "the merge changes what {} writes, so the parent's data may hold what the candidate never makes"
 # Commands that reply with the NOPERM of the commands they run: the ACL check does not judge them.
@@ -427,6 +441,7 @@ class _Checks:
             and item["compare"] != "skip"
             and " ".join(_words(item)[:2]) not in _VARIES
             and _words(item)[0] not in _VARIES
+            and not _words(item)[0].endswith("SCAN")
         ]
         if self.modules["candidate"]:
             encodings = _skipped("modules are loaded")
