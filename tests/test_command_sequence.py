@@ -1300,7 +1300,10 @@ def test_a_sequence_that_sets_its_replication_itself_skips_the_replica_checks(bu
     _saving(BUILDS[builds["parent"]])
     result, value = run(builds, [{"command": ["REPLICAOF", "127.0.0.1", 1]}], checks={"replica": True, "compat": True})
 
-    assert _check(value, "replica") == {"outcome": "skipped", "reason": "the sequence sets its node's replication itself"}
+    assert _check(value, "replica") == {
+        "outcome": "skipped",
+        "reason": "the sequence sets its node's replication itself",
+    }
     assert _check(value, "compat")["sync"]["outcome"] == "skipped"
     assert result.status.value != "FAIL", result.summary
 
