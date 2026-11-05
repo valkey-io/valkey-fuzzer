@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 import valkey
 
-from valkey_fuzzer.deployment.local.processes import kill_server
+from valkey_fuzzer.deployment.local.processes import kill_server, version_env
 from valkey_fuzzer.deployment.local.queries import parse_replication, replication_role
 from valkey_fuzzer.deployment.local.server_config import arguments_for_build
 from valkey_fuzzer.hoststate import server_tag_arguments, tag_directory
@@ -40,7 +40,9 @@ def version_output(binary: str) -> str:
     """The raw ``--version`` output of ``binary``; raises ``RuntimeError`` if it cannot run."""
 
     try:
-        return subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=10, check=True).stdout
+        return subprocess.run(
+            [binary, "--version"], capture_output=True, text=True, timeout=10, check=True, env=version_env()
+        ).stdout
     except (OSError, subprocess.SubprocessError) as exc:
         raise RuntimeError(f"cannot run {binary} --version: {exc}") from exc
 

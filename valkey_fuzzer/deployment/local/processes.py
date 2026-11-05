@@ -135,6 +135,16 @@ def verify_cluster_node_identity(instance: InstanceInfo, client: valkey.Valkey) 
     return cluster_node_id
 
 
+def version_env() -> dict[str, str]:
+    """The environment to run a build's ``--version`` in: LeakSanitizer off. A sanitizer build may report what
+    ``main`` leaves behind when ``--version`` exits (gcc's ASan on aarch64 does) and exit 1, and a version is no
+    leak test."""
+
+    env = dict(os.environ)
+    env["ASAN_OPTIONS"] = ":".join(part for part in (env.get("ASAN_OPTIONS", ""), "detect_leaks=0") if part)
+    return env
+
+
 def detect_valkey_sha(binary: str) -> Optional[str]:
     """Return the git SHA the binary was built from, or None if unavailable.
 
@@ -149,6 +159,7 @@ def detect_valkey_sha(binary: str) -> Optional[str]:
             text=True,
             timeout=5,
             check=True,
+            env=version_env(),
         ).stdout
     except (OSError, subprocess.SubprocessError) as exc:
         logger.debug("Could not run %s --version: %s", binary, exc)
