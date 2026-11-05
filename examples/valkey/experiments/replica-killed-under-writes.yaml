@@ -1,0 +1,45 @@
+# Kill (or stop) a replica while the key/value workload writes, and bring it
+# back at once: it must resync, and no write the deployment acknowledged may
+# be lost. A worked experiment of a fault under a workload, judged by oracles
+# rather than by comparing two builds: valkey.base brings the `writes`
+# workload, the `data` ledger oracle (every acknowledged write must survive,
+# on the primary and every replica), the deployment-state oracle (links up,
+# roles right) and the liveness oracle (no crash or sanitizer report).
+#
+# The fault fires on the `warm-up.completed` event, so the workload runs
+# first; `settle` gives the resync time before the oracles judge. A SIGKILL
+# may lose what the killed instance acknowledged within its fsync window, so
+# the ledger allows `loss_window_s` 2.5, the least appendfsync everysec needs
+# (the ledger refuses a smaller one).
+extends: [valkey.base]
+id: example.replica-killed-under-writes
+deployment:
+  modes: [standalone, cluster]
+  replicas_per_primary: {minimum: 1}
+metadata:
+  description: Kill a replica while writes run and restart it; it resyncs with no acknowledged write lost
+inputs:
+  properties:
+    signal: {type: string, enum: [SIGKILL, SIGTERM, SIGSTOP], default: SIGKILL}
+components:
+  - use: valkey.fault.process-signal
+    id: kill-replica
+    config:
+      when_event: warm-up.completed
+      instance: replica
+      signal: {$ref: inputs.signal}
+      restart_mode: immediate
+  - use: valkey.action.sleep
+    id: warm-up
+    depends_on: [writes, kill-replica]
+    config: {seconds: 2}
+  - use: valkey.action.sleep
+    id: settle
+    depends_on: [warm-up]
+    config: {seconds: 3}
+  - use: valkey.oracle.ledger
+    id: data
+    config: {workload: writes, loss_window_s: 2.5}
+required_events: [warm-up.completed]
+required_evidence:
+  - {evidence_id: valkey.fault.injected, source: kill-replica}

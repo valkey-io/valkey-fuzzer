@@ -530,6 +530,15 @@ tests the fix of valkey-io/valkey#5177, and
 [`examples/valkey/tools_compare.yaml`](../examples/valkey/tools_compare.yaml)
 runs it.
 
+A change to replication, failover or persistence is tested under a fault, judged
+by oracles rather than by comparing two builds:
+[`examples/valkey/experiments/replica-killed-under-writes.yaml`](../examples/valkey/experiments/replica-killed-under-writes.yaml)
+kills a replica while the `valkey.base` workload writes and restarts it at once,
+and the ledger, deployment-state and liveness oracles check that it resynced
+with no acknowledged write lost;
+[`examples/valkey/replica_killed_under_writes.yaml`](../examples/valkey/replica_killed_under_writes.yaml)
+runs it.
+
 Three differentials compare codecs:
 [`differential_rdb_codecs.yaml`](../examples/valkey/differential_rdb_codecs.yaml) (`no`, `lz4`, `zstd`:
 equal dataset, reloaded RDB, and reply digests; different `rdb_format.codec`),
