@@ -1241,6 +1241,29 @@ def test_a_replica_whose_digest_stays_apart_diverged(builds, monkeypatch):
     assert _check(value, "replica")["outcome"] == "fail"
 
 
+def test_the_sequences_settings_are_made_on_the_replica_first(builds):
+    # valkey #5212: DEBUG SET-SKIP-CHECKSUM-VALIDATION is not replicated, so the replica refused the RESTORE the
+    # primary took, and stayed empty.
+    _replicating()
+    commands = [
+        {"command": ["DEBUG", "SET-SKIP-CHECKSUM-VALIDATION", "1"]},
+        {"command": ["CONFIG", "SET", "a", "b"]},
+        {"command": ["DEBUG", "DIGEST"]},
+        {"command": ["SET", "k", "v"]},
+    ]
+    result, _ = run(builds, commands, checks={"replica": True})
+
+    assert result.status.value == "PASS", result.summary
+    replica = _nodes(BUILDS[builds["candidate"]])[2]
+    assert ("DEBUG", "SET-SKIP-CHECKSUM-VALIDATION", "1") in replica.sent and (
+        "CONFIG",
+        "SET",
+        "a",
+        "b",
+    ) in replica.sent
+    assert ("SET", "k", "v") not in replica.sent
+
+
 def test_the_replica_check_skips_several_nodes(builds):
     result, value = run(builds, [{"command": ["PING"]}], nodes=2, checks={"replica": True})
 

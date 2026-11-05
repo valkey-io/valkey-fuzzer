@@ -130,6 +130,16 @@ def _words(item: Mapping[str, Any]) -> list[str]:
     return [] if item["command"] is None else actions._validate_sequence_command(item["command"], "command")
 
 
+def _set_on_replica(side: Any, commands: Sequence[Mapping[str, Any]]) -> None:
+    """Make on node 1 the settings the sequence makes on node 0. They are not replicated, and some change how
+    a replica applies the stream: DEBUG SET-SKIP-CHECKSUM-VALIDATION lets in a RESTORE the replica would
+    refuse."""
+    for item in commands:
+        words = [str(word).upper() for word in _words(item)[:2]]
+        if words == ["CONFIG", "SET"] or (len(words) == 2 and words[0] == "DEBUG" and words[1].startswith("SET-")):
+            _ask(side, 1, *[side.substitute(argument) for argument in item["command"]])
+
+
 def _scalar(value: Any) -> Any:
     """A reply value as RESP2 replies it: a boolean as 1 or null, a number (a double, or a numeric string) by its
     value."""
@@ -434,6 +444,7 @@ class _Checks:
                 if not synced:
                     failed = f"the replica did not sync before the sequence: {canonical_json(state)}"
             if not failed:
+                _set_on_replica(side, self.commands)
                 side.replies = actions._run_sequence(side, self.commands, self.context)
                 synced, state = self.converged((side, 0), (side, 1))
         finally:
@@ -561,6 +572,8 @@ class _Checks:
                 synced, state = self.replicate((side, 0), (side, 1))
                 if not synced:
                     failed = f"the replica did not sync before the sequence: {canonical_json(state)}"
+                else:
+                    _set_on_replica(side, commands)
             if not failed:
                 workers = [_Worker(side) for _ in range(count)]
                 threads = [threading.Thread(target=worker.run, args=(commands, self.context)) for worker in workers]
