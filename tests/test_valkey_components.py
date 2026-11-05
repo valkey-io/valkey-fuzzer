@@ -1115,6 +1115,21 @@ def test_a_private_server_that_writes_more_than_a_pipe_holds_still_exits(tmp_pat
     assert output is not None and output.endswith("FATAL CONFIG FILE ERROR")
 
 
+@pytest.mark.parametrize("arguments,flushed", [(["--loadmodule", "/m/libjson.so"], True), ([], False)])
+def test_a_private_server_with_a_module_is_flushed_before_it_stops(arguments, flushed):
+    # LeakSanitizer read every valkey-json document still stored at shutdown as leaked (fuzzer issue #42).
+    from unittest.mock import Mock
+
+    from valkey_fuzzer.components.server import PrivateServer
+
+    server = PrivateServer("/bin/true", arguments)
+    client = server.client = Mock()
+    server.process = Mock(poll=Mock(return_value=None))
+    server.stop()
+    assert (client.execute_command.call_args_list == [(("FLUSHALL", "SYNC"),)]) is flushed
+    server.process.terminate.assert_called_once()
+
+
 def test_generated_waves_take_an_explicit_zero_replicas_as_zero_and_stable_keys_are_named_one_way():
     import random
 

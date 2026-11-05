@@ -201,6 +201,19 @@ class PrivateServer:
         return True
 
     def stop(self) -> None:
+        if (
+            self.client is not None
+            and "--loadmodule" in self.arguments
+            and self.process
+            and self.process.poll() is None
+        ):
+            # A module's data outlives the shutdown (a module with data types is never unloaded), and valkey-json
+            # keeps its pointers with metadata in their top bits, which LeakSanitizer cannot follow: every document
+            # still stored would read as leaked. Freed first, only what a module truly loses is reported.
+            try:
+                self.client.execute_command("FLUSHALL", "SYNC")
+            except (valkey.exceptions.ValkeyError, OSError):
+                pass
         close_quietly(self.client)
         if self.process is not None:
             if self.process.poll() is None:
