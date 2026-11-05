@@ -19,7 +19,7 @@ import socket
 import subprocess
 import time
 from collections.abc import Iterator, Mapping, Sequence
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 
 import valkey
 
@@ -538,12 +538,26 @@ def _lost(exc: BaseException) -> dict[str, Any]:
     return record
 
 
+class _ErrorsAsSent(valkey.connection.DefaultParser):
+    """valkey-py's parser, with every error reply a ResponseError of the server's own text: valkey-py strips the
+    code of the errors it maps to exception classes (NOPERM, READONLY, ...), and raises WRONGPASS, NOAUTH,
+    LOADING and "ERR max number of clients reached" as connection errors, which a sequence takes for a lost
+    connection."""
+
+    EXCEPTION_CLASSES: ClassVar[dict[str, Any]] = {}
+
+
 def open_raw_connection(
     resp: int, timeout_s: float, *, path: Optional[str] = None, host: Any = None, port: Any = None
 ) -> RawConnection:
     """A :class:`RawConnection` to the unix socket ``path``, or to ``host:port``, connected."""
 
-    options = {"socket_timeout": timeout_s, "socket_connect_timeout": timeout_s, "protocol": resp}
+    options = {
+        "socket_timeout": timeout_s,
+        "socket_connect_timeout": timeout_s,
+        "protocol": resp,
+        "parser_class": _ErrorsAsSent,
+    }
     if path is not None:
         connection = valkey.connection.UnixDomainSocketConnection(path=path, **options)
     else:

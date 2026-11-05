@@ -4,6 +4,7 @@ connection, so arguments go out as bytes and replies come back as the server sen
 import hashlib
 import os
 import shutil
+import socket
 import subprocess
 import tempfile
 import threading
@@ -241,6 +242,61 @@ def run(builds, commands, **config):
     context = FakeContext(spec, deployment={"valkey_binary": builds["candidate"]})
     result = actions.CommandsAction().run(context, spec)
     return result, (to_plain_data(result.evidence[0].value) if result.evidence else None)
+
+
+def _serve(replies):
+    """A loopback server that answers each request of one connection with the next of ``replies`` (raw RESP),
+    and the HELLO and CLIENT SETINFO valkey-py sends as it connects; its port."""
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+
+    def serve():
+        connection, _ = listener.accept()
+        pending, data = list(replies), b""
+        with connection:
+            while pending:
+                chunk = connection.recv(65536)
+                if not chunk:
+                    return
+                data += chunk
+                while True:
+                    # One whole request: *<n>, then n bulk strings.
+                    lines = data.split(b"\r\n")
+                    if not lines[0].startswith(b"*") or len(lines) < 1 + 2 * int(lines[0][1:]) + 1:
+                        break
+                    count = int(lines[0][1:])
+                    words = lines[2 : 2 + 2 * count : 2]
+                    data = b"\r\n".join(lines[1 + 2 * count :])
+                    name = words[0].upper()
+                    if name == b"HELLO":
+                        connection.sendall(b"%1\r\n$5\r\nproto\r\n:3\r\n")
+                    else:
+                        connection.sendall(b"+OK\r\n" if name == b"CLIENT" else pending.pop(0))
+
+    threading.Thread(target=serve, daemon=True).start()
+    return listener.getsockname()[1]
+
+
+@pytest.mark.parametrize("resp", [2, 3])
+def test_every_error_reply_is_recorded_as_the_server_sent_it(resp):
+    # valkey-py strips the code of the errors it maps to exception classes, and raises WRONGPASS, NOAUTH and
+    # LOADING as connection errors, which the sequence took for a lost connection.
+    errors = [
+        b"WRONGPASS invalid username-password pair or user is disabled.",
+        b"NOAUTH Authentication required.",
+        b"LOADING Valkey is loading the dataset in memory",
+        b"READONLY You can't write against a read only replica.",
+        b"NOPERM User u has no permissions to run the 'set' command",
+        b"ERR max number of clients reached",
+    ]
+    port = _serve([b"-" + error + b"\r\n" for error in errors])
+    connection = actions.open_raw_connection(resp, 5, host="127.0.0.1", port=port)
+    try:
+        assert [connection.send(["PING"]) for _ in errors] == [{"error": error.decode()} for error in errors]
+    finally:
+        connection.close()
 
 
 def _replies(side):
