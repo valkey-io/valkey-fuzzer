@@ -1544,6 +1544,32 @@ def test_the_parents_data_loads_and_replicates_into_the_candidate(builds, monkey
         }
 
 
+def test_a_parent_that_crashes_making_the_replicas_rdb_fails_no_candidate(builds, monkeypatch):
+    # The parent's fork child asserts saving data the merge fixed, so no RDB reaches the candidate (fuzzer#63).
+    monkeypatch.setattr(checks, "_SYNC_TIMEOUT_S", 0.2)
+
+    def digest(server):
+        replica = server.build is BUILDS[builds["candidate"]] and any(sent[0] == "REPLICAOF" for sent in server.sent)
+        return b"empty" if replica and not server.files.get("dump.rdb") else b"d1"
+
+    def save(server):
+        with open(os.path.join(server.workdir, "dump.rdb"), "wb") as rdb:
+            rdb.write(b"RDB")
+        with open(server.log_path, "a") as log:
+            log.write("2:C 05 Nov 2026 14:50:32.715 # === ASSERTION FAILED ===\n")
+            log.write("2:C 05 Nov 2026 14:50:32.715 # ==> object.c:888 'hashtableSize(ht) != 0' is not true\n")
+        return b"OK"
+
+    _replicating(digest)
+    BUILDS[builds["parent"]].replies[("SAVE",)] = save
+    result, value = run(builds, [{"command": ["SET", "k", "v"]}], checks={"compat": True})
+
+    sync = _check(value, "compat")["sync"]
+    assert sync["outcome"] == "error"
+    assert "the parent crashed" in sync["reason"] and "hashtableSize(ht) != 0" in sync["reason"], sync
+    assert result.status.value != "FAIL", result.summary
+
+
 def test_the_parents_data_may_become_what_the_candidate_makes_of_the_sequence(builds, monkeypatch):
     # The merge drops the key on purpose, when it writes it and when it loads it: the parent's data loads and
     # replicates into what the candidate holds after the same sequence, not into the parent's.

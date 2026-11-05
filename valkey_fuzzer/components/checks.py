@@ -35,6 +35,7 @@ from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.protocols import component_artifact_dir
 
 from . import actions
+from .oracles import CRASH_PATTERNS, crash_cause, scan_for_crashes
 from .polling import poll_until
 
 _ORDER = ("variants", "replica", "acl", "concurrency", "compat")
@@ -744,7 +745,16 @@ class _Checks:
             self.finish(side)
         if not synced and state.get("link") == "up" and state["primary"]["offset"] == state["replica"]["offset"]:
             synced = state["replica"]["digest"] == self.own_digest()
-        return self.judge("compat", side, failed) or self.diverged("compat", "compat-sync", synced, state)
+        decided = self.judge("compat", side, failed)
+        if decided is not None or synced:
+            return decided or {"outcome": "pass"}
+        # The parent is the primary: if it (or the fork child making the replica's RDB) crashed, as a bug the merge
+        # fixes can make it, no RDB reached the candidate, and the candidate is not at fault.
+        log = parent.nodes[0].server.log_path
+        reports = scan_for_crashes({log: log}, CRASH_PATTERNS)
+        if reports:
+            return _errored(f"the parent crashed as the replica's primary: {crash_cause(next(iter(reports.values())))}")
+        return self.diverged("compat", "compat-sync", synced, state)
 
     def own_digest(self) -> Optional[Mapping[str, Any]]:
         """The ``DEBUG DIGEST`` of a fresh candidate after the sequence, or None if it could not be read. A merge may
