@@ -556,7 +556,7 @@ its `valkey-server`: the deployment's binary (the candidate) and
 | `cluster` | boolean | `false` | Both private servers run as a one-node cluster serving every slot, for `valkey-cli --cluster`. Needs `server`. |
 | `files` | mapping | `{}` | `{name: text or !!binary}`, written into each side's working directory before the first run. A name is a plain file name. |
 | `ignore` | list of regular expressions | `[]` | Removed from stdout and stderr (`^` and `$` match at line ends) before the two sides compare, for what differs between processes: the pid and time of a Valkey log line, a benchmark's throughput. Recorded output keeps them. |
-| `timeout_s` | number, 0.1 to 3600 | 30 | Per run: a tool still running then is killed and recorded `timed_out`; also how long a private server may take to start. |
+| `timeout_s` | number, 0.1 to 3600 | 30 | Per run: a tool still running then is killed and recorded `timed_out`; also how long a private server may take to start. A tool whose resident memory passes 4 GiB is killed too, and recorded `memory_exceeded`: on the build under test, a crash. |
 | `runs` | list of mappings | | The runs, below, in order; each side runs them all. |
 
 Each run has:
@@ -569,7 +569,7 @@ Each run has:
 | `env` | mapping | `{}` | Environment variables for this run. The fuzzer's own environment is passed on without `VALKEYCLI_*` and `REDISCLI_*`, with `HOME` the working directory. |
 | `expect` | mapping or null | `null` | `{exit, stdout, stderr}`, each optional, each a [predicate](#predicates): `exit` on the exit status (null when a signal ended the tool), `stdout` and `stderr` on the output as recorded. `null` accepts any run. |
 | `expect_difference` | boolean | `false` | The change under test means this run to differ from the parent's. Needs `expect`. |
-| `compare` | `equal`, `unordered`, `skip` | `equal` | How the two sides' runs compare: exit status, signal, `timed_out`, stdout, and stderr as recorded (after `ignore`); the same with stdout's and stderr's lines sorted; or recorded and never compared. |
+| `compare` | `equal`, `unordered`, `skip` | `equal` | How the two sides' runs compare: exit status, signal, `timed_out`, `memory_exceeded`, stdout, and stderr as recorded (after `ignore`); the same with stdout's and stderr's lines sorted; or recorded and never compared. |
 
 Output is recorded with the side's port, socket path, and working directory
 written back as `$port`, `$socket`, and `$dir`, so the two sides compare

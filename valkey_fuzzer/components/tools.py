@@ -11,6 +11,7 @@ import hashlib
 import os
 import re
 import subprocess
+import time
 from collections.abc import Mapping, Sequence
 from typing import Any, Optional
 
@@ -38,6 +39,22 @@ _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # Variables valkey-cli reads (VALKEYCLI_AUTH, REDISCLI_HISTFILE, ...): only a run's own env sets them.
 _CLI_ENV_PREFIXES = ("VALKEYCLI_", "REDISCLI_")
 _CRASH_LINES = re.compile("|".join(CRASH_PATTERNS))
+# A run whose resident memory passes this is stopped, so a tool that runs away (valkey-cli --hotkeys-count -1
+# asked for 64 GB of counters before valkey-io/valkey#5173) fails its run instead of taking the host down. An
+# address-space limit would not do: an ASan build reserves terabytes of it.
+_MAX_RESIDENT_BYTES = 4 << 30
+_POLL_S = 0.05
+
+
+def _resident_bytes(pid: int) -> Optional[int]:
+    """The resident memory of process ``pid``, from ``/proc`` (Linux); None where it cannot be read."""
+
+    try:
+        with open(f"/proc/{pid}/statm") as handle:
+            return int(handle.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError, IndexError):
+        return None
+
 
 _PREDICATE = mapping_of(PREDICATE_FIELDS, required=False)
 _RUN = mapping_of(
@@ -152,24 +169,40 @@ class _Side:
         env = {name: value for name, value in os.environ.items() if not name.startswith(_CLI_ENV_PREFIXES)}
         env.update({"HOME": self.workdir, **{name: str(value) for name, value in run["env"].items()}})
         record: dict[str, Any] = {"index": index, "tool": run["tool"]}
-        try:
-            # argv[0] is the bare tool name, so a usage line reads the same on both sides.
-            done = subprocess.run(
-                [run["tool"], *arguments],
-                executable=self.tool(run["tool"]),
-                cwd=self.workdir,
-                env=env,
-                input=b"" if run["stdin"] is None else _content(run["stdin"]),
-                capture_output=True,
-                timeout=timeout_s,
-            )
-            stdout, stderr = done.stdout, done.stderr
-            record["exit"] = done.returncode if done.returncode >= 0 else None
-            if done.returncode < 0:
-                record["signal"] = -done.returncode
-        except subprocess.TimeoutExpired as exc:
-            stdout, stderr = exc.stdout or b"", exc.stderr or b""
-            record.update(exit=None, timed_out=True)
+        # argv[0] is the bare tool name, so a usage line reads the same on both sides.
+        process = subprocess.Popen(
+            [run["tool"], *arguments],
+            executable=self.tool(run["tool"]),
+            cwd=self.workdir,
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        data: Optional[bytes] = b"" if run["stdin"] is None else _content(run["stdin"])
+        deadline, stopped = time.monotonic() + timeout_s, None
+        while True:
+            try:
+                stdout, stderr = process.communicate(data, timeout=_POLL_S)
+                break
+            except subprocess.TimeoutExpired:
+                # The input is sent once; communicating again keeps the output read so far.
+                data = None
+            if (_resident_bytes(process.pid) or 0) > _MAX_RESIDENT_BYTES:
+                stopped = "memory_exceeded"
+            elif time.monotonic() >= deadline:
+                stopped = "timed_out"
+            else:
+                continue
+            process.kill()
+            stdout, stderr = process.communicate()
+            break
+        if stopped:
+            record.update({"exit": None, stopped: True})
+        else:
+            record["exit"] = process.returncode if process.returncode >= 0 else None
+            if process.returncode < 0:
+                record["signal"] = -process.returncode
         # Longest first, so a value inside another (the port's digits in a path) is not replaced inside it.
         written_back = sorted({**values, "$dir": self.workdir}.items(), key=lambda item: -len(item[1]))
         nodes = [] if self.server is None else self.server.nodes
@@ -191,6 +224,8 @@ class _Side:
         reports = [line for line in lines if _CRASH_LINES.search(line)]
         if reports:
             self.crashes[index] = crash_cause(reports)
+        elif record.get("memory_exceeded"):
+            self.crashes[index] = f"used more than {_MAX_RESIDENT_BYTES >> 30} GiB of memory"
         elif "signal" in record:
             self.crashes[index] = f"killed by signal {record['signal']}"
 
@@ -200,7 +235,9 @@ def _compared(side: _Side, index: int, mode: str, ignore: Sequence["re.Pattern[b
     ``ignore`` matches, their lines sorted with ``unordered``."""
 
     record = side.runs[index]
-    compared: dict[str, Any] = {key: record[key] for key in ("exit", "signal", "timed_out") if key in record}
+    compared: dict[str, Any] = {
+        key: record[key] for key in ("exit", "signal", "timed_out", "memory_exceeded") if key in record
+    }
     for name, data in zip(("stdout", "stderr"), side.output[index]):
         for pattern in ignore:
             data = pattern.sub(b"", data)
@@ -413,6 +450,7 @@ _TOOL_RUN = mapping_of(
         "exit": ConfigField(int, allow_none=True),
         "signal": optional(int),
         "timed_out": optional(bool),
+        "memory_exceeded": optional(bool),
         "stdout": ConfigField((str, dict)),
         "stderr": ConfigField((str, dict)),
     }

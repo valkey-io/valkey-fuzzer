@@ -17,6 +17,7 @@ from valkey_fuzzer.testing import FakeContext
 
 # Each argument is a step: out:<text>, err:<text>, label (the build's), cwd, stdin, env:<name>,
 # cat:<file>, exit:<status>, and <step>@<label> runs the step on that build alone; crash is SIGSEGV, hang
+# sleeps, grow:<dir> leaves a file named by its pid in <dir> (which the tests read as memory running away) and
 # sleeps, write:<file> writes the arguments into a file; node:<socket> and short:<socket> print the node ID of
 # the fake server with that socket (see FakeServer), node: in full and abbreviated, short: its first 8 digits.
 TOOL = """#!{python}
@@ -38,6 +39,7 @@ for step in sys.argv[1:]:
     elif name == "exit": sys.exit(int(value))
     elif name == "crash": sys.stdout.flush(); os.kill(os.getpid(), signal.SIGSEGV)
     elif name == "hang": time.sleep(30)
+    elif name == "grow": open(os.path.join(value, str(os.getpid())), "w").close(); time.sleep(30)
     elif name in ("node", "short"):
         node_id = hashlib.sha1(os.path.dirname(value).encode()).hexdigest()
         print(f"{{node_id}} ({{node_id[:8]}}...)" if name == "node" else node_id[:8])
@@ -325,3 +327,27 @@ def test_a_yaml_binary_file_and_a_placeholder_argument_load_as_written():
 
     assert resolved_config["files"]["e.rdb"] == {"$base64": "UkVESVMwMDA5/gL/AAAAAAAAAAA="}
     assert resolved_config["runs"][0]["args"][2] == "[::1]:$port"
+
+
+def test_a_run_whose_memory_runs_away_is_stopped_before_it_takes_the_host(builds, monkeypatch, tmp_path):
+    # As in the walk's test of valkey-io/valkey#5173: before it, valkey-cli --hotkeys-count -1 asks for 64 GB of
+    # counters, which took the CI runner down twice.
+    grown = tmp_path / "grown"
+    grown.mkdir()
+    monkeypatch.setattr(tools, "_resident_bytes", lambda pid: 8 << 30 if (grown / str(pid)).exists() else 1 << 20)
+    marked = cli(
+        f"grow:{grown}@parent",
+        "err:Invalid hotkeys count@candidate",
+        "exit:1@candidate",
+        expect_difference=True,
+        expect={"exit": {"equals": 1}},
+    )
+    result, value, _ = run(builds, [marked], timeout_s=20)
+
+    assert result.status.value == "PASS", result.summary
+    assert value["parent"]["runs"][0]["memory_exceeded"] is True and value["parent"]["runs"][0]["exit"] is None
+    assert value["reached"] == [0]
+
+    result, value, _ = run(builds, [cli(f"grow:{grown}@candidate")], timeout_s=20)
+    assert result.status.value == "FAIL"
+    assert "used more than 4 GiB of memory" in result.summary, result.summary
