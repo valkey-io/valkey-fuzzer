@@ -213,7 +213,8 @@ def _loaded(*log):
 _LZ4_LOG = ("* Loading compressed RDB (algo=lz4) from dump.rdb", "* Done loading RDB, keys loaded: 1")
 _REFUSED = "exit status 1\n# Wrong signature trying to load DB from file\n# Fatal error loading the DB, check server logs. Exiting."
 _RELOADED = ("* Loading compressed RDB (algo=lz4) from dump.rdb", "* DB loaded from disk: 0.010 seconds")
-# appendonly yes: the restart loads the AOF, whose base RDB Valkey writes plain whatever rdbcompression is.
+# appendonly yes: the restart loads the AOF, whose base RDB a build before valkey-io/valkey#4754 writes plain, and
+# one since in rdbcompression's codec.
 _AOF_RELOADED = (
     "* Reading RDB base file on AOF loading...",
     "* DB loaded from base file appendonly.aof.2.base.rdb: 0.010 seconds",
@@ -233,7 +234,8 @@ _AOF_RELOADED = (
         (_LZ4, _loaded(*_LZ4_LOG), {"expect_codec": "lz4", "instance_reload": True}, ("* Ready to accept connections tcp",), "FAIL", "no reload"),
         (_LZ4, _loaded(*_LZ4_LOG), {"expect_codec": "lz4", "instance_reload": True}, ("* DB loaded from disk: 0.001 seconds",), "FAIL", "logged compressed codecs none"),
         (_LZ4, _loaded(*_LZ4_LOG), {"expect_codec": "lz4", "instance_reload": True}, _AOF_RELOADED, "PASS", ""),
-        (_LZ4, _loaded(*_LZ4_LOG), {"expect_codec": "lz4", "instance_reload": True}, (_RELOADED[0], _AOF_RELOADED[-1]), "FAIL", "reload codec none, it logged compressed codecs ['lz4']"),
+        (_LZ4, _loaded(*_LZ4_LOG), {"expect_codec": "lz4", "instance_reload": True}, (_RELOADED[0], _AOF_RELOADED[-1]), "PASS", ""),
+        (_LZ4, _loaded(*_LZ4_LOG), {"expect_codec": "lz4", "instance_reload": True}, ("* Loading compressed RDB (algo=zstd) from appendonly.aof.2.base.rdb", _AOF_RELOADED[-1]), "FAIL", "reload codec lz4 or none, it logged compressed codecs ['zstd']"),
         (_LZ4, (None, _REFUSED), {"expect": "refused", "refused_log": "Wrong signature"}, None, "PASS", "refused cleanly"),
         # Known-bad: the file loads, but the experiment says it must be refused.
         (_LZ4, _loaded(), {"expect": "refused"}, None, "FAIL", "expected the load to be refused, but it loaded 1 key(s)"),
