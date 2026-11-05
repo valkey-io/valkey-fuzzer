@@ -204,18 +204,20 @@ def _ping(side: Any, index: int) -> dict[str, Any]:
 
 
 def _categories(side: Any, words: Sequence[str]) -> Optional[set[str]]:
-    """The ACL categories of the command ``words`` name (its subcommand's, for a container command), from
-    ``COMMAND INFO`` on node 0 of ``side``; None when it knows none."""
+    """The ACL categories of the command ``words`` name (its subcommand's and its container's together, for a
+    container command, since denying the container denies every subcommand), from ``COMMAND INFO`` on node 0 of
+    ``side``; None when it knows none."""
 
     info = (_ask(side, 0, "COMMAND", "INFO", words[0]).get("reply") or [None])[0]
     if not isinstance(info, list) or len(info) < 7:
         return None
+    container = set(info[6])
     if len(info) > 9 and info[9] and len(words) > 1:
         name = f"{words[0]}|{words[1]}".lower()
         info = next((entry for entry in info[9] if str(entry[0]).lower() == name), None)
         if info is None:
             return None
-    return set(info[6])
+    return container | set(info[6])
 
 
 class _Worker:

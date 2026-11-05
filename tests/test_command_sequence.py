@@ -1333,6 +1333,51 @@ def test_a_command_run_against_its_rule_or_refused_by_none_fails(builds, wrong, 
     assert _check(value, "acl")["outcome"] == "fail"
 
 
+def test_a_subcommand_without_categories_is_refused_with_its_denied_container(builds):
+    # JSON.DEBUG is @json; its TEST subcommand declares no categories of its own, yet denying the container
+    # denies it too, so the check must expect the refusal (a real server's acl-overreach otherwise).
+    def answer(categories, reply):
+        def respond(server):
+            rule = next((sent[3:] for sent in reversed(server.sent) if sent[:3] == ("ACL", "SETUSER", "default")), ())
+            denied = any(part[1:].encode() in categories for part in rule if part.startswith("-")) or (
+                "resetkeys" in rule and categories
+            )
+            return Error("NOPERM User default has no permissions to run the command") if denied else reply
+
+        return respond
+
+    for build in BUILDS.values():
+        build.replies = {
+            ("JSON.DEBUG", "TEST", "k"): answer([b"@json"], b"1"),
+            ("JSON.GET", "k"): answer([b"@json"], b"{}"),
+            ("PING",): answer([], b"PONG"),
+            ("COMMAND", "GETKEYS", "JSON.DEBUG", "TEST", "k"): [b"k"],
+            ("COMMAND", "GETKEYS", "JSON.GET", "k"): [b"k"],
+            ("COMMAND", "GETKEYS", "PING"): Error("ERR The command has no key arguments"),
+            ("COMMAND", "INFO", "JSON.DEBUG"): [
+                [
+                    b"json.debug",
+                    -2,
+                    [],
+                    0,
+                    0,
+                    0,
+                    [b"@json", b"@slow"],
+                    [],
+                    [],
+                    [[b"json.debug|test", -2, [], 0, 0, 0, [], [], [], []]],
+                ]
+            ],
+            ("COMMAND", "INFO", "JSON.GET"): [[b"json.get", -2, [], 0, 0, 0, [b"@json", b"@fast"], [], [], []]],
+            ("COMMAND", "INFO", "PING"): [[b"ping", -1, [], 0, 0, 0, [b"@fast"], [], [], []]],
+        }
+    commands = [{"command": ["JSON.DEBUG", "TEST", "k"]}, {"command": ["JSON.GET", "k"]}, {"command": ["PING"]}]
+    result, value = run(builds, commands, checks={"acl": True})
+
+    assert result.status.value == "PASS", result.summary
+    assert _check(value, "acl")["category"] == {"outcome": "pass", "user": "default +@all -@json"}
+
+
 def test_the_acl_check_skips_a_sequence_that_manages_users(builds):
     result, value = run(builds, [{"command": ["ACL", "SETUSER", "u", "on"]}], checks={"acl": True})
 
