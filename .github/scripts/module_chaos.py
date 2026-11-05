@@ -1,0 +1,315 @@
+"""Usage: module_chaos.py DIR
+
+Write the module chaos experiments: module data written before and while an instance is killed, stopped or
+restarted, then read back on every instance, and every replica's module values digested against its primary's."""
+
+import base64
+import json
+import struct
+import sys
+from pathlib import Path
+
+import yaml
+
+OUT = Path(sys.argv[1])
+OUT.mkdir(parents=True, exist_ok=True)
+
+
+def cmd(*words, expect=None):
+    item = {"command": [str(w) for w in words]}
+    if expect is not None:
+        item["expect"] = expect
+    return item
+
+
+def faults_and_oracles(module_command, load, during, verify):
+    """The shared shape: probe, load, a replica fault and an optional primary stall at load.completed, writes
+    during the fault, a settle, reads on every instance, and the digest of every replica."""
+    return [
+        {
+            "use": "valkey.capability.build-probe",
+            "id": "build",
+            "config": {"commands": [module_command], "deployment_config": ["loadmodule"]},
+        },
+        {"use": "valkey.action.commands", "id": "load", "config": {"timeout_s": 60, "commands": load}},
+        # The faults fire once the load is in: a sleep that follows the load publishes the event they wait for.
+        {
+            "use": "valkey.action.sleep",
+            "id": "loaded",
+            "depends_on": ["load", "hit-replica", "stall-primary"],
+            "config": {"seconds": 1},
+        },
+        {
+            "use": "valkey.fault.process-signal",
+            "id": "hit-replica",
+            "config": {
+                "when_event": "loaded.completed",
+                "instance": "replica",
+                "signal": {"$ref": "inputs.signal"},
+                "restart_mode": {"$ref": "inputs.restart_mode"},
+                "restart_delay_s": {"$ref": "inputs.restart_delay_s"},
+                "pause_s": {"$ref": "inputs.pause_s"},
+            },
+        },
+        {
+            "use": "valkey.fault.process-signal",
+            "id": "stall-primary",
+            "config": {
+                "when_event": "loaded.completed",
+                "instance": "primary",
+                "signal": "SIGSTOP",
+                "pause_s": {"$ref": "inputs.primary_pause_s"},
+            },
+        },
+        {
+            "use": "valkey.action.commands",
+            "id": "during",
+            "depends_on": ["loaded"],
+            "config": {"timeout_s": 60, "commands": during},
+        },
+        {"use": "valkey.action.sleep", "id": "settle", "depends_on": ["during"], "config": {"seconds": 5}},
+        {
+            "use": "valkey.action.poll",
+            "id": "links-up",
+            "depends_on": ["settle"],
+            "config": {
+                "instances": "replicas",
+                "section": "replication",
+                "field": "master_link_status",
+                "predicate": {"equals": "up"},
+                "timeout_s": 120,
+            },
+        },
+        {
+            "use": "valkey.action.commands",
+            "id": "verify",
+            "depends_on": ["links-up"],
+            "config": {"instances": "all", "timeout_s": 60, "commands": verify},
+        },
+        {
+            "use": "valkey.oracle.dataset-digest",
+            "id": "digest",
+            "depends_on": ["verify"],
+            "config": {"include_replicas": True, "converge_timeout_s": 60},
+        },
+        # The ledger may lose what a SIGKILLed instance acknowledged within its fsync window.
+        {"use": "valkey.oracle.ledger", "id": "data", "config": {"workload": "writes", "loss_window_s": 2.5}},
+    ]
+
+
+def experiment(name, module, module_command, load, during, verify):
+    doc = {
+        "extends": ["valkey.base"],
+        "id": f"proposed.{name}-chaos",
+        "deployment": {"modes": ["standalone"], "replicas_per_primary": {"minimum": 1}},
+        "metadata": {
+            "description": f"{module} data written before and while a replica is killed, stopped or restarted "
+            "(and the primary stalled); every instance must hold the same data after",
+            "generator": {
+                "deployment": {"standalone": {"replicas_per_primary": {"minimum": 1, "maximum": 3}}},
+                "inputs": {
+                    "signal": {"values": ["SIGKILL", "SIGTERM", "SIGSTOP"]},
+                    "restart_mode": {"values": ["immediate", "background"]},
+                    "restart_delay_s": {"minimum": 0, "maximum": 3},
+                    "pause_s": {"minimum": 0.5, "maximum": 5},
+                    "primary_pause_s": {"minimum": 0, "maximum": 4},
+                    "mutation_rate": {"minimum": 50, "maximum": 1500},
+                },
+                "server_config": ["valkey.pool.replication"],
+            },
+        },
+        "inputs": {
+            "properties": {
+                "signal": {"type": "string", "enum": ["SIGKILL", "SIGTERM", "SIGSTOP"], "default": "SIGKILL"},
+                "restart_mode": {"type": "string", "enum": ["immediate", "background"], "default": "immediate"},
+                "restart_delay_s": {"type": "number", "minimum": 0, "maximum": 60, "default": 0},
+                "pause_s": {"type": "number", "minimum": 0, "maximum": 60, "default": 2},
+                "primary_pause_s": {"type": "number", "minimum": 0, "maximum": 60, "default": 0},
+            }
+        },
+        "components": faults_and_oracles(module_command, load, during, verify),
+        "required_events": ["loaded.completed"],
+        "required_evidence": [{"evidence_id": "valkey.fault.injected", "source": "hit-replica"}],
+    }
+    (OUT / f"proposed.{name}-chaos.yaml").write_text(yaml.safe_dump(doc, sort_keys=False, width=120))
+
+
+def json_doc(i):
+    return {
+        "id": i,
+        "name": f"n{i}",
+        "tags": [f"t{i % 7}", f"t{i % 3}"],
+        "nested": {"a": {"b": [i, i * 2, None]}, "s": "x" * (i % 50)},
+        "price": i * 1.5,
+        "ok": i % 2 == 0,
+    }
+
+
+N = 300
+load = [cmd("JSON.SET", f"j:{i}", "$", json.dumps(json_doc(i)), expect={"equals": "OK"}) for i in range(N)]
+load += [cmd("JSON.ARRAPPEND", f"j:{i}", "$.tags", '"extra"') for i in range(0, N, 5)]
+load += [cmd("JSON.NUMINCRBY", f"j:{i}", "$.price", "2.25") for i in range(0, N, 3)]
+during = [cmd("JSON.SET", f"j:{i}", "$.nested.a.b[1]", str(i * 10)) for i in range(N)]
+during += [cmd("JSON.DEL", f"j:{i}", "$.nested.s") for i in range(0, N, 4)]
+during += [
+    cmd("JSON.SET", f"jn:{i}", "$", json.dumps({"big": ["y" * 200] * 20, "i": i}), expect={"equals": "OK"})
+    for i in range(100)
+]
+during += [
+    cmd("JSON.MSET", *[w for i in range(10) for w in (f"jm:{i}", "$", json.dumps({"m": i}))], expect={"equals": "OK"})
+]
+verify = [cmd("JSON.GET", f"j:{i}", "$.nested.a.b[1]", expect={"equals": json.dumps([i * 10])}) for i in range(0, N, 7)]
+verify += [cmd("JSON.ARRLEN", f"j:{i}", "$.tags", expect={"equals": [3 if i % 5 == 0 else 2]}) for i in range(0, N, 11)]
+verify += [cmd("JSON.GET", f"jn:{i}", "$.i", expect={"equals": json.dumps([i])}) for i in range(0, 100, 9)]
+verify += [cmd("JSON.TYPE", "jm:3", "$.m", expect={"equals": ["integer"]})]
+experiment("json", "valkey-json", "JSON.SET", load, during, verify)
+
+# Bloom: filters of every shape, items added before and during; a filter never forgets an item.
+shapes = [
+    ("b:s1", ["0.01", "1000"]),
+    ("b:s2", ["0.001", "100", "EXPANSION", "2"]),
+    ("b:s3", ["0.1", "50", "NONSCALING"]),
+    ("b:s4", ["0.001", "10", "EXPANSION", "4"]),
+    ("b:s5", ["0.0001", "5000"]),
+]
+load = [cmd("BF.RESERVE", key, *args, expect={"equals": "OK"}) for key, args in shapes]
+for key, _ in shapes:
+    load += [cmd("BF.MADD", key, *[f"{key}-i{j}" for j in range(start, start + 40)]) for start in range(0, 40, 40)]
+load += [cmd("BF.ADD", f"b:a{i}", f"item{i}") for i in range(200)]
+during = []
+for key, args in shapes:
+    if "NONSCALING" in args:
+        continue
+    during += [cmd("BF.MADD", key, *[f"{key}-i{j}" for j in range(start, start + 40)]) for start in range(40, 200, 40)]
+during += [
+    cmd("BF.INSERT", f"b:ins{i}", "CAPACITY", "100", "ERROR", "0.01", "ITEMS", *[f"x{j}" for j in range(30)])
+    for i in range(50)
+]
+during += [cmd("COPY", "b:s1", f"b:copy{i}") for i in range(5)]
+verify = []
+for key, args in shapes:
+    # A NONSCALING filter holds only what the load added: 40 items.
+    upto, step = (40, 40) if "NONSCALING" in args else (200, 50)
+    for start in range(0, upto, step):
+        verify.append(
+            cmd("BF.MEXISTS", key, *[f"{key}-i{j}" for j in range(start, start + step)], expect={"equals": [1] * step})
+        )
+verify += [cmd("BF.EXISTS", f"b:a{i}", f"item{i}", expect={"equals": 1}) for i in range(0, 200, 13)]
+verify += [
+    cmd("BF.MEXISTS", f"b:ins{i}", *[f"x{j}" for j in range(30)], expect={"equals": [1] * 30}) for i in range(0, 50, 7)
+]
+verify += [cmd("BF.MEXISTS", "b:copy2", *[f"b:s1-i{j}" for j in range(40)], expect={"equals": [1] * 40})]
+experiment("bloom", "valkey-bloom", "BF.ADD", load, during, verify)
+
+
+# Search: indexes of every field type over hashes written before and during; every instance indexes the same.
+def vec(i):
+    return {"$base64": base64.b64encode(struct.pack("<4f", i, i % 7, -i, 1.0)).decode()}
+
+
+schema = [
+    "SCHEMA",
+    "v",
+    "VECTOR",
+    "HNSW",
+    "6",
+    "TYPE",
+    "FLOAT32",
+    "DIM",
+    "4",
+    "DISTANCE_METRIC",
+    "L2",
+    "f",
+    "VECTOR",
+    "FLAT",
+    "6",
+    "TYPE",
+    "FLOAT32",
+    "DIM",
+    "4",
+    "DISTANCE_METRIC",
+    "COSINE",
+    "tag",
+    "TAG",
+    "n",
+    "NUMERIC",
+    "title",
+    "TEXT",
+]
+load = [
+    cmd("FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", *schema, expect={"equals": "OK"}),
+    cmd(
+        "FT.CREATE",
+        "idx2",
+        "ON",
+        "HASH",
+        "PREFIX",
+        "1",
+        "e:",
+        "SCHEMA",
+        "tag",
+        "TAG",
+        "n",
+        "NUMERIC",
+        expect={"equals": "OK"},
+    ),
+]
+load += [
+    {
+        "command": [
+            "HSET",
+            f"d:{i}",
+            "v",
+            vec(i),
+            "f",
+            vec(i + 1),
+            "tag",
+            f"t{i % 5}",
+            "n",
+            str(i),
+            "title",
+            f"hello word{i % 9}",
+        ]
+    }
+    for i in range(400)
+]
+load += [cmd("HSET", f"e:{i}", "tag", f"g{i % 3}", "n", str(i)) for i in range(200)]
+load += [cmd("FT.SEARCH", "idx", "*", "LIMIT", "0", "0", expect={"equals": [400]}) | {"wait_s": 60}]
+during = [{"command": ["HSET", f"d:{i}", "v", vec(i * 3), "n", str(i * 2)]} for i in range(0, 400, 2)]
+during += [cmd("DEL", f"d:{i}") for i in range(0, 400, 10)]
+during += [
+    {"command": ["HSET", f"d:{i}", "v", vec(i), "f", vec(i), "tag", "late", "n", str(i), "title", "late doc"]}
+    for i in range(400, 500)
+]
+during += [
+    cmd("FT.DROPINDEX", "idx2", expect={"equals": "OK"}),
+    cmd(
+        "FT.CREATE",
+        "idx2",
+        "ON",
+        "HASH",
+        "PREFIX",
+        "1",
+        "e:",
+        "SCHEMA",
+        "tag",
+        "TAG",
+        "n",
+        "NUMERIC",
+        expect={"equals": "OK"},
+    ),
+]
+# 400 + 100 written, 40 deleted.
+verify = [
+    cmd("FT.SEARCH", "idx", "*", "LIMIT", "0", "0", expect={"equals": [460]}) | {"wait_s": 60},
+    cmd("FT.SEARCH", "idx", "@tag:{late}", "LIMIT", "0", "0", expect={"equals": [100]}) | {"wait_s": 30},
+    cmd("FT.SEARCH", "idx", "@n:[0 0]", "LIMIT", "0", "0", expect={"equals": [0]}),
+    cmd("FT.SEARCH", "idx2", "*", "LIMIT", "0", "0", expect={"equals": [200]}) | {"wait_s": 60},
+    cmd("FT.SEARCH", "idx2", "@tag:{g1}", "LIMIT", "0", "0", expect={"equals": [67]}) | {"wait_s": 30},
+    {
+        "command": ["FT.SEARCH", "idx", "*=>[KNN 5 @v $q]", "PARAMS", "2", "q", vec(401), "NOCONTENT", "DIALECT", "2"],
+        "expect": {"exists": True},
+    },
+]
+experiment("search", "valkey-search", "FT.CREATE", load, during, verify)
+print("written", sorted(p.name for p in OUT.iterdir()))
