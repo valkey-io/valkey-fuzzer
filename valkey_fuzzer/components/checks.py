@@ -388,7 +388,10 @@ class _Checks:
                 "encodings", compared, {"server_config": _ENCODINGS}, server_config={**self.server_config, **_ENCODINGS}
             )
         resp = 5 - self.config["resp"]
-        return _combine(encodings=encodings, protocol=self.variant("protocol", compared, {"resp": resp}, resp=resp))
+        # A module's command (named with a dot, as test.callresp3attribute or JSON.GET; Valkey's never are) may reply by
+        # the client's protocol on purpose: only Valkey's own commands must agree across RESP2 and RESP3.
+        own = [index for index in compared if "." not in _words(self.commands[index])[0]]
+        return _combine(encodings=encodings, protocol=self.variant("protocol", own, {"resp": resp}, resp=resp))
 
     def variant(self, name: str, compared: Sequence[int], change: Mapping[str, Any], **start: Any) -> dict[str, Any]:
         side, failed = self.start(f"candidate.{name}", **start)

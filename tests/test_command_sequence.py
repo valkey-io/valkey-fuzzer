@@ -1191,6 +1191,24 @@ def test_variants_leave_internals_and_configuration_alone(builds, command):
     assert result.status.value == "PASS", result.summary
 
 
+def test_a_modules_command_may_reply_by_protocol_and_valkeys_may_not(builds):
+    # As in the walk's test of valkey-io/valkey#5157: a test module's command replies otherwise to a RESP3 client.
+    for build in BUILDS.values():
+        build.replies = {
+            ("test.callresp3attribute",): ByResp({2: b"OK", 3: b"Some real reply following the attribute"}),
+            ("GET", "k"): ByResp({2: b"v", 3: b"v"}),
+        }
+    result, value = run(
+        builds, [{"command": ["test.callresp3attribute"]}, {"command": ["GET", "k"]}], checks={"variants": True}
+    )
+    assert result.status.value == "PASS", result.summary
+    assert _replies(value["candidate"])[0] == {"reply": "OK"}
+    for build in BUILDS.values():
+        build.replies[("GET", "k")] = ByResp({2: b"v", 3: b"w"})
+    result, _ = run(builds, [{"command": ["GET", "k"]}], checks={"variants": True})
+    assert result.status.value == "FAIL" and result.diagnostics["variant"] == "protocol"
+
+
 def test_encodings_are_not_varied_with_modules_loaded(builds):
     result, value = run(builds, [{"command": ["PING"]}], modules=["/m/a.so"], checks={"variants": True})
 

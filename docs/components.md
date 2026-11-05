@@ -462,7 +462,7 @@ run completed on the candidate. A check that sees Valkey do something wrong
 is `FAIL` with `diagnostics.reason` and what reproduces it; a candidate that
 exits during one is a crash. `variants`: compact encodings off
 (`*-max-listpack-entries 0`, `set-max-intset-entries 0`,
-`list-max-listpack-size 0`; not with `modules`), then the other `resp`;
+`list-max-listpack-size 0`; not with `modules`), then the other `resp` (Valkey's commands only: a module's, named with a dot, may reply by protocol);
 replies compare as multisets of their values shaped as RESP2's, except
 `compare: skip`, `raw`, `read`, `DEBUG`, `OBJECT`, `MEMORY`, `CONFIG`,
 `CLIENT INFO`/`LIST`, `HELLO`, and `INFO` (`variant-mismatch`).
