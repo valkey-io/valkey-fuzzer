@@ -1462,7 +1462,9 @@ def test_the_parents_data_loads_and_replicates_into_the_candidate(builds, monkey
             return b"d1" if ("SET", "k", "v") in server.sent else b"empty"
         if server.files.get("dump.rdb") == b"RDB":
             return b"d1" if loads else b"empty"
-        return b"d1" if syncs and any(sent[0] == "REPLICAOF" for sent in server.sent) else b"empty"
+        if any(sent[0] == "REPLICAOF" for sent in server.sent):
+            return b"d1" if syncs else b"empty"
+        return b"d1" if ("SET", "k", "v") in server.sent else b"empty"
 
     _replicating(digest)
     _saving(BUILDS[builds["parent"]])
@@ -1491,6 +1493,25 @@ def test_the_parents_data_loads_and_replicates_into_the_candidate(builds, monkey
             "parent": {"reply": "d1"},
             "candidate": {"reply": "empty"},
         }
+
+
+def test_the_parents_data_may_become_what_the_candidate_makes_of_the_sequence(builds, monkeypatch):
+    # The merge drops the key on purpose, when it writes it and when it loads it: the parent's data loads and
+    # replicates into what the candidate holds after the same sequence, not into the parent's.
+    monkeypatch.setattr(checks, "_SYNC_TIMEOUT_S", 0.2)
+
+    def digest(server):
+        if server.build is BUILDS[builds["parent"]]:
+            return b"d1" if ("SET", "k", "v") in server.sent else b"empty"
+        return b"empty"
+
+    _replicating(digest)
+    _saving(BUILDS[builds["parent"]])
+    result, value = run(builds, [{"command": ["SET", "k", "v"]}], checks={"compat": True})
+
+    compat = _check(value, "compat")
+    assert (compat["load"]["outcome"], compat["sync"]["outcome"]) == ("pass", "pass"), compat
+    assert result.status.value == "PASS", result.summary
 
 
 def test_checks_are_skipped_when_the_sequence_did_not_complete(builds):

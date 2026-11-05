@@ -685,7 +685,7 @@ class _Checks:
         decided = self.judge("compat", side, failed, **diagnostics)
         if decided is not None:
             return decided
-        if mine != digest:
+        if mine != digest and mine != self.own_digest():
             return _failed(
                 f"the parent's RDB loads into the candidate with DEBUG DIGEST {canonical_json(mine)}, "
                 f"not the parent's {canonical_json(digest)}",
@@ -701,4 +701,23 @@ class _Checks:
                 synced, state = self.replicate((parent, 0), (side, 0))
         finally:
             self.finish(side)
+        if not synced and state.get("link") == "up" and state["primary"]["offset"] == state["replica"]["offset"]:
+            synced = state["replica"]["digest"] == self.own_digest()
         return self.judge("compat", side, failed) or self.diverged("compat", "compat-sync", synced, state)
+
+    def own_digest(self) -> Optional[Mapping[str, Any]]:
+        """The ``DEBUG DIGEST`` of a fresh candidate after the sequence, or None if it could not be read. A merge may
+        change on purpose what the parent's data becomes in the candidate; what the candidate makes of it is then
+        compatible when it is what the candidate holds after the same sequence."""
+
+        if not hasattr(self, "_own"):
+            side, failed = self.start("candidate.compat-own")
+            digest: Mapping[str, Any] = {}
+            try:
+                if not failed:
+                    side.replies = actions._run_sequence(side, self.commands, self.context)
+                    digest = _ask(side, 0, "DEBUG", "DIGEST")
+            finally:
+                self.finish(side)
+            self._own = digest if side.exited is None and "reply" in digest else None
+        return self._own
