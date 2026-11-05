@@ -155,6 +155,13 @@ def _sets_replication(commands: Sequence[Mapping[str, Any]]) -> bool:
     return any(words and words[0].upper() in ("REPLICAOF", "SLAVEOF") for words in map(_words, commands))
 
 
+def _writes_unreplicated(commands: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether the sequence writes keys its node does not replicate: DEBUG POPULATE adds them on the primary
+    alone."""
+
+    return any([str(word).upper() for word in _words(item)[:2]] == ["DEBUG", "POPULATE"] for item in commands)
+
+
 def _set_on_replica(side: Any, commands: Sequence[Mapping[str, Any]]) -> None:
     """Make on node 1 the settings the sequence makes on node 0. They are not replicated, and some change how
     a replica applies the stream: DEBUG SET-SKIP-CHECKSUM-VALIDATION lets in a RESTORE the replica would
@@ -467,6 +474,8 @@ class _Checks:
             return _skipped("the sequence runs on several nodes or a cluster, whose topology it sets up itself")
         if _sets_replication(self.commands):
             return _skipped("the sequence sets its node's replication itself")
+        if _writes_unreplicated(self.commands):
+            return _skipped("the sequence writes keys its node does not replicate (DEBUG POPULATE)")
         # Node 1 is the replica; the sequence names node 0 only.
         side, failed = self.start("candidate.replica", nodes=2, options=_QUICK_SYNC)
         synced, state = False, {}

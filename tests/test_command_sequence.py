@@ -1308,6 +1308,18 @@ def test_a_sequence_that_sets_its_replication_itself_skips_the_replica_checks(bu
     assert result.status.value != "FAIL", result.summary
 
 
+def test_a_sequence_that_writes_without_replicating_skips_the_replica_check(builds):
+    # DEBUG POPULATE adds its keys on the primary alone, so a replica never holds them (fuzzer#62).
+    BUILDS[builds["candidate"]].replies[("DEBUG", "POPULATE", "10")] = b"OK"
+    result, value = run(builds, [{"command": ["DEBUG", "POPULATE", "10"]}], checks={"replica": True})
+
+    assert _check(value, "replica") == {
+        "outcome": "skipped",
+        "reason": "the sequence writes keys its node does not replicate (DEBUG POPULATE)",
+    }
+    assert result.status.value != "FAIL", result.summary
+
+
 _CATEGORIES = {"SET": [b"@write", b"@string", b"@slow"], "GET": [b"@read", b"@string", b"@fast"], "PING": [b"@fast"]}
 _ACL_SEQUENCE = [{"command": ["SET", "k", "v"]}, {"command": ["GET", "k"]}, {"command": ["PING"]}]
 
