@@ -1209,6 +1209,18 @@ def test_a_modules_command_may_reply_by_protocol_and_valkeys_may_not(builds):
     assert result.status.value == "FAIL" and result.diagnostics["variant"] == "protocol"
 
 
+def test_a_subscribed_connections_commands_may_reply_by_protocol(builds):
+    # A RESP2 client that subscribed may not run other commands; a RESP3 one may (fuzzer#58).
+    for build in BUILDS.values():
+        build.replies = {("SUBSCRIBE", "c"): b"OK", ("GET", "k"): ByResp({2: b"v", 3: b"w"})}
+    commands = [{"command": ["SUBSCRIBE", "c"], "connection": "sub"}, {"command": ["GET", "k"], "connection": "sub"}]
+    result, _ = run(builds, commands, checks={"variants": True})
+    assert result.status.value == "PASS", result.summary
+    reset = [*commands[:1], {"command": ["RESET"], "connection": "sub"}, commands[1]]
+    result, _ = run(builds, reset, checks={"variants": True})
+    assert result.status.value == "FAIL" and result.diagnostics["variant"] == "protocol"
+
+
 def test_encodings_are_not_varied_with_modules_loaded(builds):
     result, value = run(builds, [{"command": ["PING"]}], modules=["/m/a.so"], checks={"variants": True})
 

@@ -130,6 +130,24 @@ def _words(item: Mapping[str, Any]) -> list[str]:
     return [] if item["command"] is None else actions._validate_sequence_command(item["command"], "command")
 
 
+def _subscribed(commands: Sequence[Mapping[str, Any]]) -> set[int]:
+    """The commands sent on a connection that subscribed before them, and did not RESET since."""
+
+    connections, found = set(), set()
+    for index, item in enumerate(commands):
+        words = _words(item)
+        if not words:
+            continue
+        if item["connection"] in connections:
+            found.add(index)
+        name = words[0].upper()
+        if name in actions._SUBSCRIBE:
+            connections.add(item["connection"])
+        elif name == "RESET":
+            connections.discard(item["connection"])
+    return found
+
+
 def _sets_replication(commands: Sequence[Mapping[str, Any]]) -> bool:
     """Whether the sequence makes its node a replica (or a primary) itself: a replica whose own link is down
     refuses replicas of its own (NOMASTERLINK), so no replica of it can catch up."""
@@ -410,6 +428,9 @@ class _Checks:
         # A module's command (named with a dot, as test.callresp3attribute or JSON.GET; Valkey's never are) may reply by
         # the client's protocol on purpose: only Valkey's own commands must agree across RESP2 and RESP3.
         own = [index for index in compared if "." not in _words(self.commands[index])[0]]
+        # A RESP2 client that subscribed may run only the Pub/Sub commands, PING, QUIT and RESET; a RESP3 one, any.
+        subscribed = _subscribed(self.commands)
+        own = [index for index in own if index not in subscribed]
         return _combine(encodings=encodings, protocol=self.variant("protocol", own, {"resp": resp}, resp=resp))
 
     def variant(self, name: str, compared: Sequence[int], change: Mapping[str, Any], **start: Any) -> dict[str, Any]:
