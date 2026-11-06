@@ -12,7 +12,15 @@ from unittest.mock import Mock, call, patch
 import pytest
 import valkey
 
-from tests.deployment_support import PROCESSES, client_context, fake_client, formed_cluster, instance, process_manager
+from tests.deployment_support import (
+    PROCESSES,
+    FakeCluster,
+    client_context,
+    fake_client,
+    formed_cluster,
+    instance,
+    process_manager,
+)
 from tests.support import VirtualClock, valkey_build
 from valkey_fuzzer.commands.run import cleanup_logs
 from valkey_fuzzer.components.server import PrivateServer
@@ -448,6 +456,26 @@ def test_formation_points_each_replica_at_the_primary_and_resets_only_its_own_se
     primary.process.poll.return_value = 0
     with pytest.raises(InstanceIdentityError, match="has exited"):
         formation.reset_cluster_state([primary])
+
+
+def test_a_cluster_is_formed_only_once_every_node_sees_each_replica_of_its_primary():
+    """A Valkey 7.2 replica's link was up before the cluster bus told the other nodes its role, so a failover
+    right after provisioning read a view in which shard 0's primary had no replica to promote."""
+
+    nodes = [
+        instance("valkey-0", cluster_node_id="n0"),
+        instance("valkey-1", "replica", 7001, primary_id="valkey-0", cluster_node_id="n1"),
+    ]
+    cluster = FakeCluster({7000: ("n0", None, "0-16383"), 7001: ("n1", 7000, "")})
+    formation = Formation()
+    formation.get_client = lambda node: cluster.client(port=node.port)
+    assert formation._replica_view_problem(nodes) is None
+
+    seen_by_replica = cluster._cluster_nodes(7001)
+    cluster.nodes[7001] = ("n1", None, "")  # valkey-0's view: valkey-1 still a primary
+    stale = cluster._cluster_nodes(7000)
+    cluster._cluster_nodes = lambda me: stale if me == 7000 else seen_by_replica
+    assert formation._replica_view_problem(nodes) == "valkey-0 does not yet see valkey-1 as a replica of valkey-0"
 
 
 def test_each_replica_link_seen_up_counts_although_another_replicas_info_times_out(monkeypatch):

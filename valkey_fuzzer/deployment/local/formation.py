@@ -10,7 +10,7 @@ from typing import Callable, Optional
 import valkey
 
 from ...protocols import RunContext
-from .cluster_nodes import HASH_SLOTS
+from .cluster_nodes import HASH_SLOTS, parse_cluster_nodes
 from .models import DeploymentMode, InstanceInfo, LocalDeploymentError
 from .processes import verify_instance_process_identity
 from .queries import WaitInterruptedError, pause, query_cluster_info, query_replication, wait_until
@@ -274,6 +274,27 @@ class Formation:
             return f"cluster_state is {state} with {assigned}/{HASH_SLOTS} slots assigned and {failed} failed"
         if not self.check_replication_links(nodes):
             return "a replica's link to its primary is down"
+        return self._replica_view_problem(nodes)
+
+    def _replica_view_problem(self, nodes: list[InstanceInfo]) -> Optional[str]:
+        """A node whose CLUSTER NODES does not yet show a replica as a replica of its primary; None when all do.
+
+        A replica's link is up before the cluster bus has told every node its
+        role (a Valkey 7.2 replica's can take seconds), and a failover that
+        reads one node's view would find no replica to promote.
+        """
+        names = {node.cluster_node_id: node.instance_id for node in nodes}
+        ids = {node.instance_id: node.cluster_node_id for node in nodes}
+        expected = {node.cluster_node_id: ids.get(node.primary_id) for node in nodes if node.role == "replica"}
+        for node in nodes:
+            rows = {
+                row["node_id"]: row
+                for row in parse_cluster_nodes(self.get_client(node).execute_command("CLUSTER", "NODES"))
+            }
+            for replica_id, primary_id in expected.items():
+                row = rows.get(replica_id)
+                if row is None or not row["is_replica"] or row["primary_id"] != primary_id:
+                    return f"{node.instance_id} does not yet see {names[replica_id]} as a replica of {names.get(primary_id)}"
         return None
 
     def _form(self, nodes: list[InstanceInfo], mode: DeploymentMode) -> Optional[str]:
