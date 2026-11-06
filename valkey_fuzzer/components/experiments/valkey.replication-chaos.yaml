@@ -17,7 +17,7 @@
 # random scenarios also draw repl-compression; the `compression` oracle checks
 # that every final link, after the waves' compression flips and topology
 # changes, uses the codec the final configuration negotiates.
-extends: [valkey.writes, valkey.compression, valkey.history]
+extends: [valkey.writes, valkey.compression, valkey.history, valkey.command-table]
 id: valkey.replication-chaos
 deployment:
   modes: [standalone]

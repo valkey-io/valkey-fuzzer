@@ -541,7 +541,7 @@ def test_the_cluster_chaos_experiment_passes_or_fails_with_its_waves_and_always_
     )
     results = {result.component_id: result for result in outcome.component_results}
     assert {name: result.status.value for name, result in results.items()} == {
-        "chaos": "FAIL" if wave_fails else "PASS", "cluster": "PASS", "liveness": "PASS"
+        "chaos": "FAIL" if wave_fails else "PASS", "cluster": "PASS", "liveness": "PASS", "commands": "PASS"
     }  # fmt: skip
     assert outcome.status.value == ("FAIL" if wave_fails else "PASS"), outcome.summary
     assert "stopped on purpose" in results["liveness"].summary

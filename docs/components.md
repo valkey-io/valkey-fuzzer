@@ -100,6 +100,7 @@ a retry succeeded makes the fault, and the run, `ERROR`.
 | [`valkey.capability.build-probe`](#valkeycapabilitybuild-probe) | capability | any | checks each binary supports the experiment |
 | [`valkey.capability.host-probe`](#valkeycapabilityhost-probe) | capability | any | checks the host (Linux, root, tmpfs, iptables) |
 | [`valkey.workload.key-value`](#valkeyworkloadkey-value) | workload | any | writes keys and records every client-visible result |
+| [`valkey.workload.command-table`](#valkeyworkloadcommand-table) | workload | any | sends commands drawn from the whole command table |
 | [`valkey.action.command`](#valkeyactioncommand) | action | any | sends a command and checks the reply |
 | [`valkey.action.commands`](#valkeyactioncommands) | action | any | sends a command sequence on one connection, and compares the replies of two builds |
 | [`valkey.action.tools`](#valkeyactiontools) | action | any | runs a Valkey tool of two builds and compares what they do |
@@ -184,6 +185,7 @@ schemas.
 | `valkey.oracle.liveness` | none | `valkey.liveness.verified` | none |
 | `valkey.oracle.rdb-snapshot` | none | `valkey.rdb.reload-verified` | `process.private-server` |
 | `valkey.oracle.repl-compression` | none | `valkey.repl.compression-verified` | none |
+| `valkey.workload.command-table` | none | `valkey.workload.command-table` | none |
 | `valkey.workload.key-value` | `<id>.drained`<br>`<id>.seeded` | `valkey.workload.ledger` | none |
 <!-- END declarations -->
 
@@ -320,6 +322,75 @@ Evidence: `valkey.workload.ledger`, with the operation counts by outcome,
 without lists), `list_keys`, `list_reads`, `replies_digest` (a digest of every
 client-visible reply), and `drained`. Events: `<id>.seeded` after the preload,
 `<id>.drained` after `max_ops` operations.
+
+### `valkey.workload.command-table`
+
+Sends commands drawn from the whole command table of the build under test,
+from one thread at `rate` commands per second until teardown, so faults meet
+every data type, transactions, scripting, Pub/Sub, and introspection, not
+only `SET` and `GET`. At start it reads `COMMAND` (each command's flags) and
+`COMMAND DOCS` (its arguments), which Valkey builds from its
+`src/commands/*.json` specs, module commands included; a container command
+(`CONFIG`) contributes its subcommands (`CONFIG GET`). Each command is drawn
+uniformly from the table, and its arguments from its documented ones: an
+optional argument half the time, one to three of a repeated one, as many keys
+as its `numkeys`, and values from small domains (`member:<n>`, `field:<n>`)
+so commands meet the data others wrote. A blocking command waits at most
+0.1 s. `MULTI` runs as a transaction: `MULTI`, one to three commands, `EXEC`.
+Commands and arguments come from the run's seed (`unix-time` arguments are
+the current time plus up to a minute).
+
+Error replies are expected and only counted; no reply (a lost connection or
+a timeout) drops the connection, and in standalone mode the workload sends
+to the current primary. It judges nothing: the liveness and crash oracles
+judge what the commands do to the server, and the evidence records any reply
+the client could not parse.
+
+Every key is `<prefix>:{<tag>}:<type>:<n>`, with one of 32 hash tags per
+command and `<type>` the command's group (a random one for generic
+commands), and a pattern argument is `<prefix>:*`. The prefix keeps the
+keys apart from the other components' keys and oracles; the one hash tag
+keeps a command's keys in one slot, so a cluster runs multi-key commands. In
+cluster mode a command goes to the primary serving its tag, learned from
+`MOVED` replies.
+
+Commands it never sends:
+
+- Admin commands (the `admin` flag), which change the server, its
+  replication, or the cluster's topology that the experiment's components
+  drive and judge (`SHUTDOWN`, `REPLICAOF`, `FAILOVER`, `CLUSTER RESET`,
+  `CLUSTER SETSLOT`, `CONFIG SET`, `DEBUG`, `BGSAVE`, `CLIENT KILL`,
+  `CLIENT PAUSE`, `ACL SETUSER`, `MODULE LOAD`, ...), except those that only
+  read: `ACL DRYRUN`, `ACL GETUSER`, `ACL LIST`, `ACL LOG`, `ACL USERS`,
+  `CLIENT LIST`, `CLUSTER COUNT-FAILURE-REPORTS`, `CLUSTER REPLICAS`,
+  `CLUSTER SLAVES`, `COMMANDLOG GET`, `COMMANDLOG LEN`, `CONFIG GET`, the
+  `LATENCY` reports, `MODULE LIST`, `SLOWLOG GET`, and `SLOWLOG LEN`.
+- `FLUSHALL`, `FLUSHDB`, and `SWAPDB`: they delete or move every
+  component's keys.
+- `KEYS`: it walks every key, the other workloads' too, blocking the server
+  as long.
+- `MIGRATE`: it blocks the server while it connects to the host it names,
+  and moves keys out of the deployment.
+- `SUBSCRIBE`, `PSUBSCRIBE`, `SSUBSCRIBE`, `HELLO`, and `CLIENT REPLY`: they
+  change what the connection replies, so replies would no longer pair with
+  commands.
+- `SCRIPT DEBUG`: `SYNC` blocks the server for the whole debugging session.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `rate` | number, 0 to 100,000 | 100 | Commands per second; 0 sends none. |
+| `keys` | integer, 1 to 10,000 | 5 | Keys per hash tag and type. |
+| `prefix` | string or null | `null` | Key prefix; `vf:<id>` by default. |
+| `op_timeout_s` | number, 0.05 to 60 | 1 | Client timeout per command. |
+
+The `valkey.command-table` fragment adds it as `commands`, with `rate` from
+the input `command_rate` (default 0).
+
+Evidence: `valkey.workload.command-table`, with `commands` (how many the
+table offered), `skipped` (the names it never sends, as this build lists
+them), `sent`, `distinct_sent`, `outcomes` (`replied`, `error`,
+`unanswered`, `protocol_error`), and `protocol_errors` (up to 10 commands
+whose reply the client could not parse, with the parser's error).
 
 ## Actions
 

@@ -5,6 +5,7 @@
 # the data-consistency keys, and node logs, with the killed nodes counted as
 # stopped on purpose. `valkey-fuzzer run --random --experiment
 # valkey.cluster-chaos` generates scenarios for this experiment.
+extends: [valkey.command-table]
 id: valkey.cluster-chaos
 deployment:
   modes: [cluster]

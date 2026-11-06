@@ -1,0 +1,24 @@
+# An opt-in `commands` workload (valkey.workload.command-table): commands drawn
+# from the build's whole command table at `command_rate` per second while the
+# experiment's faults run. Its keys stay under their own prefix, apart from the
+# keys the other components write and check; what the commands do to the
+# server is the liveness oracle's to judge. 0, the default, sends none, and
+# random scenarios keep it: a batch turns it on for an experiment with a base,
+# `experiment: {inputs: {command_rate: 200}}`.
+metadata:
+  generator:
+    inputs:
+      command_rate: fixed
+inputs:
+  properties:
+    command_rate:
+      type: number
+      minimum: 0
+      maximum: 20000
+      default: 0
+      description: commands per second drawn from the whole command table (0 sends none)
+components:
+  - use: valkey.workload.command-table
+    id: commands
+    config:
+      rate: {$ref: inputs.command_rate}
