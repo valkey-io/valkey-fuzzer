@@ -110,16 +110,18 @@ class Formation:
 
         logger.info("Slot assignment complete")
 
-        # Every slot assigned and none failed, as the first node sees it: checked every 2 s for 20 s.
+        # Every slot assigned and none failed, as the first node sees it: checked every 2 s for 60 s. Under a
+        # soak's load a primary can look down for a while (cluster-node-timeout 1000), leaving its slots marked
+        # failing well past 20 s although every slot is assigned; a healthy cluster is no slower for the margin.
         seen: dict[str, str] = {}
 
         def assigned() -> bool:
             seen.update(query_cluster_info(self.get_client(nodes[0])))
             return seen.get("cluster_slots_assigned") == str(HASH_SLOTS) and seen.get("cluster_slots_fail") == "0"
 
-        if not wait_until(assigned, timeout=20.0, interval=2.0, what="slot assignment", context=self._context):
+        if not wait_until(assigned, timeout=60.0, interval=2.0, what="slot assignment", context=self._context):
             raise LocalDeploymentError(
-                f"slot assignment did not propagate within 20s: {seen.get('cluster_slots_assigned')}/{HASH_SLOTS} "
+                f"slot assignment did not propagate within 60s: {seen.get('cluster_slots_assigned')}/{HASH_SLOTS} "
                 f"assigned, {seen.get('cluster_slots_fail')} failed; check the instance logs"
             )
         logger.info("Slot assignment verified")

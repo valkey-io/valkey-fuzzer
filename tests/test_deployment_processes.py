@@ -478,6 +478,40 @@ def test_a_cluster_is_formed_only_once_every_node_sees_each_replica_of_its_prima
     assert formation._replica_view_problem(nodes) == "valkey-0 does not yet see valkey-1 as a replica of valkey-0"
 
 
+def test_slot_verification_outlasts_a_failing_slot_window_a_loaded_host_stretches(monkeypatch):
+    """valkey #3438 under a soak's load: every slot was assigned, yet the first node kept reporting slots
+    failing past the old 20 s wait (cluster-node-timeout 1000 marks a slow peer down), so provisioning failed
+    a cluster that was healthy seconds later."""
+
+    clock = VirtualClock().install(monkeypatch, queries)
+    primary = instance("valkey-0", slot_start=0, slot_end=cluster_nodes.HASH_SLOTS - 1)
+    failing = "cluster_state:ok\r\ncluster_slots_assigned:16384\r\ncluster_slots_fail:5460\r\n"
+    healthy = "cluster_state:ok\r\ncluster_slots_assigned:16384\r\ncluster_slots_fail:0\r\n"
+
+    def client(cleared_at):
+        def replies(*args):
+            if args[:2] == ("CLUSTER", "ADDSLOTS"):
+                return "OK"
+            if args[:2] == ("CLUSTER", "MYID"):
+                return "n0"
+            return healthy if clock.elapsed >= cleared_at else failing
+
+        return Mock(execute_command=Mock(side_effect=replies))
+
+    formation = Formation()
+    clearing = client(cleared_at=30.0)
+    formation.get_client = lambda node: clearing
+    assert formation.assign_and_verify_slots([primary]) == {"valkey-0": "n0"}
+    assert 30.0 <= clock.elapsed <= 60.0, "waited out the failing-slot window instead of erroring at 20 s"
+
+    # Slots that never clear still fail provisioning, with the counts seen.
+    clock.elapsed = 0.0
+    stuck = client(cleared_at=float("inf"))
+    formation.get_client = lambda node: stuck
+    with pytest.raises(LocalDeploymentError, match=r"did not propagate within 60s: 16384/16384 .* 5460 failed"):
+        formation.assign_and_verify_slots([primary])
+
+
 def test_each_replica_link_seen_up_counts_although_another_replicas_info_times_out(monkeypatch):
     """84 instances at load 400: every link was up 6 s in, yet one slow INFO failed each round of the old
     all-replicas poll, so provisioning never passed."""
