@@ -25,7 +25,7 @@ from tests.support import VirtualClock, valkey_build
 from valkey_fuzzer.commands.run import cleanup_logs
 from valkey_fuzzer.components.server import PrivateServer
 from valkey_fuzzer.deployment.local import cluster_nodes, processes, queries
-from valkey_fuzzer.deployment.local.formation import Formation
+from valkey_fuzzer.deployment.local.formation import SETTLE_TIMEOUT_S, Formation
 from valkey_fuzzer.deployment.local.models import DeploymentMode, LocalDeploymentError
 from valkey_fuzzer.deployment.local.planner import plan_deployment
 from valkey_fuzzer.deployment.local.ports import PortUnavailableError
@@ -510,6 +510,51 @@ def test_slot_verification_outlasts_a_failing_slot_window_a_loaded_host_stretche
     formation.get_client = lambda node: stuck
     with pytest.raises(LocalDeploymentError, match=r"did not propagate within 60s: 16384/16384 .* 5460 failed"):
         formation.assign_and_verify_slots([primary])
+
+
+def test_the_health_wait_outlasts_a_fail_state_window_a_loaded_host_stretches(monkeypatch):
+    """valkey #3438 under a soak's load: slots were assigned and the replicas synced, yet one node kept
+    reporting cluster_state fail past the old 30 s health wait (cluster-node-timeout 1000 marks a slow peer
+    down), so provisioning failed a cluster that was healthy seconds later."""
+
+    clock = VirtualClock().install(monkeypatch, queries)
+    last_slot = cluster_nodes.HASH_SLOTS - 1
+    nodes = [
+        instance("valkey-0", slot_start=0, slot_end=last_slot, cluster_node_id="n0"),
+        instance("valkey-1", "replica", 7001, primary_id="valkey-0", cluster_node_id="n1"),
+    ]
+    rows = FakeCluster({7000: ("n0", None, f"0-{last_slot}"), 7001: ("n1", 7000, "")})
+
+    def client(me, cleared_at):
+        def execute(*args):
+            if args[:2] == ("CLUSTER", "NODES"):
+                return rows._cluster_nodes(me)
+            state = "ok" if clock.elapsed >= cleared_at else "fail"
+            return (
+                f"cluster_state:{state}\r\ncluster_slots_assigned:{cluster_nodes.HASH_SLOTS}\r\n"
+                "cluster_slots_fail:0\r\n"
+            )
+
+        info = {"role": "master", "connected_slaves": 1} if me == 7000 else _replica_info()
+        return Mock(execute_command=Mock(side_effect=execute), info=Mock(return_value=info))
+
+    def formed(cleared_at):
+        clock.elapsed = 0.0
+        formation = Formation()
+        clients = {node.port: client(node.port, cleared_at) for node in nodes}
+        formation.get_client = lambda node: clients[node.port]
+        formation.reset_cluster_state = Mock()
+        formation.cluster_meet = Mock()
+        formation.assign_and_verify_slots = Mock(return_value={"valkey-0": "n0"})
+        formation.setup_and_sync_replication = Mock()
+        formation.form(nodes)
+
+    formed(cleared_at=45.0)  # past the old 30 s wait, within SETTLE_TIMEOUT_S
+    assert 45.0 <= clock.elapsed <= SETTLE_TIMEOUT_S, "waited out the fail-state window instead of erroring at 30 s"
+
+    # A state that never clears still fails provisioning, with the problem seen.
+    with pytest.raises(LocalDeploymentError, match=r"not healthy within 60s: cluster_state is fail"):
+        formed(cleared_at=float("inf"))
 
 
 def test_each_replica_link_seen_up_counts_although_another_replicas_info_times_out(monkeypatch):

@@ -17,6 +17,12 @@ from .queries import WaitInterruptedError, pause, query_cluster_info, query_repl
 
 logger = logging.getLogger(__name__)
 
+# How long a formed deployment may take to look healthy. Under a soak's load a slow peer is marked down
+# (cluster-node-timeout 1000) and a node reports cluster_state fail well past 30 s although every slot is
+# assigned; the health wait outlasts that window, as the slot and instance-start waits do, and a healthy
+# deployment is no slower for the margin.
+SETTLE_TIMEOUT_S = 60.0
+
 
 class Formation:
     """Sets up replication or cluster mode for the instances a ProcessManager spawned, and checks their health."""
@@ -305,19 +311,21 @@ class Formation:
             if any(node.role == "replica" for node in nodes):
                 self.setup_primary_replica_replication(nodes)
                 primary, replicas = self._primary_replica_layout(nodes)
-                return self._settled(lambda: self._primary_replica_problem(primary, replicas), "replicas", 30.0, 1.0)
+                return self._settled(
+                    lambda: self._primary_replica_problem(primary, replicas), "replicas", SETTLE_TIMEOUT_S, 1.0
+                )
             if len(nodes) != 1 or nodes[0].role != "primary":
                 return "a standalone deployment without replicas is one primary"
-            return self._settled(lambda: self._standalone_problem(nodes[0]), "standalone", 30.0, 1.0)
+            return self._settled(lambda: self._standalone_problem(nodes[0]), "standalone", SETTLE_TIMEOUT_S, 1.0)
 
         self.reset_cluster_state(nodes)
         self.cluster_meet(nodes)
         primary_ids = self.assign_and_verify_slots(nodes)
         self.setup_and_sync_replication(nodes, primary_ids)
-        return self._settled(lambda: self._cluster_problem(nodes), "cluster", 30.0, 1.0)
+        return self._settled(lambda: self._cluster_problem(nodes), "cluster", SETTLE_TIMEOUT_S, 1.0)
 
     def form(self, nodes: list[InstanceInfo], mode: DeploymentMode = DeploymentMode.CLUSTER) -> None:
-        """Form ``mode`` on the spawned ``nodes`` and wait up to 30 s for it to be healthy.
+        """Form ``mode`` on the spawned ``nodes`` and wait up to :data:`SETTLE_TIMEOUT_S` for it to be healthy.
 
         Raises :class:`LocalDeploymentError` naming what failed, or
         :class:`~.queries.WaitInterruptedError` at the run's deadline. The
@@ -336,7 +344,8 @@ class Formation:
             self.close_connections()
         if problem:
             raise LocalDeploymentError(
-                f"the {mode.value} deployment was not healthy within 30s: {problem}; check the instance logs"
+                f"the {mode.value} deployment was not healthy within {SETTLE_TIMEOUT_S:.0f}s: {problem}; "
+                "check the instance logs"
             )
 
     def close_connections(self) -> None:
