@@ -564,7 +564,9 @@ single standalone node with a replica, and before one to three commands,
 also drawn, the check restarts a node or sends it `DEBUG RELOAD`; replies are
 unjudged, but a node that does not come back is a crash, a failed `DEBUG
 RELOAD` is `reload-failed`, a node whose `DEBUG DIGEST` differs afterwards is
-`lost-data` (judged only when it holds no expiring key or hash field), and a
+`lost-data` (judged only when it holds no expiring key or hash field, its
+digest holds still for a moment before the fault, and in a cluster it owns the
+same slots before and after), and a
 replica must reach its primary's digest after its restarts and at the end
 (`replica-diverged`); a passing outcome lists the faults and the persistence.
 `acl` and

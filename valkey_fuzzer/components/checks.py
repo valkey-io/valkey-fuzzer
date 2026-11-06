@@ -50,6 +50,8 @@ _FAULTS = ("restart", "reload")
 # How the faults check's servers persist their data across a restart (private servers save nothing otherwise):
 # an RDB saved at shutdown, or the AOF.
 _PERSISTENCE = ({"save": "3600 1"}, {"appendonly": "yes"})
+# How long a node's DEBUG DIGEST must hold still before a fault for its data to be judged across it.
+_SETTLE_S = 0.2
 # Every compact encoding off: a hash, set, or sorted set is never a listpack or intset, and a list of two or more
 # items is a quicklist of one-item nodes.
 _ENCODINGS = {
@@ -269,6 +271,15 @@ def _volatile(side: Any, index: int) -> bool:
         dict(item.split("=", 1) for item in value.split(",") if "=" in item) for value in _fields(record).values()
     )
     return any(int(db.get("expires", 0)) or int(db.get("keys_with_volatile_items", 0)) for db in databases)
+
+
+def _owned_slots(side: Any, index: int) -> Optional[tuple[str, ...]]:
+    """The slots (and slot ranges) node ``index`` of a cluster ``side`` owns, from its CLUSTER NODES; None if
+    unread."""
+
+    record = _ask(side, index, "CLUSTER", "NODES")
+    myself = next((line.split() for line in str(record.get("reply", "")).splitlines() if "myself" in line), None)
+    return None if "reply" not in record or myself is None else tuple(myself[8:])
 
 
 def _ping(side: Any, index: int) -> dict[str, Any]:
@@ -785,6 +796,13 @@ class _Checks:
         # What the check did, to reproduce it: the run's seed draws the same schedule again.
         return {**outcome, "faults": schedule, "persistence": persistence} if outcome["outcome"] == "pass" else outcome
 
+    def settled_digest(self, side: Any, node: int) -> Optional[dict[str, Any]]:
+        """Node ``node``'s DEBUG DIGEST if it holds still for a moment, else None (something changes its data)."""
+
+        first = _ask(side, node, "DEBUG", "DIGEST")
+        self.context.sleep(_SETTLE_S)
+        return first if _ask(side, node, "DEBUG", "DIGEST") == first else None
+
     def loaded(self, side: Any, node: int) -> bool:
         """Wait until node ``node`` of ``side`` no longer loads its data: whether it did."""
 
@@ -804,8 +822,11 @@ class _Checks:
             synced, state = self.converged((side, 0), (side, replica))
             if not synced:
                 return self.diverged("faults", "replica-diverged", synced, state, fault=dict(fault))
-        # The node must keep its data, judged when nothing it holds can expire meanwhile.
-        before = None if _volatile(side, node) else _ask(side, node, "DEBUG", "DIGEST")
+        # The node must keep its data, judged when nothing else changes it meanwhile: nothing it holds can expire,
+        # its data holds still (no asynchronous work, as a slot migration, moves it), and in a cluster it owns the
+        # same slots before and after.
+        before = None if _volatile(side, node) else self.settled_digest(side, node)
+        slots = _owned_slots(side, node) if self.config["cluster"] else None
         if fault["fault"] == "reload":
             reloaded = _ask(side, node, "DEBUG", "RELOAD")
             if "reply" not in reloaded:
@@ -826,7 +847,7 @@ class _Checks:
                     f"node {node} was still loading {_SYNC_TIMEOUT_S:g}s after a restart before "
                     f"command {fault['before']}"
                 )
-        if before is not None and "reply" in before:
+        if before is not None and "reply" in before and (slots is None or _owned_slots(side, node) == slots):
             after = _ask(side, node, "DEBUG", "DIGEST")
             if "reply" in after and after != before:
                 return _failed(

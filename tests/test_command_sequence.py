@@ -1558,6 +1558,42 @@ def test_a_sequence_that_writes_unreplicated_keys_persists_them_by_rdb(builds, m
     assert persistences == {str({"save": "3600 1"})}
 
 
+def test_a_node_whose_data_moves_on_its_own_is_not_judged_across_a_fault(builds, monkeypatch):
+    # The walk's test of valkey#4559 replayed: a slot migration still moved node 0's keys while the check
+    # restarted it, so its data changed across the restart without any loss.
+    monkeypatch.setattr(checks, "_FAULTS", ("restart",))
+    digests = iter(range(1000))
+    _replicating(lambda server: str(next(digests)).encode())
+    for build in BUILDS.values():
+        build.replies[("INFO", "keyspace")] = _PERSISTENT
+        build.replies[("CLUSTER", "INFO")] = b"cluster_state:ok\r\ncluster_known_nodes:2\r\n"
+    result, value = run(builds, _WRITES, cluster=True, nodes=2, checks={"faults": True})
+
+    assert result.status.value == "PASS", result.summary
+    assert _check(value, "faults")["outcome"] == "pass"
+
+
+@pytest.mark.parametrize("moved", [False, True])
+def test_a_cluster_nodes_data_is_judged_only_while_it_owns_the_same_slots(builds, monkeypatch, moved):
+    monkeypatch.setattr(checks, "_FAULTS", ("restart",))
+    _replicating(lambda server: b"d2" if server.shut_downs else b"d1")
+
+    def nodes(server):
+        slots = "0-8191" if moved and server.shut_downs else "0-16383"
+        return f"{server.id} 127.0.0.1:1@2 myself,master - 0 0 1 connected {slots}\n".encode()
+
+    for build in BUILDS.values():
+        build.replies[("INFO", "keyspace")] = _PERSISTENT
+        build.replies[("CLUSTER", "NODES")] = nodes
+        build.replies[("CLUSTER", "INFO")] = b"cluster_state:ok\r\ncluster_known_nodes:2\r\n"
+    result, _ = run(builds, _WRITES, cluster=True, nodes=2, checks={"faults": True})
+
+    if moved:
+        assert result.status.value == "PASS", result.summary
+    else:
+        assert result.status.value == "FAIL" and result.diagnostics["reason"] == "lost-data"
+
+
 def test_a_restarted_nodes_data_is_judged_once_it_loaded(builds, monkeypatch):
     # The walk's test of valkey#5170 replayed: a replica restarted from its AOF answered while it still loaded it,
     # and DEBUG DIGEST then digested the empty dataset loaded so far.
