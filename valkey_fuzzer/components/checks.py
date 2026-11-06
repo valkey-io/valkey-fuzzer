@@ -740,6 +740,9 @@ class _Checks:
             for before in sorted(gaps)
         ]
         persistence = rng.choice(_PERSISTENCE)
+        if _writes_unreplicated(self.commands):
+            # DEBUG POPULATE's keys reach no AOF (fuzzer#86): only an RDB saved at shutdown keeps them.
+            persistence = _PERSISTENCE[0]
         side, failed = self.start(
             "candidate.faults", nodes=nodes + (replica is not None), options={**_QUICK_SYNC, **persistence}
         )

@@ -1546,6 +1546,18 @@ def test_a_replicas_data_is_judged_once_it_caught_up(builds, monkeypatch):
     assert result.status.value == "PASS", result.summary
 
 
+def test_a_sequence_that_writes_unreplicated_keys_persists_them_by_rdb(builds, monkeypatch):
+    # The walk's test of valkey#3640 (fuzzer#86): DEBUG POPULATE's keys reach no AOF, so a node restarted from its
+    # AOF came back without them.
+    monkeypatch.setattr(checks, "_PERSISTENCE", ({"save": "3600 1"}, {"appendonly": "yes"}))
+    commands = [{"command": ["DEBUG", "POPULATE", 10]}, *_WRITES]
+    persistences = set()
+    for seed in range(1, 9):
+        _, value = run(builds, commands, seed=seed, checks={"faults": True})
+        persistences.add(str(_check(value, "faults")["persistence"]))
+    assert persistences == {str({"save": "3600 1"})}
+
+
 def test_a_restarted_nodes_data_is_judged_once_it_loaded(builds, monkeypatch):
     # The walk's test of valkey#5170 replayed: a replica restarted from its AOF answered while it still loaded it,
     # and DEBUG DIGEST then digested the empty dataset loaded so far.
