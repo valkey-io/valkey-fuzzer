@@ -943,6 +943,9 @@ class _Checks:
             self.finish(side)
         if not synced and state.get("link") == "up" and state["primary"]["offset"] == state["replica"]["offset"]:
             synced = state["replica"]["digest"] == self.own_digest()
+        # Refusing to load what only the parent writes, as on the load path (fuzzer#84).
+        if changed and side.exited is not None and not side.crashed():
+            return _skipped(_CHANGED.format(changed))
         decided = self.judge("compat", side, failed)
         if decided is not None or synced:
             return decided or {"outcome": "pass"}

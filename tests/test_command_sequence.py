@@ -1926,6 +1926,41 @@ def test_a_load_the_merge_hardens_to_refuse_is_skipped_not_a_crash(builds, monke
         assert result.crash and load["diagnostics"]["crashes"]["candidate"].endswith("rdb file reading failure.")
 
 
+@pytest.mark.parametrize(("crash", "outcome"), [(False, "skipped"), (True, "fail")])
+def test_a_sync_the_merge_hardens_to_refuse_is_skipped_not_a_crash(builds, monkeypatch, crash, outcome):
+    # As in the walk's test of valkey-io/valkey#4073 (fuzzer#84): the parent accepts a stream whose consumers share
+    # a pending entry, which the merge's loader refuses, so the candidate replicating the parent exits loading its
+    # data with "Terminating server after rdb file reading failure."; a crash loading it is still a finding.
+    monkeypatch.setattr(checks, "_SYNC_TIMEOUT_S", 0.2)
+    write = ("RESTORE", "k", "0", "mangled")
+    parent, candidate = BUILDS[builds["parent"]], BUILDS[builds["candidate"]]
+
+    def replication(server):
+        if server.build is candidate and any(sent[0] == "REPLICAOF" for sent in server.sent):
+            if crash:
+                server.die()
+            else:
+                with open(server.log_path, "a") as log:
+                    log.write("1:S 06 Nov 2026 22:22:31.526 # Terminating server after rdb file reading failure.\n")
+                server.process.returncode = 1
+            return CLOSE
+        return b"# Replication\r\nmaster_link_status:up\r\nmaster_repl_offset:42\r\n"
+
+    _replicating()
+    _saving(parent)
+    parent.replies[write] = b"OK"
+    candidate.replies[write] = Error("ERR Bad data format")
+    for build in BUILDS.values():
+        build.replies[("INFO", "replication")] = replication
+        build.replies[("COMMAND", "INFO", "RESTORE")] = [[b"restore", -4, [], 1, 1, 1, [b"@write"], [], [], []]]
+    commands = [{"command": list(write), "expect_difference": True, "expect": {"error": "Bad data"}}]
+    result, value = run(builds, commands, checks={"compat": True})
+
+    sync = _check(value, "compat")["sync"]
+    assert sync["outcome"] == outcome, sync
+    assert result.crash is crash
+
+
 def test_a_parent_that_crashes_making_the_replicas_rdb_fails_no_candidate(builds, monkeypatch):
     # The parent's fork child asserts saving data the merge fixed, so no RDB reaches the candidate (fuzzer#63).
     monkeypatch.setattr(checks, "_SYNC_TIMEOUT_S", 0.2)
