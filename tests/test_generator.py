@@ -11,7 +11,7 @@ from valkey_fuzzer.components import EXPERIMENT_DIRECTORY, experiments
 from valkey_fuzzer.components.generators import renegotiates
 from valkey_fuzzer.deployment.local.provider import local_deployment_provider_registrations
 from valkey_fuzzer.documents import merge
-from valkey_fuzzer.generator import MAX_ATTEMPTS, Exclusion, GeneratorError, generate
+from valkey_fuzzer.generator import MAX_ATTEMPTS, Exclusion, GeneratorBlock, GeneratorError, generate, installed_pools
 from valkey_fuzzer.registrations import GeneratorRegistration
 from valkey_fuzzer.runner import RunnerError
 from valkey_fuzzer.schema import ScenarioCompileError
@@ -278,3 +278,33 @@ def test_a_base_mapping_replaces_a_drawn_reference_instead_of_merging_into_it():
     drawn = {"deployment": {"server_config": {"$ref": "inputs.config"}, "replicas_per_primary": 1}}
     base = {"deployment": {"server_config": {"maxmemory": "1mb"}}}
     assert merge(drawn, base) == {"deployment": {"server_config": {"maxmemory": "1mb"}, "replicas_per_primary": 1}}
+
+
+def test_a_pinned_draw_is_kept_and_the_hooks_drawn_after_a_redrawn_dimension_are_drawn_again(tmp_path):
+    # waves derives from count, and the scenario hook from every input: both must follow a changed count.
+    hooks = {
+        "waves": lambda rng, scenario: [scenario["experiment"]["inputs"]["count"]] * rng.randint(1, 3),
+        "label": lambda rng, scenario: {"experiment": {"inputs": {"label": f"{rng.random()}"}}},
+    }
+    block = {"hook": "tests.generator.label", "inputs": {"waves": {"hook": "tests.generator.waves"}}}
+    runtime = _runtime(tmp_path, block, hooks=hooks)
+    parsed = GeneratorBlock.parse(runtime.catalog.experiments.resolve("tests.random"), installed_pools(runtime.catalog))
+    parent = _generate(runtime, 1)
+    assert next(iter(parent.draws)) == "deployment.mode" and list(parent.draws)[-2:] == ["inputs.waves", "hook"]
+    assert parent.provenance["draws"] == parent.draws
+
+    # Every draw kept: only the seed differs.
+    same = _generate(runtime, 2, pinned=parsed.kept(parent.draws, None))
+    assert same.draws == parent.draws and same.scenario["seed"] == 2
+
+    # count drawn again: every other draw kept, the hooks after it drawn again and consistent with it.
+    pinned = parsed.kept(parent.draws, "inputs.count")
+    assert set(pinned) == set(parent.draws) - {"inputs.count", "inputs.waves", "hook"}
+    for seed in range(2, 12):
+        child = _generate(runtime, seed, pinned=pinned)
+        assert all(child.draws[name] == value for name, value in pinned.items())
+        assert set(child.scenario["experiment"]["inputs"]["waves"]) == {child.draws["inputs.count"]}
+        assert child.draws["hook"] != parent.draws["hook"]
+
+    # A hooked input drawn again keeps every draw before it, and the scenario hook after it is drawn again.
+    assert set(parsed.kept(parent.draws, "inputs.waves")) == set(parent.draws) - {"inputs.waves", "hook"}

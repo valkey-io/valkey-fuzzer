@@ -1,6 +1,6 @@
-"""A run's coverage tuple: the semantic combination its plan exercises.
+"""A run's coverage: the semantic combination its plan exercises, and the Valkey code it reached.
 
-Every run report carries the tuple and its key (``coverage``), and the batch
+Every run report carries the coverage tuple and its key (``coverage``), and the batch
 summary counts the distinct keys each experiment covered. A tuple is built only
 from the plan's generic structure: experiment, deployment provider, the
 planned instances (their roles, shards, and server config), the rest of the
@@ -8,12 +8,19 @@ deployment document but for where it places the deployment on the host,
 inputs, the workload/action/fault/observer/oracle composition, and the
 artifact, resource, and policy declarations with their config. Nothing here
 interprets experiment or component IDs, or a provider's deployment document.
+
+Code coverage (:func:`gcov_features`) comes from a Valkey built with ``make
+gcov``: every process the run starts (servers, their fork children, and tools)
+inherits ``GCOV_PREFIX`` and writes its ``.gcda`` counters under that
+directory when it exits, where gcov merges the processes of one run.
 """
 
 import hashlib
 import json
+import subprocess
 from collections import Counter
 from collections.abc import Collection
+from pathlib import Path
 from typing import Any
 
 from ._data import to_plain_data
@@ -99,3 +106,44 @@ def coverage_tuple(outcome: RunOutcome, host_fields: Collection[str] = ()) -> di
         "status": outcome.status.value,
         "evidence": sorted({item.evidence_id for item in outcome.all_evidence}),
     }
+
+
+def gcov_features(directory: str, gcov: str = "gcov") -> list[str]:
+    """The Valkey lines (``file:line``) and branches (``file:line:index``) a run's processes reached, sorted.
+
+    ``directory`` is the ``GCOV_PREFIX`` the processes wrote their ``.gcda`` files under (each at the absolute
+    path of its object file); ``gcov`` reads them with the ``.gcno`` notes the build left next to the objects.
+    A process killed with SIGKILL writes nothing.
+    """
+
+    root = Path(directory)
+    profiles = sorted(root.rglob("*.gcda"))
+    if not profiles:
+        return []
+    for profile in profiles:
+        notes = profile.with_suffix(".gcno")
+        if not notes.exists():
+            notes.symlink_to(Path("/", profile.relative_to(root)).with_suffix(".gcno"))
+    output = subprocess.run(
+        [gcov, "--json-format", "--stdout", *map(str, profiles)],
+        cwd=directory,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    features: set[str] = set()
+    decoder, position = json.JSONDecoder(), 0
+    while True:
+        while position < len(output) and output[position].isspace():
+            position += 1
+        if position == len(output):
+            return sorted(features)
+        document, position = decoder.raw_decode(output, position)
+        for source in document.get("files", []):
+            for line in source.get("lines", []):
+                where = f"{source['file']}:{line['line_number']}"
+                if line["count"]:
+                    features.add(where)
+                features.update(
+                    f"{where}:{index}" for index, arc in enumerate(line.get("branches", [])) if arc["count"]
+                )

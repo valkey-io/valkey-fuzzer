@@ -29,6 +29,12 @@ def register(subparsers: Any) -> None:
     sources.add_argument("--seeds", type=positive_count, metavar="N", help="Seeds per experiment (default: profile's)")
     sources.add_argument("--first-seed", type=int, metavar="N", help="First seed (default: a fresh one)")
     sources.add_argument(
+        "--guided",
+        type=positive_count,
+        metavar="N",
+        help="Then N runs derived from the runs that reached new Valkey code (needs a 'make gcov' build)",
+    )
+    sources.add_argument(
         "--exclude",
         dest="excludes",
         action="append",
@@ -90,12 +96,13 @@ def _cli_sources(args: argparse.Namespace) -> list[dict[str, Any]]:
             "seeds": args.seeds,
             "first_seed": args.first_seed,
             "excludes": [str(item) for item in args.excludes],
+            "guided": args.guided,
         }
         if args.base:
             random_source["base"] = service_for(args).read_base(args.base)
         sources.append({"random": random_source})
-    elif args.seeds or args.first_seed is not None or args.excludes or args.base:
-        raise BatchError("--seeds, --first-seed, --exclude, and --base need --random")
+    elif args.seeds or args.first_seed is not None or args.excludes or args.base or args.guided:
+        raise BatchError("--seeds, --first-seed, --exclude, --base, and --guided need --random")
     if args.scenarios:
         sources.append({"scenarios": args.scenarios})
     if args.zoo:
@@ -135,6 +142,9 @@ def _print_summary(summary: dict[str, Any]) -> None:
             print(f"    {leak['run']}: {leak['kind']} {leak['target']} ({leak['action']})")
     if summary["invalid"]:
         print(f"  Matrix cases that do not compile (not run): {len(summary['invalid'])}")
+    if summary["code_coverage"] is not None:
+        covered = summary["code_coverage"]
+        print(f"  Code coverage: {covered['covered']} lines and branches; corpus of {covered['corpus']} run(s)")
     print(f"Status: {summary['status']}{'' if summary['complete'] else ' (interrupted: resume to finish)'}")
     print(f"Batch: {summary['folder']}")
 
@@ -194,7 +204,8 @@ def batch_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
                 print(f"invalid {case['case']}: {case['error']}")
             for item in (expansion.zoo or {}).get("skipped", ()):
                 print(f"skipped zoo case {item['case']}: {item['reason']}")
-            print(f"{len(expansion.jobs)} job(s)")
+            guided = sum(source["random"]["guided"] for source in sources if "random" in source)
+            print(f"{len(expansion.jobs)} job(s)" + (f", then {guided} guided job(s)" if guided else ""))
             return EXIT_SUCCESS
         folder = args.out or new_report_folder(os.path.join(service.report_root, "batches"), options.batch_id)
         runner = BatchRunner.create(folder, options, sources, expansion)

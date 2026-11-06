@@ -332,12 +332,13 @@ class RunService:
         profile: Optional[str] = None,
         valkey_binary: Optional[str] = None,
         keep_own_binary: bool = False,
+        pinned: Optional[Mapping[str, Any]] = None,
     ) -> Generated:
         """A valid scenario drawn from ``seed`` for ``experiment`` (one of the opted-in ones when None).
 
         ``profile`` names the installed search profile that samples the experiment's legal space;
         ``valkey_binary`` is the binary the drawn deployment runs, which hooks see (with
-        ``keep_own_binary``, only when ``base`` names none).
+        ``keep_own_binary``, only when ``base`` names none); ``pinned`` holds the draws it keeps.
         """
 
         catalog = self.catalog
@@ -351,6 +352,7 @@ class RunService:
             profile=None if profile is None else find_profile(catalog, profile),
             valkey_binary=valkey_binary,
             keep_own_binary=keep_own_binary,
+            pinned=pinned,
         )
 
     def _checked_plan(self, scenario: Mapping[str, Any]) -> ExecutionPlan:
@@ -371,13 +373,15 @@ class RunService:
         profile: Optional[str] = None,
         free_ports: bool = True,
         keep_own_binary: bool = False,
+        pinned: Optional[Mapping[str, Any]] = None,
     ) -> PreparedRun:
         """Generate and compile one scenario (``run --random`` / ``run --seed``); a random seed when None.
 
         ``base`` is a partial scenario that overrides the draws; a
         ``valkey_binary`` override is applied before the hooks run, so they
         see the binary; with ``keep_own_binary`` (a batch's binary for
-        scenarios that name none) only when ``base`` names none. ``free_ports`` moves a scenario whose planned ports
+        scenarios that name none) only when ``base`` names none; ``pinned`` holds the draws it keeps
+        (:meth:`generate`). ``free_ports`` moves a scenario whose planned ports
         are busy to free ones (the deployment provider's ``relocate_ports``
         hook); the batch runner turns it off, because its workers own their
         port blocks.
@@ -391,6 +395,7 @@ class RunService:
             profile=profile,
             valkey_binary=valkey_binary,
             keep_own_binary=keep_own_binary,
+            pinned=pinned,
         )
         relocate = deployment_registration(drawn.plan, self.catalog).relocate_ports
         moved, note = relocate(drawn.plan) if free_ports and relocate is not None else ({}, None)
