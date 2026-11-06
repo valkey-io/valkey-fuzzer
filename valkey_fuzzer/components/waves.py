@@ -496,8 +496,10 @@ class WaveRun:
         """
 
         members = self.kill_view()
-        shard = next((member.shard for member in members or () if member.instance_id == target), None)
-        if not self.claim(record, [target], shards=() if shard is None else (shard,)):
+        live = next((member.shard for member in members or () if member.instance_id == target), None)
+        # And the shard it was planned in: a replica a failover is promoting may show in none mid-switch.
+        shards = sorted({shard for shard in (live, record["shard"]) if shard is not None})
+        if not self.claim(record, [target], shards=shards):
             return False, None
         return True, self.kill_view()
 

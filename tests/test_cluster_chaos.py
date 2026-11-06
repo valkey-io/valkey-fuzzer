@@ -431,6 +431,26 @@ def test_a_kill_waits_for_its_shards_failover_and_is_judged_by_the_roles_it_left
     assert evidence(result, "valkey.chaos.schedule")["all_kills"][0]["role"] == "primary"
 
 
+class _MidSwitch(_SlowPromotion):
+    """While the failover runs, the live view shows the replica it promotes in no shard (its slots are moving)."""
+
+    def failover(self, shard, *, force=False, timeout=60.0, stopped_instances=(), rng=None):
+        promoted = next(n for n in self.instances if n.shard_id == shard and n.role == "replica")
+        promoted.shard_id = None
+        time.sleep(0.3)
+        promoted.shard_id = shard
+        return super().failover(shard, force=force, timeout=timeout, stopped_instances=stopped_instances, rng=rng)
+
+
+def test_a_kill_waits_for_the_failover_of_the_shard_it_was_planned_in_when_the_live_view_shows_none():
+    # Soak s1975728775: valkey-8 won its forced election in the millisecond it was asked; the kill planned for it
+    # read no shard for it, did not wait for the failover, and killed a second primary of three.
+    handle = _MidSwitch()
+    result, _ = run_chaos(handle, waves=[[kill("valkey-4"), failover(1, force=True), kill("valkey-3", delay_s=0.1)]])
+    assert ("kill", "valkey-3") not in [call[:2] for call in handle.calls]
+    assert chaos_operation(result, "1.2")["skipped"] == "no longer quorum-safe"
+
+
 # ---------------------------------------------------------------------------
 # Final validation, liveness, and the experiment through the real compiler
 # ---------------------------------------------------------------------------
