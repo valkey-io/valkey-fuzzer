@@ -379,6 +379,7 @@ and `modules_parent`, on another build of a module.
 | `resp` | 2 or 3 | 2 | The protocol of every connection. |
 | `timeout_s` | number, 0.1 to 3600 | 10 | Per command: a reply that takes longer is `unanswered`, and the sequence stops there. |
 | `commands` | list of mappings | | The sequence, below. |
+| `judge_replies` | bool | `true` | `false`: replies are recorded, never judged; only a crash, a protocol error, a command with no reply, and the checks decide the verdict (a sequence replayed only for its checks). |
 | `checks` | mapping or null | `null` | With `compare_with` (or `modules_parent`): `{variants: bool, replica: bool, acl: bool, concurrency: 0 to 16, compat: bool, faults: bool}`, each off unless set, below. `compat` needs `compare_with`. |
 
 Each command has:

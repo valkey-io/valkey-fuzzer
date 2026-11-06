@@ -202,6 +202,10 @@ _COMMANDS_FIELDS = {
     "resp": ConfigField(int, default=2, choices=(2, 3)),
     "timeout_s": ConfigField(float, default=10.0, minimum=0.1, maximum=3600),
     "commands": ConfigField(list, items=_SEQUENCE_COMMAND),
+    # False: replies are recorded, never judged (no expect, comparison, or reached change decides the verdict), so
+    # only a crash, a protocol error, a command with no reply, and the checks do; for a sequence replayed only for
+    # its checks.
+    "judge_replies": ConfigField(bool, default=True),
     # Checks that run the sequence again on fresh candidate servers (see checks.py); each is off unless set.
     "checks": mapping_of(
         {
@@ -1079,7 +1083,8 @@ class CommandsAction:
                 replies = _run_sequence(target, config["commands"], context)
             finally:
                 target.close()
-            problems.extend(f"{instance_id}: {text}" for text in _violations(config["commands"], replies))
+            if config["judge_replies"]:
+                problems.extend(f"{instance_id}: {text}" for text in _violations(config["commands"], replies))
             unanswered.extend(f"{instance_id}: {text}" for text in _unanswered(config["commands"], replies))
             broken.extend(
                 {"instance_id": instance_id, **item} for item in _protocol_errors(config["commands"], replies)
@@ -1166,6 +1171,8 @@ class CommandsAction:
                 server.finish(context, spec, commands)
 
         reached, unexplained, unreached, uncompared = _compare(commands, candidate, parent)
+        if not config["judge_replies"]:
+            unexplained, unreached = [], []
         record = _record(
             config,
             _side(candidate.replies, commands),
@@ -1198,13 +1205,13 @@ class CommandsAction:
                 artifacts=[*candidate.logs, *parent.logs, *check_logs],
             ),
         )
-        violations = _violations(commands, candidate.replies)
+        violations = _violations(commands, candidate.replies) if config["judge_replies"] else []
         # A violated expect on which the parent replied the same is about behaviour the change did not touch:
         # nearly always the test's own expectation, not the change. Recorded, never a FAIL.
         disputed = [
             index
             for index in _violating(commands, candidate.replies)
-            if _same_on_parent(commands, index, candidate, parent)
+            if config["judge_replies"] and _same_on_parent(commands, index, candidate, parent)
         ]
         violations = [
             text for index, text in zip(_violating(commands, candidate.replies), violations) if index not in disputed

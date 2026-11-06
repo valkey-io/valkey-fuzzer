@@ -417,6 +417,29 @@ def test_compare_modes(builds, mode, candidate, parent, status):
 # ---------------------------------------------------------------------------
 
 
+def test_unjudged_replies_leave_the_verdict_to_crashes_and_checks(builds, monkeypatch):
+    # A walk test replayed for its faults check alone (fuzzer#83's replay): its own expectations, the parent's
+    # replies, and the change it once reached decide nothing.
+    BUILDS[builds["candidate"]].replies = {("LRANGE", "l", "0", "-1"): [b"a", b"x"], ("TIME",): b"1"}
+    BUILDS[builds["parent"]].replies = {("LRANGE", "l", "0", "-1"): [b"a", b"x"], ("TIME",): b"2"}
+    commands = [
+        {"command": ["LRANGE", "l", 0, -1], "expect_difference": True, "expect": {"equals": ["a", "b"]}},
+        {"command": ["TIME"]},
+        {"command": ["GET", "k"], "expect": {"error": "WRONGTYPE"}},
+    ]
+    result, value = run(builds, commands, judge_replies=False)
+
+    assert result.status.value == "PASS", result.summary
+    assert value["violating"] == [0, 2]
+    # A check still decides.
+    monkeypatch.setattr(checks, "_FAULTS", ("reload",))
+    _replicating()
+    for build in BUILDS.values():
+        build.replies[("DEBUG", "RELOAD")] = Error("ERR Error trying to load the RDB dump")
+    result, _ = run(builds, commands, judge_replies=False, checks={"faults": True})
+    assert result.status.value == "FAIL" and result.diagnostics["reason"] == "reload-failed"
+
+
 def test_an_expect_the_candidate_violates_is_fail(builds):
     # The candidate replies differently from the parent, and wrongly: the change broke it.
     BUILDS[builds["candidate"]].replies = {("LRANGE", "l", "0", "-1"): [b"a", b"x"]}
