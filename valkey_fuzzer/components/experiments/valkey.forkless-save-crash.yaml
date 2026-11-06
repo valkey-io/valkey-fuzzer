@@ -14,7 +14,7 @@
 # then acknowledges writes until it learns it was replaced, and loses them.
 # The instances run with cluster-replica-no-failover, so the restarted
 # primary keeps its slots and the loss window ends at its exit.
-extends: [valkey.base, valkey.forkless, valkey.compression]
+extends: [valkey.base, valkey.forkless, valkey.compression, valkey.history]
 id: valkey.forkless-save-crash
 deployment:
   modes: [standalone, cluster]

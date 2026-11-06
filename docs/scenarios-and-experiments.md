@@ -442,13 +442,14 @@ loaded with `--experiment-dir` can extend them. Merge rules:
 - `required_events`, `required_evidence`, and `inputs.required` are unions.
 - Every other field is replaced.
 
-The Valkey components ship twelve fragments:
+The Valkey components ship thirteen fragments:
 
 | Fragment | Adds |
 | --- | --- |
 | `valkey.liveness` | the `liveness` oracle ([`valkey.oracle.liveness`](components.md#valkeyoracleliveness)) |
 | `valkey.writes` | `valkey.liveness`; the `writes` workload ([`valkey.workload.key-value`](components.md#valkeyworkloadkey-value)); the `data` oracle ([`valkey.oracle.ledger`](components.md#valkeyoracleledger)) with required evidence `valkey.data.ledger-verified`; the inputs `stable_keys` (default 1000), `mutable_keys` (200), `mutation_rate` (200 per second), and `value_size` (64 bytes), with the ranges [random scenarios](#declaring-what-may-be-randomized) draw them from |
 | `valkey.base` | `valkey.writes` and the `deployment-state` oracle ([`valkey.oracle.deployment-state`](components.md#valkeyoracledeployment-state)) |
+| `valkey.history` | the `history` oracle ([`valkey.oracle.history`](components.md#valkeyoraclehistory)) on the `data` oracle's ledger and loss policy; extend it after `valkey.writes` or `valkey.base`. The chaos experiments extend it: `aof-durability`, `cluster-partition`, `forkless-save-crash`, `mixed-version-cluster`, `repl-compression-mixed-version`, `replication-chaos`, `replication-full-resync`, and `rolling-upgrade` |
 | `valkey.drained-writes` | `valkey.writes`, whose workload performs exactly `operations` operations (input, default 2000) and publishes `writes.drained`; the `drained` action ([`valkey.action.wait-event`](components.md#valkeyactionwait-event)) that waits for it, with `writes.drained` a required event; random scenarios draw 1 to 3000 operations at 500 to 5000 per second |
 | `valkey.reconnect-replicas` | the `drop-replica-links` action ([`valkey.action.command`](components.md#valkeyactioncommand), `CLIENT KILL TYPE replica` on the primaries), then the `links-up` poll (every replica's `master_link_status` is `up`, within 120 s), with `drop-replica-links.completed` a required event; fragments name what `drop-replica-links` follows |
 | `valkey.psync` | `valkey.base` and a partial resync: writes for `disconnect_after_s` (input, default 1), then `valkey.reconnect-replicas` after `run-then-disconnect`, the `info` observer requiring `sync_partial_ok` to advance and `sync_full` not to, and the `logs` observer requiring both sides' PSYNC lines and forbidding a full resync; standalone or cluster with replicas |

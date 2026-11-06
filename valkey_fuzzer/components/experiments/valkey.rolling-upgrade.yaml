@@ -6,7 +6,7 @@
 # The scenario declares both builds as valkey.artifact.local-binary artifacts,
 # starts every instance on the old one (deployment.valkey_binary), and passes
 # the new one as the `to_binary` input: {$ref: artifacts.<id>.binary}.
-extends: [valkey.base]
+extends: [valkey.base, valkey.history]
 id: valkey.rolling-upgrade
 deployment:
   modes: [standalone, cluster]

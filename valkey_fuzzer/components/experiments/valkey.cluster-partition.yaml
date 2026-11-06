@@ -9,7 +9,7 @@
 # and the successor's election.
 #
 # Needs Linux, root, iptables, and deployment.addressing: per_instance_loopback.
-extends: [valkey.base]
+extends: [valkey.base, valkey.history]
 id: valkey.cluster-partition
 deployment:
   modes: [cluster]

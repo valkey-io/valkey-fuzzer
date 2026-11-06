@@ -13,7 +13,7 @@
 # replica loading from disk rewrites the RDB into its own rdbcompression. The
 # `old-build` probe proves the old binary lacks repl-compression; an old
 # binary that has it, or two copies of one build, is a setup error (ERROR).
-extends: [valkey.full-sync, valkey.compression]
+extends: [valkey.full-sync, valkey.compression, valkey.history]
 id: valkey.repl-compression-mixed-version
 deployment:
   modes: [cluster]

@@ -9,7 +9,7 @@
 # stall that never overflowed the limit (the link's codec shrank the stream,
 # the writes were few) did not reach that state, and the run is an ERROR, not
 # a FAIL.
-extends: [valkey.base]
+extends: [valkey.base, valkey.history]
 id: valkey.replication-full-resync
 deployment:
   modes: [standalone, cluster]

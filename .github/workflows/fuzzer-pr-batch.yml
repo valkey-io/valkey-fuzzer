@@ -162,6 +162,18 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e .
 
+      # valkey.oracle.history runs the porcupine linearizability checker from PATH.
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: porcupine/go.mod
+          cache: false
+
+      - name: Build the porcupine checker
+        run: |
+          go -C porcupine build -o "${RUNNER_TEMP}/bin/porcupine"
+          echo "${RUNNER_TEMP}/bin" >> "${GITHUB_PATH}"
+
       # Inputs reach the scripts only through the environment, never the shell.
       - name: Check the inputs and write the scenarios and bundles
         env:

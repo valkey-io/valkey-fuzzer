@@ -125,6 +125,7 @@ a retry succeeded makes the fault, and the run, `ERROR`.
 | [`valkey.observer.cluster-trace`](#valkeyobservercluster-trace) | observer | cluster | records events and epochs as JSONL |
 | [`valkey.oracle.liveness`](#valkeyoracleliveness) | oracle | any | instances alive, no crash reports or forbidden log lines |
 | [`valkey.oracle.ledger`](#valkeyoracleledger) | oracle | any | data matches the workload ledger |
+| [`valkey.oracle.history`](#valkeyoraclehistory) | oracle | any | the workload's history is linearizable (Porcupine) |
 | [`valkey.oracle.rdb-snapshot`](#valkeyoraclerdb-snapshot) | oracle | any | captured RDBs reload with plausible data, in the expected codec |
 | [`valkey.oracle.repl-compression`](#valkeyoraclerepl-compression) | oracle | any | every replication link uses the predicted codec |
 | [`valkey.oracle.deployment-state`](#valkeyoracledeployment-state) | oracle | any | the deployment's state validators pass, with a chaos action's kills and keys |
@@ -178,6 +179,7 @@ schemas.
 | `valkey.oracle.dataset-digest` | none | `valkey.dataset.digest` | `process.private-server` |
 | `valkey.oracle.deployment-state` | none | `valkey.deployment.validated` | none |
 | `valkey.oracle.evidence` | none | none | none |
+| `valkey.oracle.history` | none | `valkey.data.linearizable` | none |
 | `valkey.oracle.ledger` | none | `valkey.data.ledger-verified` | none |
 | `valkey.oracle.liveness` | none | `valkey.liveness.verified` | none |
 | `valkey.oracle.rdb-snapshot` | none | `valkey.rdb.reload-verified` | `process.private-server` |
@@ -259,7 +261,10 @@ observed in a ledger: `ok` (acknowledged, with the `instance_id` that
 acknowledged it), `error` (an error reply such as `OOM` or `READONLY`, or no
 reachable server, so never applied), or `ambiguous` (a timeout or connection error, which may or
 may not have applied). Oracles derive the acceptable final values from that
-ledger. The preload counts as acknowledged writes too: each preloaded key
+ledger, and [`valkey.oracle.history`](#valkeyoraclehistory) checks it as a
+history: each entry is invoked at `t_start` and completes at `t_end` on
+connection `process` (numbered from 1; the writer opens a new connection
+after any failure), and a `get` entry's `reply` is the value it read. The preload counts as acknowledged writes too: each preloaded key
 records when its batch was acknowledged and by which instance, so a key
 preloaded inside a loss window may be lost like any other write. In cluster
 mode it writes through a cluster client that makes one
@@ -1287,6 +1292,65 @@ defaults (`appendonly yes`, `appendfsync everysec`) included.
 missing than the budget allows, a read returned an unacceptable value, or a
 replica does not converge. Evidence: `valkey.data.ledger-verified`, with
 `wait_confirmed_replicas` and `wait_protected_ops` under `wait_replicas`.
+
+### `valkey.oracle.history`
+
+Checks that the workload's history is linearizable: that every mutable key
+behaves as one register, each operation taking effect at one instant between
+its invocation and its completion. It reads every mutable key once more,
+appends those reads to the ledger of the `ledger` oracle's workload, writes
+the history to `history.jsonl` in its artifact directory, and hands it to
+[Porcupine](https://github.com/anishathalye/porcupine), which checks each
+key's history separately. Beyond the ledger oracle's final read, this
+catches a read that returned a value already overwritten (a stale read
+after a failover or a restart) and an acknowledged write that a read saw and
+that later vanished, through any order of concurrent and indeterminate
+operations.
+
+It judges under the loss policy of the [`valkey.oracle.ledger`](#valkeyoracleledger)
+component named by `ledger` (its loss windows, scope, `window_reads`, and
+`WAIT` protection), so it never flags a loss that policy allows:
+
+- an ambiguous write (a timeout or a lost connection), and an acknowledged
+  write the policy lets be lost, are indeterminate: each may take effect at
+  any point after its invocation, or never;
+- a read that returned the value of a write the policy lets be lost is not
+  checked, since the write may be lost after the read; with
+  `window_reads: written`, neither is a read that completed inside a loss
+  window;
+- a rejected write (`error`) is left out: it was not applied;
+- the preload is acknowledged writes on connection 0; stable keys are left
+  to the ledger oracle.
+
+The scenario does not compile when `ledger` is not a `valkey.oracle.ledger`
+component, or when that oracle allows lost writes (`lost_writes_budget`) or
+skips reads (`check_reads: false`), which a history check cannot honor.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `ledger` | string | | The `valkey.oracle.ledger` component's `id`; its `workload` and `converge_timeout_s` apply too. |
+| `timeout_s` | number, 1 to 3600 | 300 | How long Porcupine may search. |
+
+`FAIL` when a key's history is not linearizable, naming the keys
+(`illegal_keys`) and writing Porcupine's visualization of their histories
+to `illegal.html` (`visualization_path`). `ERROR` when the `porcupine`
+checker is not on `PATH`, the final read keeps failing, the check times out,
+or the history is too large to check: Porcupine's memory grows with the
+square of a key's operation count (about 370 MB for 50,000 operations on one
+key), and the oracle refuses a history whose estimate exceeds 2 GB. Evidence:
+`valkey.data.linearizable`, with the operation, key, indeterminate, and
+unchecked-read counts and `history_path`.
+
+The `porcupine` checker is a small Go program in the repository's
+`porcupine/` directory (Go 1.21 or later) that wraps the Porcupine library
+with a register model. Build it onto `PATH` once per host:
+
+```bash
+go -C porcupine build -o "$HOME/.local/bin/porcupine"
+```
+
+The [`valkey.history`](scenarios-and-experiments.md#fragments) fragment adds
+it, as `history` with `ledger: data`.
 
 ### `valkey.oracle.rdb-snapshot`
 
