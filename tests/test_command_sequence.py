@@ -55,6 +55,9 @@ class Build:
         self.replies, self.rejects = dict(replies or {}), set(rejects)
         # Its servers exit at a second start, as from a config file they cannot read.
         self.restart_exits = False
+        # Its servers log a fatal RDB-read refusal and exit when started with a dump.rdb, as a build hardened
+        # to reject bad data does; not a crash.
+        self.rdb_load_exits = False
         self.starts: list[list[str]] = []
         self.sent: list[tuple] = []
         self.connections = 0
@@ -105,6 +108,11 @@ class FakeServer:
         rejected = [name for name in self.arguments[::2] if name[2:] in self.build.rejects]
         if rejected:
             return f"*** FATAL CONFIG FILE ERROR *** Bad directive or wrong number of arguments: {rejected[0]}"
+        if self.build.rdb_load_exits and self.files.get("dump.rdb"):
+            with open(self.log_path, "a") as log:
+                log.write("1:M 03 Nov 2026 10:00:03.000 # Terminating server after rdb file reading failure.\n")
+            self.process.returncode = 1
+            return "Terminating server after rdb file reading failure."
         with open(self.log_path, "w") as log:
             log.write(f"1:M 03 Nov 2026 10:00:00.000 * Ready to accept connections ({self.binary})\n")
         with open(self.output_path, "w") as output:
@@ -1696,6 +1704,45 @@ def test_the_parents_data_need_not_load_when_the_merge_changes_what_a_write_make
             "may hold what the candidate never makes"
         )
         assert result.status.value == "PASS", result.summary
+
+
+@pytest.mark.parametrize(("categories", "outcome"), [([b"@write", b"@string"], "skipped"), ([b"@read"], "fail")])
+def test_a_load_the_merge_hardens_to_refuse_is_skipped_not_a_crash(builds, monkeypatch, categories, outcome):
+    # As in the walk's test of valkey-io/valkey#4381 (fuzzer#79, #80): the parent accepts a malformed stream
+    # the merge hardens the RDB loader to reject, so the candidate logs a fatal "Terminating server after rdb
+    # file reading failure." loading the parent's data. That controlled refusal is not a crash; it is skipped
+    # when the merge changed what a write makes, not reported as a crash the candidate suffered.
+    monkeypatch.setattr(checks, "_SYNC_TIMEOUT_S", 0.2)
+    write = ("RESTORE", "k", "0", "mangled")
+    parent = BUILDS[builds["parent"]]
+    candidate = BUILDS[builds["candidate"]]
+    candidate.rdb_load_exits = True
+
+    def digest(server):
+        return b"d0" if ("SET", "k0", "v") in server.sent else b"empty"
+
+    _replicating(digest)
+    _saving(parent)
+    parent.replies[write] = b"OK"
+    candidate.replies[write] = Error("ERR Bad data format")
+    for build in BUILDS.values():
+        build.replies[("COMMAND", "INFO", "RESTORE")] = [[b"restore", -4, [], 1, 1, 1, categories, [], [], []]]
+    commands = [
+        {"command": ["SET", "k0", "v"]},
+        {"command": ["RESTORE", "k", 0, "mangled"], "expect_difference": True, "expect": {"error": "Bad data"}},
+    ]
+    result, value = run(builds, commands, checks={"compat": True})
+
+    load = _check(value, "compat")["load"]
+    assert load["outcome"] == outcome, load
+    if outcome == "skipped":
+        assert load["reason"] == (
+            "the merge changes what command 1 (RESTORE k 0 mangled) writes, so the parent's data "
+            "may hold what the candidate never makes"
+        )
+        assert not result.crash
+    else:
+        assert result.crash and load["diagnostics"]["crashes"]["candidate"].endswith("rdb file reading failure.")
 
 
 def test_a_parent_that_crashes_making_the_replicas_rdb_fails_no_candidate(builds, monkeypatch):

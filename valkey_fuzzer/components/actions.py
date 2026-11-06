@@ -1003,6 +1003,13 @@ class _Side:
         fatal = next((line for line in map(fatal_exit, logs) if line), None)
         return fatal or f"exited with status {self.exited}"
 
+    def crashed(self) -> bool:
+        """Whether its node's exit is a crash (a sanitizer report, assertion or signal), not a controlled fatal
+        exit it logged on purpose (as a build hardened to reject bad data does on a load it refuses)."""
+
+        logs = self.nodes[self.exited_node or 0].logs
+        return bool(scan_for_crashes({path: path for path in logs}, CRASH_PATTERNS))
+
 
 def _free_ports(count: int) -> list[int]:
     """``count`` distinct TCP ports free on the loopback address right now."""

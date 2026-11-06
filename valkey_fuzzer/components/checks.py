@@ -765,6 +765,11 @@ class _Checks:
         diagnostics = {"reason": "compat-load", "rdb": rdb}
         if failed and side.exited is not None:
             cause = side.crash_cause()
+            # A controlled refusal to load the parent's data (a fatal log, not a crash) is expected when the
+            # merge hardens a loader to reject what the parent wrote: the parent's RDB holds what the candidate
+            # never makes, as on the digest path below.
+            if changed and not side.crashed():
+                return _skipped(_CHANGED.format(changed))
             return _failed(
                 f"the candidate exited loading the parent's RDB: {cause}",
                 {**diagnostics, "check": "compat", "crashes": {"candidate": cause}},
