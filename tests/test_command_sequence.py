@@ -1285,6 +1285,7 @@ def test_a_reply_that_changes_with_the_encoding_is_a_variant_mismatch(builds):
         ["PHSCAN", "z", "big", "0", "COUNT", "1"],
         ["SLOWLOG", "GET", "1"],
         ["TIME"],
+        ["CLUSTER", "INFO"],
     ],
 )
 def test_variants_leave_internals_and_configuration_alone(builds, command):
