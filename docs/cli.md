@@ -223,6 +223,7 @@ valkey-fuzzer batch --scenarios proposals/ --profile candidate --valkey-binary .
 valkey-fuzzer batch --zoo BUILDS --workers 2
 valkey-fuzzer batch --failures forkless-batch --serial-reruns 2
 valkey-fuzzer batch --resume forkless-batch
+valkey-fuzzer batch --random all --seeds 20 --guided 400 --valkey-binary ~/valkey-gcov/src/valkey-server --workers 8
 ```
 
 The one way to run many scenarios. A batch expands its sources into jobs, one
@@ -253,6 +254,7 @@ sources:
       first_seed: 0                  # default: a fresh one, recorded in jobs.json
       excludes: [server_config.rdbcompression=zstd]
       base: {deployment: {replicas_per_primary: 1}}   # a partial scenario over every draw
+      guided: 400                    # then 400 runs derived from the corpus (default 0)
   - matrix:
       seed: 2026
       seeds_per_case: 1
@@ -267,7 +269,7 @@ sources:
 
 | Source | Flag | Jobs |
 | --- | --- | --- |
-| `random` | `--random EXPERIMENT` (repeatable, or `all`), `--seeds N`, `--first-seed N`, `--exclude PATH=VALUE`, `--base FILE` | `random-<experiment>-s<seed>`: seeds `first_seed` to `first_seed + seeds - 1` of each experiment, drawn under the batch's profile exactly as `run --seed N --experiment ID --profile P` draws them. `all` is every experiment that declares `metadata.generator`, less those an `experiment=` exclusion names. |
+| `random` | `--random EXPERIMENT` (repeatable, or `all`), `--seeds N`, `--first-seed N`, `--exclude PATH=VALUE`, `--base FILE`, `--guided N` | `random-<experiment>-s<seed>`: seeds `first_seed` to `first_seed + seeds - 1` of each experiment, drawn under the batch's profile exactly as `run --seed N --experiment ID --profile P` draws them. `all` is every experiment that declares `metadata.generator`, less those an `experiment=` exclusion names. With `guided: N`, then `guided-<experiment>-s<seed>`: `N` runs derived from the runs that reached new Valkey code (see [Coverage-guided batches](#coverage-guided-batches)). |
 | `matrix` | (spec only) | `matrix-<base scenario_id>-<combination>-<n>`: every combination of the dotted-path `dimensions` (paths as in [diff](#diff) variants), `seeds_per_case` times, each with a seed drawn from `seed`. A combination that does not compile is listed under `invalid` and not run, and counts as `ERROR` in the batch's status (exit `2`): a misspelt value never skips. |
 | `scenarios` | `--scenarios PATH` (repeatable) | `scenario-<file stem>`: each file, or each `*.yaml` and `*.yml` file of a directory, run as written. |
 | `zoo` | `--zoo BUILDS`, `--zoo-case ID` (repeatable) | `zoo-<case>-<file stem>-control`, and `-<n>` for the broken runs, numbered from 0 across the case: each [bug zoo](bug-zoo.md) case's clean control and broken runs, on the builds `zoo/build.sh` made in `BUILDS`. `directory` defaults to the repository's `zoo/`, which only a checkout has (an installed package does not ship it). Each build must name the pinned commit, or nothing runs. |
@@ -350,8 +352,9 @@ removed, the batch refuses to start. Dead runs' directories stay.
 ```text
 <batch folder>/
   batch.json          options, sources, invalid matrix cases, zoo cases (written once)
-  jobs.json           every job, in order (written once)
+  jobs.json           every job, in order (a guided job is added when it is drawn)
   results/<id>.json   one finished job
+  corpus.json         a guided batch's corpus (see Coverage-guided batches)
   runs/<id>/          the job's run folder: plan.json, report.json, scenario.yaml,
                       components/, logs/ (instance logs), console.log (or error.json)
   experiments/        a copy of every --experiment-dir's documents (only with one)
@@ -381,6 +384,53 @@ from the folder alone.
 | `leaks` | Every leftover the sweeps removed, with the run that left it. |
 | `invalid` | Matrix combinations that did not compile. |
 | `coverage` | Per experiment, the runs and the distinct coverage tuples they covered. |
+| `code_coverage` | A guided batch's `covered` (the Valkey lines and branches its runs reached) and `corpus` (its entries); `null` for another batch. |
+
+### Coverage-guided batches
+
+A random source with `guided: N` (`--guided N`) steers the batch by the
+Valkey code its runs reach, as AFL steers by its queue. Its seeds are the
+warm-up; once every other job has started, each free worker gets a job drawn
+then from the batch's **corpus**: the runs that reached a line or branch no
+earlier run of the batch reached. An entry is picked with weight
+`new features / (1 + times picked)`, and the new job keeps the scenario that
+entry drew with a new seed. It also draws again one dimension, chosen
+uniformly from the entry's drawn dimensions and none (the seed alone),
+within the experiment's declared space (`metadata.generator`): a deployment
+field, a server config key, or an input, which is how a fault's timing
+changes (its `*_delay_s` inputs, or a chaos schedule's `waves`). A hook drawn after the changed dimension (`waves` reads
+the deployment) is drawn again too; deployment fields that only place a
+deployment on the host are never changed. The new seed alone changes what a
+run draws as it runs: the workload's keys, values, and operations, and the
+faults' runtime choices. A job is drawn in the batch process first, so a
+combination no attempt can draw is never run; while the corpus holds no
+entry of the source's experiments, a guided job is a fresh seed. Each job
+records its `generate.pinned` draws, so it runs again exactly (`failures`,
+`serial_reruns`, a resume), and its result records `guided` (`parent`, the
+corpus entry, and `mutation`, the dimension it changed or `seed`).
+
+Code coverage needs a Valkey built with gcov, and the batch's
+`valkey_binary` (or the scenarios' own) set to it:
+
+```bash
+make -C ~/valkey-gcov gcov     # -fprofile-arcs -ftest-coverage -DCOVERAGE_TEST
+```
+
+Every process a run starts inherits `GCOV_PREFIX=work/w<k>/coverage`, so a
+server, its fork children (which a `COVERAGE_TEST` build exits with `exit`),
+and a tool write their `.gcda` counters into the worker's own tree when they
+exit, merged across the run's processes, never with another worker's. The
+worker then runs `gcov --json-format --stdout` (the `gcov` on `PATH`, of the
+GCC that built Valkey) over them and reports the executed lines
+(`file:line`) and taken branches (`file:line:index`); hit counts are left
+out, since a longer run would otherwise always look new. A process killed
+with `SIGKILL` writes nothing, so a killed server adds only what its
+restarted successor reaches. The worker reads its run's counters after the
+run, so the cost adds to each run, not to the batch's scheduling. `corpus.json` holds `covered` and the `entries`, each a `job`, its
+`experiment`, and the features it reached first (`new`), so a resume
+continues the corpus. A result's `code_coverage` is `reached` and `new`, or
+`null` when the run left no counters to read (its console says why);
+`batch.log` ends each line with `coverage +<new>`.
 
 ### Resuming
 

@@ -96,10 +96,11 @@ they use directly (see [The Valkey components](#the-valkey-components)).
 | `valkey_fuzzer/service.py` | `RunService`: one frozen catalog with its compiler and runner; compile, execute, replay, differentials, and minimization, writing each run's report folder. |
 | `valkey_fuzzer/reports.py` | Report folders and their files (`plan.json`, `report.json`, `scenario.yaml`): writing and reading them, and the run report. |
 | `valkey_fuzzer/provenance.py` | The reproducer a run report records, the source digests, the catalog digest, and the replay drift checks. |
-| `valkey_fuzzer/batch.py` | The batch runner: sources to jobs, isolated worker processes, leak sweeps, signature groups, serial re-runs, resume, and the zoo verdicts. |
+| `valkey_fuzzer/batch.py` | The batch runner: sources to jobs, isolated worker processes, leak sweeps, signature groups, serial re-runs, resume, guided jobs, and the zoo verdicts. |
+| `valkey_fuzzer/corpus.py` | A coverage-guided batch's corpus: the runs that reached new Valkey code, which one to derive a scenario from, and what it changes. |
 | `valkey_fuzzer/outcomes.py` | The process exit codes of every command and the batch worker, and how a run's outcome prints. |
 | `valkey_fuzzer/commands/`, `valkey_fuzzer/cli.py` | The command handlers; `cli.py` only builds the parser and dispatches. |
-| `valkey_fuzzer/minimize.py`, `valkey_fuzzer/coverage.py`, `valkey_fuzzer/differential.py` | Failure signatures and minimization; a run's coverage tuple; differential runs. |
+| `valkey_fuzzer/minimize.py`, `valkey_fuzzer/coverage.py`, `valkey_fuzzer/differential.py` | Failure signatures and minimization; a run's coverage tuple and its Valkey code coverage (gcov); differential runs. |
 | `valkey_fuzzer/generator.py` | Random scenarios for experiments that declare `metadata.generator`, and the search profiles that sample them. |
 | `valkey_fuzzer/hoststate.py` | Host-state owner tags and `valkey-fuzzer sweep`; run folders under the shared artifact root; SIGTERM as an interrupt. |
 | `valkey_fuzzer/zoo.py`, `zoo/` | The [bug zoo](bug-zoo.md): its cases and how a case is judged. |
@@ -288,6 +289,29 @@ through `RunService.run_plan` or `Runner.run` without a folder gets
 one named the same way under `<artifact root>/runs/` when a component first
 writes an artifact; the artifact root defaults to `<temp dir>/valkey-fuzzer`,
 the same root the service uses.
+
+## Coverage-guided batches
+
+A batch with a `guided` random source is a coverage-guided fuzzer over
+scenarios, with the generator as its mutator. Each worker's run starts its
+processes with `GCOV_PREFIX` set to the worker's own directory, so a gcov
+build of Valkey writes the run's counters there, and the worker reads the
+lines and branches they reached (`coverage.gcov_features`). The batch adds
+them to its `Corpus` (`corpus.py`): a run that reached any feature no run
+before it did becomes an entry. When a worker is free and the expanded jobs
+have all started, `BatchRunner._next_guided` picks an entry
+(`Corpus.pick`), reads what the entry's run drew from its report
+(`reproducer.generated.draws`, which `generate` records for every generated
+scenario, dimension by dimension in draw order), chooses one dimension to
+draw again or none (`corpus.mutation`), and asks the experiment's
+`GeneratorBlock.kept` which draws the new scenario keeps: all but that
+dimension and the hooks drawn after it, which may read it. `generate(...,
+pinned=...)` then draws the scenario with a new seed, every kept dimension
+taking its recorded value instead of a draw, so a derived scenario stays in
+the experiment's legal space, under its exclusions, reject rules, profile,
+and compile checks. The job, with its `pinned` draws, is appended to
+`jobs.json` before it starts; a resume continues from `jobs.json` and
+`corpus.json`.
 
 ## The local deployment provider
 
@@ -531,7 +555,8 @@ them.
   effective config the plan records, after start. Experiments that need a
   setting check it before the run with `valkey.capability.build-probe`.
 - **Multiple hosts.** Every instance runs on the local host.
-- **Object-store, proxy, and sidecar providers, and corpus management.**
+- **Object-store, proxy, and sidecar providers, and a corpus kept across
+  batches.** A guided batch's corpus lives in its own folder.
 - **Hermetic replay.** Replay checks provenance and refuses on drift, but it
   runs with what is installed and cannot reproduce timing.
 

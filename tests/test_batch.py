@@ -26,6 +26,7 @@ from valkey_fuzzer.commands import batch as batch_command
 from valkey_fuzzer.deployment.local import ports
 from valkey_fuzzer.hoststate import OWNER_FILE, sweep
 from valkey_fuzzer.results import OutcomeStatus, RunOutcome
+from valkey_fuzzer.service import RunService
 
 from .batch_worker_stub import InProcessWorkers
 from .valkey_experiments_support import valkey_service
@@ -701,3 +702,85 @@ def test_a_resume_refuses_random_jobs_that_the_installed_code_would_draw_differe
     with patch("sys.argv", resume):
         assert main() == 0
     assert len(stub.runs()) == 2
+
+
+@pytest.fixture
+def coverage(workers, monkeypatch):
+    """Fake code coverage: ``reach(plan)`` is what a run reaches; by default one feature per drawn value."""
+
+    plans, canned = [], RunService.run_plan
+
+    def run_plan(self, plan, **kwargs):
+        plans.append(plan)
+        return canned(self, plan, **kwargs)
+
+    fake = {"reach": lambda plan: [f"{name}={value}" for name, value in plan.inputs.items()]}
+    monkeypatch.setattr(RunService, "run_plan", run_plan)
+    # The worker reads its run's coverage right after the run, in this process.
+    monkeypatch.setattr(batch, "gcov_features", lambda directory: fake["reach"](plans[-1]))
+    return fake
+
+
+def _drawn(runner, job_id):
+    return json.loads(Path(runner.folder, "runs", job_id, "report.json").read_text())["reproducer"]["generated"]
+
+
+def test_a_guided_batch_derives_its_runs_from_those_that_reached_new_code(tmp_path, workers, stub, coverage):
+    runner = _batch(tmp_path, [_random(3, guided=6)])
+    summary = runner.run()
+
+    results = _results(runner)
+    guided = [job for job in runner.jobs if job["source"] == "guided"]
+    assert summary["complete"] and summary["counts"] == {"PASS": 9} and len(guided) == 6
+    corpus = json.loads(Path(runner.folder, "corpus.json").read_text())
+    entries = [entry["job"] for entry in corpus["entries"]]
+    # The first run reaches everything first; a run's new features are those no run before it reached.
+    assert entries[0] == _id(0) and all(results[job]["code_coverage"]["new"] > 0 for job in entries)
+    assert summary["code_coverage"] == {"covered": corpus["covered"], "corpus": len(entries)}
+    assert sum(result["code_coverage"]["new"] for result in results.values()) == corpus["covered"]
+    for job in guided:
+        parent, changed = job["guided"]["parent"], job["guided"]["mutation"]
+        assert parent in entries and results[job["id"]]["guided"] == job["guided"]
+        before, after = _drawn(runner, parent), _drawn(runner, job["id"])
+        # A new seed, and every draw but the one it changes kept (snapshot-equivalence has no hooks).
+        assert after["seed"] == job["generate"]["seed"] != before["seed"]
+        assert job["generate"]["pinned"] == {name: value for name, value in before["draws"].items() if name != changed}
+        assert all(after["draws"][name] == value for name, value in job["generate"]["pinned"].items())
+        assert changed == "seed" or changed in before["draws"]
+    assert all(" coverage +" in line for line in _log(runner))
+
+
+def test_a_guided_batch_without_coverage_draws_fresh_seeds_and_a_resume_draws_the_rest(
+    tmp_path, workers, stub, coverage, monkeypatch
+):
+    def unreadable(plan):
+        raise OSError("gcov: not found")
+
+    coverage["reach"] = unreadable
+    runner = _batch(tmp_path, [_random(1, guided=3)])
+    # Stopped once it drew its first guided job, before that job starts.
+    drawn = BatchRunner._next_guided
+
+    def stop_after(self):
+        job = drawn(self)
+        self.stop_requested = True
+        return job
+
+    with monkeypatch.context() as stopping:
+        stopping.setattr(BatchRunner, "_next_guided", stop_after)
+        assert not runner.run()["complete"]
+    assert [job["source"] for job in runner.jobs] == ["random", "guided"] and len(_results(runner)) == 1
+
+    summary = BatchRunner(runner.folder).run()
+
+    jobs = json.loads(Path(runner.folder, "jobs.json").read_text())
+    assert summary["complete"] and summary["counts"] == {"PASS": 4} and len(stub.runs()) == 4
+    assert [job["source"] for job in jobs] == ["random"] + ["guided"] * 3 and len({job["id"] for job in jobs}) == 4
+    # With no corpus, a guided job is a fresh seed; a run whose coverage cannot be read keeps its result.
+    assert all(job["guided"]["parent"] is None and "pinned" not in job["generate"] for job in jobs[1:])
+    assert all(result["code_coverage"] is None for result in _results(runner).values())
+    assert summary["code_coverage"] == {"covered": 0, "corpus": 0}
+    assert (
+        "No code coverage: OSError: gcov: not found"
+        in Path(runner.folder, "runs", jobs[1]["id"], "console.log").read_text()
+    )
