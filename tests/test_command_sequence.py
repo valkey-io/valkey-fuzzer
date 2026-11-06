@@ -1565,6 +1565,23 @@ def test_a_command_unanswered_while_the_server_answers_no_ping_is_a_hang(builds)
     assert result.diagnostics["reason"] == "hang" and len(result.diagnostics["commands"]) == 2
 
 
+def test_a_sequence_that_debugs_a_script_in_sync_mode_is_not_run_concurrently(builds):
+    # Walk #4574: SCRIPT DEBUG SYNC blocks the server for the debugging client's session, so every other
+    # connection waits on it by design.
+    for build in BUILDS.values():
+        build.replies = {
+            ("SCRIPT", "DEBUG", "SYNC"): lambda server: TIMEOUT if _concurrent(server) else b"OK",
+            ("PING",): lambda server: TIMEOUT if _concurrent(server) else b"PONG",
+        }
+    result, value = run(builds, [{"command": ["SCRIPT", "DEBUG", "SYNC"]}], checks={"concurrency": 2})
+
+    assert result.status.value == "PASS", result.summary
+    assert _check(value, "concurrency") == {
+        "outcome": "skipped",
+        "reason": "the sequence debugs a script with SCRIPT DEBUG SYNC, which blocks the server for the session",
+    }
+
+
 def test_a_command_unanswered_while_the_server_answers_others_is_no_hang(builds):
     for build in BUILDS.values():
         build.replies = {("BLPOP", "l", "0"): lambda server: TIMEOUT if _concurrent(server) else None}

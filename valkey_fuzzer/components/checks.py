@@ -174,6 +174,13 @@ def _sets_replication(commands: Sequence[Mapping[str, Any]]) -> bool:
     return any(words and words[0].upper() in ("REPLICAOF", "SLAVEOF") for words in map(_words, commands))
 
 
+def _debugs_sync(commands: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether the sequence debugs a script with SCRIPT DEBUG SYNC: the server serves only the debugging client
+    until its session ends, so every other connection waits on it by design."""
+
+    return any([str(word).upper() for word in _words(item)[:3]] == ["SCRIPT", "DEBUG", "SYNC"] for item in commands)
+
+
 def _writes_unreplicated(commands: Sequence[Mapping[str, Any]]) -> bool:
     """Whether the sequence writes keys its node does not replicate: DEBUG POPULATE adds them on the primary
     alone."""
@@ -616,6 +623,10 @@ class _Checks:
     # -- concurrency -----------------------------------------------------------------------------------------
 
     def concurrency(self) -> dict[str, Any]:
+        if _debugs_sync(self.commands):
+            return _skipped(
+                "the sequence debugs a script with SCRIPT DEBUG SYNC, which blocks the server for the session"
+            )
         count = self.config["checks"]["concurrency"]
         # Replies are not judged, and N clients restarting one server is no sequence: restarts are left out and
         # nothing is waited for.
