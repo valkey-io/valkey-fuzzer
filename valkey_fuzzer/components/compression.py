@@ -242,9 +242,11 @@ def full_sync_starts(lines: Sequence[str], replica_name: str) -> Optional[list[d
 def replica_load(lines: Sequence[str]) -> Optional[dict[str, Any]]:
     """How the replica loaded its last full sync: ``{source, codecs}``; ``None`` without a load."""
 
-    # Dual-channel replication logs its own start of a full sync.
+    # Dual-channel replication logs its own start of a full sync. Valkey 7.2 says "master" where later releases
+    # say "primary".
     starts = [
         _last_index(lines, "Full resync from primary"),
+        _last_index(lines, "Full resync from master"),
         _last_index(lines, "PSYNC is not possible, initialize RDB"),
     ]
     start = max((index for index in starts if index is not None), default=None)
@@ -253,7 +255,7 @@ def replica_load(lines: Sequence[str]) -> Optional[dict[str, Any]]:
     segment = lines[start:]
     if not any(_LOAD_DONE.search(line) for line in segment):
         return None
-    socket = any("from primary with EOF to parser" in line for line in segment)
+    socket = any("with EOF to parser" in line for line in segment)
     codecs = sorted({match.group(1) for match in map(LOADED_COMPRESSED.search, segment) if match})
     return {"source": "socket" if socket else "disk", "codecs": codecs}
 

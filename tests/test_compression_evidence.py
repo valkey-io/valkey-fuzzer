@@ -594,3 +594,21 @@ def _codec_handle(codecs, links_up):
 def test_a_link_still_on_its_old_codec_is_unsettled_until_it_reconnects(codecs, links_up, unsettled):
     problems = unsettled_links(_codec_handle(codecs, links_up))
     assert problems == [f"valkey-0 -> {replica} uses lz4, its settings negotiate zstd" for replica in unsettled]
+
+
+@pytest.mark.parametrize(
+    ("lines", "load"),
+    [
+        (_REPLICA_LOG, {"source": "socket", "codecs": ["lz4"]}),
+        # Valkey 7.2 says "master" where later releases say "primary" (the soak's mixed-version replicas).
+        (["* Full resync from master: abc:0", "* MASTER <-> REPLICA sync: receiving streamed RDB from master with EOF to disk",
+          "* Loading RDB produced by valkey version 255.255.255", "* Done loading RDB, keys loaded: 0, keys expired: 0."],
+         {"source": "disk", "codecs": []}),
+        (["* Full resync from master: abc:0", "* receiving streamed RDB from master with EOF to parser",
+          "* Done loading RDB, keys loaded: 3"], {"source": "socket", "codecs": []}),
+    ],
+)  # fmt: skip
+def test_a_replicas_full_sync_load_is_read_in_every_releases_words(lines, load):
+    from valkey_fuzzer.components.compression import replica_load
+
+    assert replica_load(lines) == load
