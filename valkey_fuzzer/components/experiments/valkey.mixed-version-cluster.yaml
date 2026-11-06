@@ -6,7 +6,7 @@
 # A graceful failover must not lose an acknowledged write; with
 # force_failover (CLUSTER FAILOVER FORCE) the old primary's writes from
 # shortly before the failover until it completed may be lost.
-extends: [valkey.base]
+extends: [valkey.base, valkey.history]
 id: valkey.mixed-version-cluster
 deployment:
   modes: [cluster]

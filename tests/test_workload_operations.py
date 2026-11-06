@@ -143,7 +143,11 @@ def test_an_ambiguous_rename_leaves_both_keys_uncertain_and_an_error_neither(err
     workload = KeyValueWorkload()
     workload._config = {}
     workload._target = SimpleNamespace(
-        connect=lambda: client, instance_id="valkey-0", served_by=lambda key: "valkey-0", reset=lambda: None
+        connect=lambda: client,
+        instance_id="valkey-0",
+        connections=1,
+        served_by=lambda key: "valkey-0",
+        reset=lambda: None,
     )
     workload._known = {"a": "1", "b": "2"}
     assert workload._execute(5, "rename", "a", "1", "b") == outcome

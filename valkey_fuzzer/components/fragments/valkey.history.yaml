@@ -1,0 +1,10 @@
+# The `history` oracle: Porcupine checks that the `writes` workload's history,
+# closed by a final read of every key, is linearizable under the `data`
+# oracle's loss policy, so it catches stale reads and acknowledged writes that
+# vanish after a read saw them. Extend it after a fragment that brings
+# `writes` and `data` (valkey.writes or valkey.base). It needs the porcupine
+# checker on PATH (docs/components.md#valkeyoraclehistory).
+components:
+  - use: valkey.oracle.history
+    id: history
+    config: {ledger: data}

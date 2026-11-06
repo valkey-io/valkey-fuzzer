@@ -10,6 +10,12 @@ applied), or ``ambiguous`` (timeout/disconnect; may or may not be applied).
 Oracles reconstruct the set of acceptable final values from this ledger under
 an explicit durability policy instead of guessing.
 
+The ledger is the workload's history: each entry is invoked at ``t_start``
+and completes at ``t_end`` on connection ``process`` (numbered from 1; the
+writer opens a new one after any failure, as a Jepsen client process is
+retired after an indeterminate operation), and a GET's ``reply`` is the value
+it read.
+
 A ``rename`` in the ``mix`` is ``RENAME src dst`` between two mutable keys of
 the same name length whose values the workload knows for certain (their last
 operation was an acknowledged SET or the preload), so ``dst`` exists. The
@@ -169,6 +175,8 @@ class _Target:
         self.cluster = is_cluster(handle)
         self.client: Any = None
         self.instance_id: Optional[str] = None
+        # Connections opened so far; the current one's number.
+        self.connections = 0
         instances = getattr(handle, "instances", ()) if self.cluster else ()
         self._by_address = {(instance.host, int(instance.port)): instance.instance_id for instance in instances}
         ports = [int(instance.port) for instance in instances]
@@ -196,6 +204,7 @@ class _Target:
                 raise valkey.exceptions.ConnectionError("no reachable primary")
             self.instance_id = primaries[0]
             self.client = self.handle.new_client(self.instance_id, timeout=self.timeout)
+        self.connections += 1
         return self.client
 
     def served_by(self, key: str) -> Optional[str]:
@@ -459,6 +468,7 @@ class KeyValueWorkload:
         try:
             for item in entries:
                 item["instance_id"] = self._target.instance_id
+                item["process"] = self._target.connections
             if op == "set":
                 reply = client.set(key, value)
                 entry["reply"] = "OK" if reply is True else reply

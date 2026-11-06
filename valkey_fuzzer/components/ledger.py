@@ -286,6 +286,49 @@ def fault_records(
     return records
 
 
+def loss_policy(
+    config: Mapping[str, Any], evidence: Sequence[Evidence], handle: Any, summary: Mapping[str, Any]
+) -> tuple[list, Optional[Any], Optional[list], Optional[int]]:
+    """What ``valkey.oracle.ledger`` ``config`` lets Valkey lose: ``(windows, lossy_key, scope_slots, wait_confirmed)``.
+
+    ``windows`` and ``lossy_key`` are :class:`LedgerModel`'s ``loss_windows``
+    and ``lossy_key``, ``scope_slots`` the slot ranges ``lossy_key`` covers,
+    and ``wait_confirmed`` its ``wait_confirmed``.
+    """
+
+    lossy_key = None
+    scope_slots = None
+    if config["acknowledged"] == "may_be_lost":
+        windows = [(float("-inf"), float("inf"))]
+    else:
+        records = fault_records(
+            evidence,
+            config["loss_window_s"],
+            config["loss_window_faults"],
+            config["loss_window_after_s"],
+            config.get("loss_window_until") or (),
+        )
+        if config["loss_window_scope"] == "fault_targets":
+            # Only writes the faults' targets acknowledged may be lost; a
+            # fault that records no target lets no write be lost.
+            windows = [(start, end, frozenset(targets)) for start, end, targets in records]
+        else:
+            windows = [(start, end) for start, end, _ in records]
+        if config["loss_window_scope"] in ("fault_target_slots", "fault_targets"):
+            scope_slots = target_slot_ranges(handle, [target for _, _, targets in records for target in targets])
+            if scope_slots is not None:
+
+                def lossy_key(key: str) -> bool:
+                    slot = key_slot(key.encode("utf-8", errors="surrogatepass"))
+                    return any(low <= slot <= high for low, high in scope_slots)
+
+    # A write WAIT confirmed on every replica survives any promotion.
+    wait_confirmed = None
+    if summary.get("wait_replicas"):
+        wait_confirmed = sum(instance.role == "replica" for instance in handle.instances)
+    return windows, lossy_key, scope_slots, wait_confirmed
+
+
 class _Reader:
     """Reads keys from an instance or through cluster routing."""
 
@@ -432,37 +475,7 @@ class LedgerOracle:
             preload, ledger, preload_acks, summary = load_ledger(evidence, config["workload"])
         except (LookupError, OSError, ValueError) as exc:
             return make_result(spec, ComponentStatus.ERROR, f"cannot load workload ledger: {exc}")
-        lossy_key = None
-        if config["acknowledged"] == "may_be_lost":
-            windows = [(float("-inf"), float("inf"))]
-            scope_slots = None
-        else:
-            records = fault_records(
-                evidence,
-                config["loss_window_s"],
-                config["loss_window_faults"],
-                config["loss_window_after_s"],
-                config.get("loss_window_until") or (),
-            )
-            if config["loss_window_scope"] == "fault_targets":
-                # Only writes the faults' targets acknowledged may be lost; a
-                # fault that records no target lets no write be lost.
-                windows = [(start, end, frozenset(targets)) for start, end, targets in records]
-            else:
-                windows = [(start, end) for start, end, _ in records]
-            scope_slots = None
-            if config["loss_window_scope"] in ("fault_target_slots", "fault_targets"):
-                scope_slots = target_slot_ranges(handle, [target for _, _, targets in records for target in targets])
-                if scope_slots is not None:
-
-                    def lossy_key(key: str) -> bool:
-                        slot = key_slot(key.encode("utf-8", errors="surrogatepass"))
-                        return any(low <= slot <= high for low, high in scope_slots)
-
-        # A write WAIT confirmed on every replica survives any promotion.
-        wait_confirmed = None
-        if summary.get("wait_replicas"):
-            wait_confirmed = sum(instance.role == "replica" for instance in handle.instances)
+        windows, lossy_key, scope_slots, wait_confirmed = loss_policy(config, evidence, handle, summary)
         model = LedgerModel(
             preload,
             ledger,

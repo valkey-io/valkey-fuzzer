@@ -93,6 +93,10 @@ _FORCED = {"extra": (_component("valkey.action.failover", "failover", force=True
         ("valkey.oracle.ledger", {**_LEDGER, "loss_window_s": 2}, {**_KILL, "document": {"mode": "standalone", "server_config": {"appendfsync": "always"}}}, "appendfsync always"),
         ("valkey.oracle.ledger", {**_LEDGER, "loss_window_s": 1}, _KILL, "appendfsync everysec"),
         ("valkey.oracle.ledger", {"workload": "failover", "loss_window_faults": []}, _FORCED, "FORCE"),
+        ("valkey.oracle.history", {"ledger": "writes"}, _KILL, r"not a valkey\.oracle\.ledger component"),
+        # The history oracle checks every read and every write the policy does not let be lost.
+        ("valkey.oracle.history", {"ledger": "data"}, {"extra": (_component("valkey.oracle.ledger", "data", workload="writes", lost_writes_budget=1),)}, "lost_writes_budget"),
+        ("valkey.oracle.history", {"ledger": "data"}, {"extra": (_component("valkey.oracle.ledger", "data", workload="writes", check_reads=False),)}, "check_reads"),
         # Only a tmpfs resource that holds instance data is ever filled.
         ("valkey.fault.disk-fill", {"path": _DISK, "when_event": "x"}, _TMPFS, "instance_data_roots"),
         ("valkey.fault.disk-fill", {"path": _DISK, "when_event": "x"}, {"document": _ROOTS, "resources": (EnvironmentSpec(EnvironmentKind.RESOURCE, "disk", "valkey.resource.tmpdir"),)}, r"of a valkey\.resource\.tmpfs resource"),
