@@ -5,8 +5,8 @@
 (``CLUSTER FAILOVER``, or ``FORCE``, on a replica of the shard's current
 primary, never one killed on purpose) and ``kill {target, signal}``
 operations; a wave fails over at most once per shard. A kill never takes a
-live shard's last live member (a replica is one only while it is synced with
-its primary) and keeps the live slot-owning primaries at a
+live shard's last live member (a replica is one only once it holds a
+replication offset of the shard) and keeps the live slot-owning primaries at a
 majority of the planned shards; an unsafe kill is skipped. The cluster heals
 itself (Valkey fails a killed primary's shard over): after every wave the
 action validates the deployment with the killed nodes marked as stopped on
@@ -84,9 +84,10 @@ class ClusterWaves(WaveRun):
         return f", {done} of {len(failovers)} failover(s)", {"slots_seeded": self.slots_seeded}
 
     def members(self) -> list[Member]:
-        """The live members. A replica belongs to its shard only while it holds the shard's data, its replication
-        link up and no sync in progress: one that just migrated to an orphaned primary holds another shard's data
-        until its first sync, and a kill that left it as the shard's last member would lose the shard."""
+        """The live members. A replica belongs to its shard only while it holds the shard's data, a replication
+        offset from its primary or a cached one: one that just migrated to an orphaned primary holds another
+        shard's data until its first sync (INFO's offset is 1 then), and a kill that left it as the shard's last
+        member would lose the shard. A replica whose primary died keeps its offset, and its link is down."""
 
         return [
             Member(
@@ -103,7 +104,7 @@ class ClusterWaves(WaveRun):
                 info = client.info("replication")
         except Exception:
             return False
-        return info.get("master_link_status") == "up" and not int(info.get("master_sync_in_progress") or 0)
+        return int(info.get("slave_repl_offset") or 0) > 1
 
     kill_view = members
 

@@ -55,6 +55,8 @@ class FakeCluster:
         self.seed_error = None
         # Replicas whose replication link is not up: one that just migrated has not synced yet.
         self.unsynced = set()
+        # Replicas whose link is down with their data kept: their primary was killed.
+        self.link_down = set()
         self.mode = SimpleNamespace(value="cluster")
         self.calls, self.draws, self.validations, self.stopped = [], [], [], []
         self.loaded = None
@@ -124,8 +126,10 @@ class FakeCluster:
     def new_client(self, node_id, timeout=5.0):
         client = MagicMock()
         client.__enter__.return_value = client
-        link = "down" if node_id in self.unsynced else "up"
-        client.info.return_value = {"loading": 0, "master_link_status": link, "master_sync_in_progress": 0}
+        # INFO's offset is 1 for a replica with neither a primary nor a cached one: one that just migrated.
+        offset = 1 if node_id in self.unsynced else 4242
+        link = "down" if node_id in self.unsynced or node_id in self.link_down else "up"
+        client.info.return_value = {"loading": 0, "master_link_status": link, "slave_repl_offset": offset}
         return client
 
     def log_file(self, node_id):
@@ -534,3 +538,13 @@ def test_a_replica_that_has_not_synced_is_no_survivor_of_its_shard():
     handle.unsynced.add("valkey-1")
     result, _ = run_chaos(handle, waves=[[kill("valkey-1"), failover(1)]])
     assert chaos_operation(result, "1.0").get("skipped") is None, result.summary
+
+
+def test_a_replica_whose_primary_was_killed_still_holds_its_shard():
+    # The soak after 015af13: a replica whose primary a wave killed has its link down but all of the shard's data;
+    # counted as unsynced, the next kill took it too, and the shard's slots stayed on stopped nodes.
+    handle = FakeCluster()
+    handle.link_down.add("valkey-1")
+    handle.alive["valkey-0"] = False
+    result, _ = run_chaos(handle, waves=[[kill("valkey-1"), failover(1)]])
+    assert chaos_operation(result, "1.0")["skipped"] == "no shard-safe target", result.summary
