@@ -344,10 +344,13 @@ _TWICE = [[kill("valkey-1"), failover(1)], [kill("valkey-1"), failover(1)]]
         # A wave whose kill the safety rules blocked is no chaos wave, and the summary says so.
         (FakeCluster, [[kill(["valkey-0", "valkey-1"]), failover(1)]] * 2, "PASS",
          "1 planned operation(s) skipped by the safety rules (['2.0'])", {"2.0": ("skipped", "no shard-safe target")}),
+        # A later wave the safety rules refused whole leaves the run tested by its earlier waves.
+        (FakeCluster, [[kill(["valkey-0", "valkey-1"]), failover(1)], [kill(["valkey-0", "valkey-1"])]], "PASS",
+         "1 planned operation(s) skipped by the safety rules (['2.0'])", {"2.0": ("skipped", "no shard-safe target")}),
     ],
     ids=["kill-not-sent", "wave-validation-failed", "failover-raised", "exited-by-itself", "seeding-failed",
          "target-gone", "role-not-live", "validation-fails-despite-missing-target", "kill-blocked",
-         "kill-became-unsafe", "blocked-wave-not-counted"],
+         "kill-became-unsafe", "blocked-wave-not-counted", "blocked-wave-not-an-error"],
 )  # fmt: skip
 def test_chaos_runs_that_did_not_establish_their_faults_do_not_pass(handle, waves, status, summary, records):
     result, _ = run_chaos(handle(), **({"waves": waves} if waves else {}))
@@ -358,7 +361,7 @@ def test_chaos_runs_that_did_not_establish_their_faults_do_not_pass(handle, wave
 
 def test_a_failover_with_nothing_to_fail_over_is_skipped_not_failed():
     result, _ = run_chaos(FakeCluster(failovers={0: None}), waves=[[failover(0)]])
-    assert result.status is ComponentStatus.ERROR and "wave 1 ran no operation" in result.summary, result.summary
+    assert result.status is ComponentStatus.SKIP and "no planned fault was injected" in result.summary, result.summary
     record = chaos_operation(result, "1.0")
     assert record["success"] is False and "stopped whole on purpose" in record["skipped"]
 

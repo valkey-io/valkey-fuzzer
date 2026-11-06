@@ -347,7 +347,8 @@ class WaveRun:
             elif failed_change:
                 why = record.get("refused") or record.get("error") or "did not complete"
                 failures.append(f"{label} failed without an interfering operation: {why}")
-        if not any(record.get("applied_at") for record in results):
+        # A wave the safety rules refused whole is only skipped: the earlier waves left nothing safe to do.
+        if not any(record.get("applied_at") for record in results) and not all("skipped" in r for r in results):
             errors.append(f"wave {number} ran no operation")
         return failures, errors
 
@@ -393,8 +394,8 @@ class WaveRun:
             **schedule,
         }
         faults = [record for record in records if OPERATIONS[record["op"]].removes or OPERATIONS[record["op"]].held]
-        untested = faults and not any(record.get("applied_at") for record in faults)
         ran = sum(1 for record in records if record.get("applied_at"))
+        untested = not ran or (faults and not any(record.get("applied_at") for record in faults))
         skipped = [record["index"] for record in records if "skipped" in record]
         if skipped:
             extra_summary += f"; {len(skipped)} planned operation(s) skipped by the safety rules ({skipped})"
