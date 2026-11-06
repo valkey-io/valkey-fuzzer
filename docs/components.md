@@ -481,19 +481,19 @@ up. `compat`: a fresh parent runs it and `SAVE`s; its RDB (kept as
 `parent.compat.rdb`) must load into a fresh candidate with the parent's
 digest, compared after a reload as a replica, which keeps keys expired since
 the save (`compat-load`), and a fresh candidate replicating the parent must
-reach it (`compat-sync`). `faults`: node 0 has a replica, both persisting by
-an RDB saved at shutdown or by the AOF (drawn from the run's seed), and
-before one to three commands, also drawn, the check restarts the primary,
-restarts the replica (made a replica again), or sends `DEBUG RELOAD` to the
-primary; replies are unjudged, but a node that does not come back is a crash,
-a failed `DEBUG RELOAD` is `reload-failed`, a primary whose `DEBUG DIGEST`
-differs after its restart is `restart-lost-data` (judged only when it holds
-no expiring key or hash field), and the replica must reach the primary's
-digest after each replica restart and at the end (`replica-diverged`); a
-passing outcome lists the faults and the persistence. `acl` and
-`concurrency` leave restarts out and do not wait (`wait_s`); `replica`,
-`faults` and `compat` skip several nodes and `cluster`, `compat` also a module
-loaded on one build only. A check that could not run
+reach it (`compat-sync`). `faults`: the sequence runs again on servers that
+persist (an RDB saved at shutdown, or the AOF, drawn from the run's seed), a
+single standalone node with a replica, and before one to three commands,
+also drawn, the check restarts a node or sends it `DEBUG RELOAD`; replies are
+unjudged, but a node that does not come back is a crash, a failed `DEBUG
+RELOAD` is `reload-failed`, a node whose `DEBUG DIGEST` differs afterwards is
+`lost-data` (judged only when it holds no expiring key or hash field), and a
+replica must reach its primary's digest after its restarts and at the end
+(`replica-diverged`); a passing outcome lists the faults and the persistence.
+`acl` and
+`concurrency` leave restarts out and do not wait (`wait_s`); `replica` and
+`compat` skip several nodes and `cluster`, `compat` also a module loaded on
+one build only. A check that could not run
 is recorded as `error` and leaves the verdict alone.
 
 Without `compare_with`, `expect` alone judges the sequence: `FAIL` on a

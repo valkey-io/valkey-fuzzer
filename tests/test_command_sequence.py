@@ -243,11 +243,11 @@ def _spec(**config):
     return resolved(spec)
 
 
-def run(builds, commands, **config):
-    """The action on both builds, with ``commands``; the result and its evidence value."""
+def run(builds, commands, seed=1, **config):
+    """The action on both builds, with ``commands`` (and the run's ``seed``); the result and its evidence value."""
 
     spec = _spec(compare_with=builds["parent"], commands=commands, **config)
-    context = FakeContext(spec, deployment={"valkey_binary": builds["candidate"]})
+    context = FakeContext(spec, deployment={"valkey_binary": builds["candidate"]}, seed=seed)
     result = actions.CommandsAction().run(context, spec)
     return result, (to_plain_data(result.evidence[0].value) if result.evidence else None)
 
@@ -1406,29 +1406,50 @@ def test_the_sequences_settings_are_made_on_the_replica_first(builds):
 
 
 _WRITES = [{"command": ["SET", f"k{index}", "v"]} for index in range(6)]
+_PERSISTENT = b"# Keyspace\r\ndb0:keys=6,expires=0,avg_ttl=0,keys_with_volatile_items=0\r\n"
+
+
+def _faults_side(builds, nodes=1):
+    """The faults check's servers: the candidate's nodes after the base run's ``nodes``."""
+
+    return _nodes(BUILDS[builds["candidate"]])[nodes:]
 
 
 @pytest.mark.parametrize("fault", checks._FAULTS)
-def test_the_faults_check_restarts_or_reloads_between_commands_and_the_replica_catches_up(builds, monkeypatch, fault):
+def test_the_faults_check_restarts_or_reloads_nodes_between_commands_and_the_replica_catches_up(
+    builds, monkeypatch, fault
+):
     monkeypatch.setattr(checks, "_FAULTS", (fault,))
     _replicating()
     result, value = run(builds, _WRITES, checks={"faults": True})
 
     assert result.status.value == "PASS", result.summary
     outcome = _check(value, "faults")
-    assert outcome["outcome"] == "pass" and {item["fault"] for item in outcome["faults"]} == {fault}
+    assert outcome["outcome"] == "pass" and outcome["persistence"] in checks._PERSISTENCE
     assert 1 <= len(outcome["faults"]) <= 3 and all(1 <= item["before"] <= len(_WRITES) for item in outcome["faults"])
-    primary, replica = _nodes(BUILDS[builds["candidate"]])[1:]
+    primary, replica = _faults_side(builds)
     # Every command of the sequence ran on the primary, around the faults.
     assert all(("SET", f"k{index}", "v") in primary.sent for index in range(len(_WRITES)))
-    restarted = {"restart-primary": primary, "restart-replica": replica}.get(fault)
-    if restarted is None:
-        assert primary.sent.count(("DEBUG", "RELOAD")) == len(outcome["faults"])
-    else:
-        assert restarted.shut_downs == len(outcome["faults"])
-    if fault == "restart-replica":
-        # The replica comes back a primary: it is made a replica again.
-        assert replica.sent.count(("REPLICAOF", "127.0.0.1", str(primary.port))) == 1 + len(outcome["faults"])
+    for index, node in enumerate((primary, replica)):
+        hits = sum(item["node"] == index for item in outcome["faults"])
+        assert (node.shut_downs if fault == "restart" else node.sent.count(("DEBUG", "RELOAD"))) == hits
+    # A restarted replica comes back a primary: it is made a replica again.
+    again = sum(item["node"] == 1 for item in outcome["faults"]) if fault == "restart" else 0
+    assert replica.sent.count(("REPLICAOF", "127.0.0.1", str(primary.port))) == 1 + again
+
+
+def test_the_faults_check_restarts_a_clusters_nodes_without_a_replica(builds, monkeypatch):
+    monkeypatch.setattr(checks, "_FAULTS", ("restart",))
+    for build in BUILDS.values():
+        build.replies = {("CLUSTER", "INFO"): b"cluster_state:ok\r\ncluster_known_nodes:2\r\n"}
+    result, value = run(builds, _WRITES, cluster=True, nodes=2, checks={"faults": True})
+
+    assert result.status.value == "PASS", result.summary
+    outcome = _check(value, "faults")
+    assert outcome["outcome"] == "pass" and all(item["node"] in (0, 1) for item in outcome["faults"])
+    nodes = _faults_side(builds, nodes=2)
+    assert len(nodes) == 2 and sum(node.shut_downs for node in nodes) == len(outcome["faults"])
+    assert not any(sent[0] == "REPLICAOF" for node in nodes for sent in node.sent)
 
 
 def test_a_reload_that_fails_in_the_faults_check_fails_the_run(builds, monkeypatch):
@@ -1440,11 +1461,11 @@ def test_a_reload_that_fails_in_the_faults_check_fails_the_run(builds, monkeypat
 
     assert result.status.value == "FAIL" and not result.crash
     assert result.diagnostics["reason"] == "reload-failed"
-    assert result.summary.startswith("DEBUG RELOAD before command ")
+    assert result.summary.startswith("DEBUG RELOAD on node ")
 
 
-def test_a_primary_that_does_not_come_back_from_a_restart_in_the_faults_check_crashed(builds, monkeypatch):
-    monkeypatch.setattr(checks, "_FAULTS", ("restart-primary",))
+def test_a_node_that_does_not_come_back_from_a_restart_in_the_faults_check_crashed(builds, monkeypatch):
+    monkeypatch.setattr(checks, "_FAULTS", ("restart",))
     _replicating()
     BUILDS[builds["candidate"]].restart_exits = True
     result, _ = run(builds, _WRITES, checks={"faults": True})
@@ -1456,53 +1477,99 @@ def test_a_primary_that_does_not_come_back_from_a_restart_in_the_faults_check_cr
     )
 
 
-def test_a_replica_that_stays_apart_after_a_restart_in_the_faults_check_diverged(builds, monkeypatch):
-    monkeypatch.setattr(checks, "_FAULTS", ("restart-replica",))
-    monkeypatch.setattr(checks, "_SYNC_TIMEOUT_S", 0.2)
-    # The restarted replica comes back with data of its own.
-    _replicating(lambda server: b"d2" if server.shut_downs else b"d1")
-    result, _ = run(builds, _WRITES, checks={"faults": True})
+@pytest.mark.parametrize("fault", checks._FAULTS)
+def test_a_node_that_comes_back_from_a_fault_with_other_data_lost_it(builds, monkeypatch, fault):
+    monkeypatch.setattr(checks, "_FAULTS", (fault,))
 
-    assert result.status.value == "FAIL" and not result.crash
-    assert (
-        result.diagnostics["reason"] == "replica-diverged" and result.diagnostics["fault"]["fault"] == "restart-replica"
-    )
+    def digest(server):
+        return b"d2" if server.shut_downs or ("DEBUG", "RELOAD") in server.sent else b"d1"
 
-
-def test_a_primary_that_comes_back_from_a_restart_with_other_data_lost_it(builds, monkeypatch):
-    monkeypatch.setattr(checks, "_FAULTS", ("restart-primary",))
-    _replicating(lambda server: b"d2" if server.shut_downs else b"d1")
+    _replicating(digest)
     for build in BUILDS.values():
-        build.replies[("INFO", "keyspace")] = (
-            b"# Keyspace\r\ndb0:keys=6,expires=0,avg_ttl=0,keys_with_volatile_items=0\r\n"
-        )
+        build.replies[("INFO", "keyspace")] = _PERSISTENT
     result, _ = run(builds, _WRITES, checks={"faults": True})
 
     assert result.status.value == "FAIL" and not result.crash
-    assert result.diagnostics["reason"] == "restart-lost-data"
+    assert result.diagnostics["reason"] == "lost-data"
     assert (result.diagnostics["before"], result.diagnostics["after"]) == ({"reply": "d1"}, {"reply": "d2"})
+
+
+def test_a_replicas_data_is_judged_once_it_caught_up(builds, monkeypatch):
+    # The walk's test of valkey#5170 replayed: the replica had not yet applied the primary's writes when its digest
+    # was read, then applied and saved them before its restart, and came back with them.
+    monkeypatch.setattr(checks, "_FAULTS", ("restart",))
+    write, caught = ("SET", "k0", "v"), []
+
+    def primary_of(server):
+        return server is _faults_side(builds)[0]
+
+    def digest(server):
+        if primary_of(server) or server not in _faults_side(builds):
+            return b"d1" if write in server.sent else b"0000"
+        return b"d1" if caught or server.shut_downs else b"0000"
+
+    def replication(server):
+        if not primary_of(server) and write in _faults_side(builds)[0].sent:
+            caught.append(True)
+        return b"# Replication\r\nmaster_link_status:up\r\nmaster_repl_offset:42\r\n"
+
+    for build in BUILDS.values():
+        build.replies[("DEBUG", "DIGEST")] = digest
+        build.replies[("INFO", "replication")] = replication
+        build.replies[("INFO", "keyspace")] = _PERSISTENT
+    # Seed 2 restarts the replica (node 1) right after the first command.
+    result, _ = run(builds, _WRITES, seed=2, checks={"faults": True})
+
+    assert result.status.value == "PASS", result.summary
+
+
+def test_a_restarted_nodes_data_is_judged_once_it_loaded(builds, monkeypatch):
+    # The walk's test of valkey#5170 replayed: a replica restarted from its AOF answered while it still loaded it,
+    # and DEBUG DIGEST then digested the empty dataset loaded so far.
+    monkeypatch.setattr(checks, "_FAULTS", ("restart",))
+    persistence = ("INFO", "persistence")
+
+    def loading(server):
+        return bool(server.shut_downs) and server.sent.count(persistence) < 3
+
+    _replicating(lambda server: b"0000" if loading(server) else b"d1")
+    for build in BUILDS.values():
+        build.replies[("INFO", "keyspace")] = _PERSISTENT
+        build.replies[persistence] = lambda server: f"loading:{int(loading(server))}\r\n".encode()
+    result, value = run(builds, _WRITES, checks={"faults": True})
+
+    assert result.status.value == "PASS", result.summary
+    assert _check(value, "faults")["outcome"] == "pass"
 
 
 @pytest.mark.parametrize(
     "keyspace", [b"db0:keys=6,expires=1,avg_ttl=9", b"db0:keys=6,expires=0,keys_with_volatile_items=2"]
 )
-def test_a_primary_holding_what_may_expire_is_not_judged_across_a_restart(builds, monkeypatch, keyspace):
-    monkeypatch.setattr(checks, "_FAULTS", ("restart-primary",))
-    # The replica catches up with whatever the primary holds after the restart.
+def test_a_node_holding_what_may_expire_is_not_judged_across_a_fault(builds, monkeypatch, keyspace):
+    monkeypatch.setattr(checks, "_FAULTS", ("restart",))
+    # Every node holds whatever the last restart left: the replica catches up with it.
     _replicating(lambda server: b"d2" if any(node.shut_downs for node in SERVERS.values()) else b"d1")
     for build in BUILDS.values():
         build.replies[("INFO", "keyspace")] = b"# Keyspace\r\n" + keyspace + b"\r\n"
-    result, value = run(builds, _WRITES, checks={"faults": True})
+    result, _ = run(builds, _WRITES, checks={"faults": True})
 
     assert result.status.value == "PASS", result.summary
-    assert _check(value, "faults")["persistence"] in checks._PERSISTENCE
 
 
-def test_the_faults_check_skips_a_cluster(builds):
-    result, value = run(builds, [{"command": ["PING"]}], cluster=True, checks={"faults": True})
+def test_a_replica_that_stays_apart_after_a_restart_in_the_faults_check_diverged(builds, monkeypatch):
+    monkeypatch.setattr(checks, "_FAULTS", ("restart",))
+    monkeypatch.setattr(checks, "_SYNC_TIMEOUT_S", 0.2)
+    # A restarted replica comes back with data of its own; a restarted primary keeps the same.
+    _replicating(lambda server: b"d2" if server.shut_downs and server is _faults_side(builds)[1] else b"d1")
+    # Keys that may expire: no node's data is judged across a restart, only the replica's catching up.
+    for build in BUILDS.values():
+        build.replies[("INFO", "keyspace")] = b"# Keyspace\r\ndb0:keys=6,expires=6,avg_ttl=9\r\n"
+    # Seed 2 restarts the replica (node 1) first.
+    result, _ = run(builds, _WRITES, seed=2, checks={"faults": True})
 
-    assert result.status.value == "PASS", result.summary
-    assert _check(value, "faults")["outcome"] == "skipped"
+    assert result.status.value == "FAIL" and not result.crash
+    assert result.diagnostics["reason"] == "replica-diverged"
+    assert result.diagnostics["fault"] == {"before": 1, "fault": "restart", "node": 1}
 
 
 def test_the_replica_check_skips_several_nodes(builds):
