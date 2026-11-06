@@ -76,7 +76,7 @@ _PROBE_FIELDS = {
     # Binaries the run starts later (e.g. a rolling-upgrade target), probed
     # alongside the deployment's own; usually artifact references.
     "binaries": ConfigField(list, default=list, reference=True, items=ConfigField(str, reference=True)),
-    "timeout_s": ConfigField(float, default=15.0, minimum=1, maximum=120),
+    "timeout_s": ConfigField(float, default=60.0, minimum=1, maximum=120),
     # all: the deployment's binaries and `binaries`; listed: only `binaries`.
     "scope": ConfigField(str, default="all", choices=("all", "listed")),
     # Configs the build must NOT know (CONFIG GET returns nothing), e.g. to

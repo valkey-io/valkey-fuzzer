@@ -232,9 +232,10 @@ _CONTAINER_COMMANDS = ("DEBUG", "MODULE", "CONFIG", "CLUSTER")
 # server is a real bug, and DEBUG is allowed (a DEBUG SEGFAULT crashes the server it is sent to, which is the
 # test). An option the parent rejects is dropped on both sides, these included.
 _PRIVATE_SERVER_DEFAULTS = {"sanitize-dump-payload": "yes", "enable-debug-command": "yes"}
-# How long a private server may take to start, and how long a lost connection waits for its process to exit
-# before the loss counts as anything but a crash.
-_START_TIMEOUT_S = 15.0
+# How long a private server may take to start (a sanitizer build takes seconds, and many times that with dozens
+# starting at once), and how long a lost connection waits for its process to exit before the loss counts as
+# anything but a crash.
+_START_TIMEOUT_S = 60.0
 _EXIT_WAIT_S = 5.0
 # How often a command with wait_s is sent again.
 _WAIT_INTERVAL_S = 0.1

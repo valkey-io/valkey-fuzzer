@@ -234,7 +234,7 @@ evidence, which makes it `ERROR`; it is never hidden as unsupported.
 | `min_version` | string or null | `null` | Lowest accepted version, such as `"8.1.0"`. |
 | `min_distinct_builds` | integer, 1 to 64 | 1 | Distinct (version, git SHA) builds the binaries must cover; fewer is `ERROR`. |
 | `binaries` | list of strings or references | `[]` | Further binaries to probe, such as a rolling-upgrade target. |
-| `timeout_s` | number, 1 to 120 | 15 | How long the probe server may take to start. |
+| `timeout_s` | number, 1 to 120 | 60 | How long the probe server may take to start. |
 
 Evidence: `valkey.capability.supported` (per-binary results), on `PASS`.
 

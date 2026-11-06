@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 
 # How long a spawned instance has to answer PING.
-READY_TIMEOUT_S = 30.0
+READY_TIMEOUT_S = 60.0
 # How long a source build (clone and make) may take, at most.
 BUILD_TIMEOUT_S = 1800.0
 # Where valkey-server is built when no binary is configured or on PATH, and the release it builds.

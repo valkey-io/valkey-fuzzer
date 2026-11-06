@@ -490,7 +490,7 @@ class RdbSnapshotOracle:
 
 NONDETERMINISTIC = "this module's serialization is not deterministic across processes"
 # How long each private server of the determinism probe may take to start.
-_PROBE_START_TIMEOUT_S = 15.0
+_PROBE_START_TIMEOUT_S = 60.0
 
 
 def serialization_problem(
