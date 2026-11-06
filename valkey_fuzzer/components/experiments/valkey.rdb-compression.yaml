@@ -47,6 +47,13 @@ startup_overlays:
       bgsave-default-method: {$ref: inputs.bgsave_method}
       appendonly: {$ref: inputs.appendonly}
 components:
+  # The save-and-reload overlay turns the forkless infrastructure on for every
+  # instance, so a build from before it must skip, like one lacking a codec.
+  - use: valkey.capability.build-probe
+    id: build
+    config:
+      deployment_config: [rdbcompression, repl-compression, forkless-infrastructure-enabled, bgsave-default-method]
+
   - use: valkey.workload.key-value
     id: writes
     config:

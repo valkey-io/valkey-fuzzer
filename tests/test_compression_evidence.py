@@ -9,7 +9,7 @@ import pytest
 from valkey.exceptions import BusyLoadingError
 
 from tests.support import VirtualClock, valkey_build
-from tests.valkey_experiments_support import fake_context, resolved, unit_plan
+from tests.valkey_experiments_support import fake_context, resolved, unit_plan, valkey_experiment
 from valkey_fuzzer.components import capabilities, server, snapshots
 from valkey_fuzzer.components.compression import ReplCompressionOracle, unsettled_links
 from valkey_fuzzer.components.files import write_jsonl
@@ -97,6 +97,44 @@ def test_the_build_probe_skips_only_a_build_that_cannot_run_the_scenario(
     result = capabilities.BuildProbe().probe(FakeContext(plan=plan), spec)
     assert result.status.value == status, result.summary
     assert summary in result.summary
+
+
+def test_rdb_compression_skips_a_build_from_before_the_forkless_infrastructure(monkeypatch, tmp_path):
+    """valkey #3531, #4539: the save-and-reload overlay turns forkless-infrastructure-enabled on for every
+    instance, so a build from before it rejected the deployment config and the walk's runs ERRORed instead of
+    skipping as unsupported."""
+
+    class _OldServer(_ProbeServer):
+        def start(self):
+            if "forkless-infrastructure-enabled" in self.config:
+                return (
+                    "FATAL CONFIG FILE ERROR: Bad directive or wrong number of arguments"
+                    " >>> 'forkless-infrastructure-enabled \"yes\"'"
+                )
+
+    binary = valkey_build(tmp_path, "bgsave-default-method")
+    monkeypatch.setattr(capabilities, "PrivateServer", lambda *a, **k: _OldServer(True, {}, {}, *a, **k))
+    probe = next(
+        item
+        for item in valkey_experiment("valkey.rdb-compression").components
+        if item.use == "valkey.capability.build-probe"
+    )
+    overlay = {
+        "forkless-infrastructure-enabled": "yes",
+        "bgsave-default-method": "fork",
+        "appendonly": "no",
+        "rdbcompression": "yes",
+    }
+    overlays = (StartupOverlay("save-and-reload", InstanceSelector.parse({}), overlay),)
+    plan = unit_plan(document={"mode": "standalone", "valkey_binary": str(binary)}, startup_overlays=overlays)
+    spec = resolved(
+        ComponentSpec(
+            role=ComponentRole.CAPABILITY, use="valkey.capability.build-probe", id="build", config=dict(probe.config)
+        )
+    )
+    result = capabilities.BuildProbe().probe(FakeContext(plan=plan), spec)
+    assert result.status.value == "SKIP", result.summary
+    assert "forkless-infrastructure-enabled" in result.summary and "which it may lack" in result.summary
 
 
 @pytest.mark.parametrize("written", ["bgsave-default-method", "forkless-policy"])
