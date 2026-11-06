@@ -210,6 +210,7 @@ _COMMANDS_FIELDS = {
             "acl": ConfigField(bool, default=False),
             "concurrency": ConfigField(int, default=0, minimum=0, maximum=16),
             "compat": ConfigField(bool, default=False),
+            "faults": ConfigField(bool, default=False),
         },
         allow_none=True,
         default=None,

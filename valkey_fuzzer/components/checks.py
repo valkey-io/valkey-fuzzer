@@ -11,6 +11,10 @@ servers, each check its own way, and a check that sees Valkey do something wrong
   only while the server answers others (``hang``), and with ``replica`` the replica must catch up.
 - ``compat``: the parent's data after the sequence, saved, must load into the candidate (``compat-load``) and
   replicate to it (``compat-sync``) with the parent's digest.
+- ``faults``: the candidate's node 0 has a replica, and between commands drawn from the run's seed the check
+  restarts the primary, restarts the replica, or makes the primary DEBUG RELOAD; replies are not judged, but every
+  restart must come back, every DEBUG RELOAD must succeed (``reload-failed``), and the replica must catch up after
+  each replica restart and at the end (``replica-diverged``).
 
 A candidate server that exits during a check crashed, and is reported as a crash. The checks run at once, each on
 servers of its own.
@@ -38,7 +42,13 @@ from . import actions
 from .oracles import CRASH_PATTERNS, crash_cause, scan_for_crashes
 from .polling import poll_until
 
-_ORDER = ("variants", "replica", "acl", "concurrency", "compat")
+_ORDER = ("variants", "replica", "acl", "concurrency", "compat", "faults")
+# What the faults check does between two commands: restart node 0 (the primary) or node 1 (its replica), each
+# from its own directory, or make node 0 save and load its data in place.
+_FAULTS = ("restart-primary", "restart-replica", "reload")
+# How the faults check's servers persist their data across a restart (private servers save nothing otherwise):
+# an RDB saved at shutdown, or the AOF.
+_PERSISTENCE = ({"save": "3600 1"}, {"appendonly": "yes"})
 # Every compact encoding off: a hash, set, or sorted set is never a listpack or intset, and a list of two or more
 # items is a quicklist of one-item nodes.
 _ENCODINGS = {
@@ -246,6 +256,18 @@ def _ask(side: Any, index: int, *command: Any) -> dict[str, Any]:
         return side.connection(index, _CHECK).send(list(command))
     except (valkey.exceptions.ValkeyError, OSError) as exc:
         return {"error": f"cannot connect: {type(exc).__name__}: {exc}", "unanswered": True}
+
+
+def _volatile(side: Any) -> bool:
+    """Whether node 0 of ``side`` holds anything that may expire (a key, or a hash field), or cannot tell."""
+
+    record = _ask(side, 0, "INFO", "keyspace")
+    if "reply" not in record:
+        return True
+    databases = (
+        dict(item.split("=", 1) for item in value.split(",") if "=" in item) for value in _fields(record).values()
+    )
+    return any(int(db.get("expires", 0)) or int(db.get("keys_with_volatile_items", 0)) for db in databases)
 
 
 def _ping(side: Any, index: int) -> dict[str, Any]:
@@ -698,6 +720,102 @@ class _Checks:
                 crash=True,
             )
         return self.diverged("concurrency", "replica-diverged", synced, state, connections=count)
+
+    # -- faults ----------------------------------------------------------------------------------------------
+
+    def faults(self) -> dict[str, Any]:
+        if self.config["nodes"] > 1 or self.config["cluster"]:
+            return _skipped("the sequence runs on several nodes or a cluster, whose topology it sets up itself")
+        if _sets_replication(self.commands):
+            return _skipped("the sequence sets its node's replication itself")
+        if _writes_unreplicated(self.commands):
+            return _skipped("the sequence writes keys its node does not replicate (DEBUG POPULATE)")
+        rng = self.context.rng(self.spec.id, "faults")
+        # Each fault comes before a command, or after the last one (before == len(commands)).
+        gaps = rng.sample(range(1, len(self.commands) + 1), k=min(len(self.commands), rng.randint(1, 3)))
+        schedule = [{"before": before, "fault": rng.choice(_FAULTS)} for before in sorted(gaps)]
+        persistence = rng.choice(_PERSISTENCE)
+        # Node 1 is the replica; the sequence names node 0 only.
+        side, failed = self.start("candidate.faults", nodes=2, options={**_QUICK_SYNC, **persistence})
+        synced, state, problem = False, {}, None
+        try:
+            if not failed:
+                synced, state = self.replicate((side, 0), (side, 1))
+                if not synced:
+                    failed = f"the replica did not sync before the sequence: {canonical_json(state)}"
+            if not failed:
+                _set_on_replica(side, self.commands)
+                side.replies, start = [], 0
+                for fault in [*schedule, None]:
+                    end = len(self.commands) if fault is None else fault["before"]
+                    replies = actions._run_sequence(side, self.commands[start:end], self.context)
+                    side.replies += [{**record, "index": record["index"] + start} for record in replies]
+                    start = end
+                    if fault is None or (side.replies and side.replies[-1].get("unanswered")):
+                        break
+                    problem = self.inject(side, fault)
+                    if problem is not None:
+                        break
+                if problem is None and not (side.replies and side.replies[-1].get("unanswered")):
+                    synced, state = self.converged((side, 0), (side, 1))
+        finally:
+            self.finish(side)
+        decided = self.judge("faults", side, failed, faults=schedule, persistence=persistence)
+        if decided is not None:
+            return decided
+        if problem is not None:
+            return problem
+        if side.replies and side.replies[-1].get("unanswered"):
+            last = side.replies[-1]
+            return _errored(
+                f"command {last['index']} ({actions._step_text(self.commands[last['index']])}) got no reply "
+                f"after the faults {canonical_json(schedule)}: {last.get('error')}"
+            )
+        outcome = self.diverged("faults", "replica-diverged", synced, state, faults=schedule)
+        # What the check did, to reproduce it: the run's seed draws the same schedule again.
+        return {**outcome, "faults": schedule, "persistence": persistence} if outcome["outcome"] == "pass" else outcome
+
+    def inject(self, side: Any, fault: Mapping[str, Any]) -> Optional[dict[str, Any]]:
+        """Apply one fault of the faults check to ``side``: None once it is in place and the side is whole again,
+        else the check's outcome."""
+
+        if fault["fault"] == "reload":
+            reloaded = _ask(side, 0, "DEBUG", "RELOAD")
+            if "reply" in reloaded:
+                return None
+            return _failed(
+                f"DEBUG RELOAD before command {fault['before']} failed: {canonical_json(reloaded)}",
+                {"reason": "reload-failed", "check": "faults", "fault": dict(fault), "reply": reloaded},
+            )
+        node = 0 if fault["fault"] == "restart-primary" else 1
+        # A primary must come back with its data, judged when nothing it holds can expire meanwhile.
+        before = _ask(side, 0, "DEBUG", "DIGEST") if node == 0 and not _volatile(side) else None
+        restarted = side.restart(node, self.context)
+        if "reply" not in restarted:
+            # A node that exited at startup is judged as a crash (see faults); one that did not come back otherwise,
+            # an error.
+            return _errored(f"{fault['fault']} before command {fault['before']}: {restarted['error']}")
+        if before is not None and "reply" in before:
+            after = _ask(side, 0, "DEBUG", "DIGEST")
+            if "reply" in after and after != before:
+                return _failed(
+                    f"the primary came back from a restart before command {fault['before']} with DEBUG DIGEST "
+                    f"{canonical_json(after)}, not {canonical_json(before)}",
+                    {
+                        "reason": "restart-lost-data",
+                        "check": "faults",
+                        "fault": dict(fault),
+                        "before": before,
+                        "after": after,
+                    },
+                )
+        if node == 1:
+            # The replica starts as a primary: REPLICAOF was a command, not its configuration.
+            synced, state = self.replicate((side, 0), (side, 1))
+            _set_on_replica(side, self.commands)
+            if not synced:
+                return self.diverged("faults", "replica-diverged", synced, state, fault=dict(fault))
+        return None
 
     # -- compat ----------------------------------------------------------------------------------------------
 

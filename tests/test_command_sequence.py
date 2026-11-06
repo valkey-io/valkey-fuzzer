@@ -1405,6 +1405,106 @@ def test_the_sequences_settings_are_made_on_the_replica_first(builds):
     assert ("SET", "k", "v") not in replica.sent
 
 
+_WRITES = [{"command": ["SET", f"k{index}", "v"]} for index in range(6)]
+
+
+@pytest.mark.parametrize("fault", checks._FAULTS)
+def test_the_faults_check_restarts_or_reloads_between_commands_and_the_replica_catches_up(builds, monkeypatch, fault):
+    monkeypatch.setattr(checks, "_FAULTS", (fault,))
+    _replicating()
+    result, value = run(builds, _WRITES, checks={"faults": True})
+
+    assert result.status.value == "PASS", result.summary
+    outcome = _check(value, "faults")
+    assert outcome["outcome"] == "pass" and {item["fault"] for item in outcome["faults"]} == {fault}
+    assert 1 <= len(outcome["faults"]) <= 3 and all(1 <= item["before"] <= len(_WRITES) for item in outcome["faults"])
+    primary, replica = _nodes(BUILDS[builds["candidate"]])[1:]
+    # Every command of the sequence ran on the primary, around the faults.
+    assert all(("SET", f"k{index}", "v") in primary.sent for index in range(len(_WRITES)))
+    restarted = {"restart-primary": primary, "restart-replica": replica}.get(fault)
+    if restarted is None:
+        assert primary.sent.count(("DEBUG", "RELOAD")) == len(outcome["faults"])
+    else:
+        assert restarted.shut_downs == len(outcome["faults"])
+    if fault == "restart-replica":
+        # The replica comes back a primary: it is made a replica again.
+        assert replica.sent.count(("REPLICAOF", "127.0.0.1", str(primary.port))) == 1 + len(outcome["faults"])
+
+
+def test_a_reload_that_fails_in_the_faults_check_fails_the_run(builds, monkeypatch):
+    monkeypatch.setattr(checks, "_FAULTS", ("reload",))
+    _replicating()
+    for build in BUILDS.values():
+        build.replies[("DEBUG", "RELOAD")] = Error("ERR Error trying to load the RDB dump")
+    result, _ = run(builds, _WRITES, checks={"faults": True})
+
+    assert result.status.value == "FAIL" and not result.crash
+    assert result.diagnostics["reason"] == "reload-failed"
+    assert result.summary.startswith("DEBUG RELOAD before command ")
+
+
+def test_a_primary_that_does_not_come_back_from_a_restart_in_the_faults_check_crashed(builds, monkeypatch):
+    monkeypatch.setattr(checks, "_FAULTS", ("restart-primary",))
+    _replicating()
+    BUILDS[builds["candidate"]].restart_exits = True
+    result, _ = run(builds, _WRITES, checks={"faults": True})
+
+    assert result.status.value == "FAIL" and result.crash
+    assert result.summary == (
+        "the candidate exited during the faults check: 1:M 03 Nov 2026 10:00:02.000 # Fatal error, can't open "
+        "config file 'valkey.conf'"
+    )
+
+
+def test_a_replica_that_stays_apart_after_a_restart_in_the_faults_check_diverged(builds, monkeypatch):
+    monkeypatch.setattr(checks, "_FAULTS", ("restart-replica",))
+    monkeypatch.setattr(checks, "_SYNC_TIMEOUT_S", 0.2)
+    # The restarted replica comes back with data of its own.
+    _replicating(lambda server: b"d2" if server.shut_downs else b"d1")
+    result, _ = run(builds, _WRITES, checks={"faults": True})
+
+    assert result.status.value == "FAIL" and not result.crash
+    assert (
+        result.diagnostics["reason"] == "replica-diverged" and result.diagnostics["fault"]["fault"] == "restart-replica"
+    )
+
+
+def test_a_primary_that_comes_back_from_a_restart_with_other_data_lost_it(builds, monkeypatch):
+    monkeypatch.setattr(checks, "_FAULTS", ("restart-primary",))
+    _replicating(lambda server: b"d2" if server.shut_downs else b"d1")
+    for build in BUILDS.values():
+        build.replies[("INFO", "keyspace")] = (
+            b"# Keyspace\r\ndb0:keys=6,expires=0,avg_ttl=0,keys_with_volatile_items=0\r\n"
+        )
+    result, _ = run(builds, _WRITES, checks={"faults": True})
+
+    assert result.status.value == "FAIL" and not result.crash
+    assert result.diagnostics["reason"] == "restart-lost-data"
+    assert (result.diagnostics["before"], result.diagnostics["after"]) == ({"reply": "d1"}, {"reply": "d2"})
+
+
+@pytest.mark.parametrize(
+    "keyspace", [b"db0:keys=6,expires=1,avg_ttl=9", b"db0:keys=6,expires=0,keys_with_volatile_items=2"]
+)
+def test_a_primary_holding_what_may_expire_is_not_judged_across_a_restart(builds, monkeypatch, keyspace):
+    monkeypatch.setattr(checks, "_FAULTS", ("restart-primary",))
+    # The replica catches up with whatever the primary holds after the restart.
+    _replicating(lambda server: b"d2" if any(node.shut_downs for node in SERVERS.values()) else b"d1")
+    for build in BUILDS.values():
+        build.replies[("INFO", "keyspace")] = b"# Keyspace\r\n" + keyspace + b"\r\n"
+    result, value = run(builds, _WRITES, checks={"faults": True})
+
+    assert result.status.value == "PASS", result.summary
+    assert _check(value, "faults")["persistence"] in checks._PERSISTENCE
+
+
+def test_the_faults_check_skips_a_cluster(builds):
+    result, value = run(builds, [{"command": ["PING"]}], cluster=True, checks={"faults": True})
+
+    assert result.status.value == "PASS", result.summary
+    assert _check(value, "faults")["outcome"] == "skipped"
+
+
 def test_the_replica_check_skips_several_nodes(builds):
     result, value = run(builds, [{"command": ["PING"]}], nodes=2, checks={"replica": True})
 
@@ -1817,7 +1917,7 @@ def test_checks_are_skipped_when_the_sequence_did_not_complete(builds):
 
 @pytest.mark.parametrize("finishing", [checks._ORDER, checks._ORDER[::-1]], ids=["in-order", "reversed"])
 def test_checks_run_at_once_and_combine_in_their_order_whichever_finishes_first(monkeypatch, finishing):
-    # Every check waits until all five started, so they run at once, and then finishes in the order ``finishing``.
+    # Every check waits until all of them started, so they run at once, and then finishes in the order ``finishing``.
     started = threading.Barrier(len(checks._ORDER))
     seen = []
 
@@ -1853,5 +1953,6 @@ def test_checks_run_at_once_and_combine_in_their_order_whichever_finishes_first(
         ("acl", checks._failed("acl failed", {"check": "acl"})),
         ("concurrency", {"outcome": "pass"}),
         ("compat", checks._failed("compat failed", {"check": "compat"})),
+        ("faults", {"outcome": "pass"}),
     ]
     assert kept == [f"{name}.log" for name in checks._ORDER]

@@ -379,7 +379,7 @@ and `modules_parent`, on another build of a module.
 | `resp` | 2 or 3 | 2 | The protocol of every connection. |
 | `timeout_s` | number, 0.1 to 3600 | 10 | Per command: a reply that takes longer is `unanswered`, and the sequence stops there. |
 | `commands` | list of mappings | | The sequence, below. |
-| `checks` | mapping or null | `null` | With `compare_with` (or `modules_parent`): `{variants: bool, replica: bool, acl: bool, concurrency: 0 to 16, compat: bool}`, each off unless set, below. `compat` needs `compare_with`. |
+| `checks` | mapping or null | `null` | With `compare_with` (or `modules_parent`): `{variants: bool, replica: bool, acl: bool, concurrency: 0 to 16, compat: bool, faults: bool}`, each off unless set, below. `compat` needs `compare_with`. |
 
 Each command has:
 
@@ -481,9 +481,19 @@ up. `compat`: a fresh parent runs it and `SAVE`s; its RDB (kept as
 `parent.compat.rdb`) must load into a fresh candidate with the parent's
 digest, compared after a reload as a replica, which keeps keys expired since
 the save (`compat-load`), and a fresh candidate replicating the parent must
-reach it (`compat-sync`). `acl` and `concurrency` leave restarts out and do
-not wait (`wait_s`); `replica` and `compat` skip several nodes and `cluster`,
-`compat` also a module loaded on one build only. A check that could not run
+reach it (`compat-sync`). `faults`: node 0 has a replica, both persisting by
+an RDB saved at shutdown or by the AOF (drawn from the run's seed), and
+before one to three commands, also drawn, the check restarts the primary,
+restarts the replica (made a replica again), or sends `DEBUG RELOAD` to the
+primary; replies are unjudged, but a node that does not come back is a crash,
+a failed `DEBUG RELOAD` is `reload-failed`, a primary whose `DEBUG DIGEST`
+differs after its restart is `restart-lost-data` (judged only when it holds
+no expiring key or hash field), and the replica must reach the primary's
+digest after each replica restart and at the end (`replica-diverged`); a
+passing outcome lists the faults and the persistence. `acl` and
+`concurrency` leave restarts out and do not wait (`wait_s`); `replica`,
+`faults` and `compat` skip several nodes and `cluster`, `compat` also a module
+loaded on one build only. A check that could not run
 is recorded as `error` and leaves the verdict alone.
 
 Without `compare_with`, `expect` alone judges the sequence: `FAIL` on a
