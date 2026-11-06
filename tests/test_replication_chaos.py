@@ -836,3 +836,20 @@ def test_a_replica_behind_every_sample_may_lack_what_came_before_the_term():
     tenure = _Tenure("valkey-0", 100.0, [(100.1, "r", 50), (100.5, "r", 900)])
     assert tenure.synced_at("r", 0) == 0.0
     assert tenure.synced_at("r", 60) == 100.1
+
+
+def test_a_window_ends_at_the_exit_that_ended_its_primarys_tenure_not_an_earlier_one():
+    # The soak (seed 2118318908) after 01cb9f4: valkey-1, killed in wave 1, was primary again in wave 2 when it was
+    # killed; its heal window, opening at the start of time, ended at the wave 1 exit and left its writes unbudgeted.
+    import threading
+
+    from valkey_fuzzer.components.replication_chaos import StandaloneWaves, _Tenure
+
+    run = StandaloneWaves.__new__(StandaloneWaves)
+    run.lock, run.windows, run.demoted_at = threading.Lock(), [], {"valkey-0": [], "valkey-1": []}
+    run.kills = [{"instance_id": "valkey-1", "at": 25.5, "exited_at": 25.6},
+                 {"instance_id": "valkey-1", "at": 37.8, "exited_at": 37.9}]  # fmt: skip
+    run.term, run.primary = _Tenure("valkey-1", 35.0, [(35.5, "r1", 900)]), "valkey-1"
+    run.succeed("valkey-0", 38.0, forced=True, sync={"replid": "r0", "offset": 10}, reason="heal promoted valkey-0")
+    (window,) = run.close_windows()
+    assert (window["start"], window["end"]) == (0.0, 37.9)

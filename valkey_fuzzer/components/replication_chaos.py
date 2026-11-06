@@ -291,6 +291,8 @@ class StandaloneWaves(WaveRun):
                         "instance_id": old.instance_id,
                         "start": start,
                         "opened_at": at,
+                        # The old primary's tenure: only an exit during it ends the window (start may be earlier).
+                        "tenure_started_at": old.started_at,
                         "reason": reason,
                         # What the start was derived from, for the report.
                         "sync": sync,
@@ -313,7 +315,9 @@ class StandaloneWaves(WaveRun):
                 ends += [
                     kill["exited_at"]
                     for kill in self.kills
-                    if kill["instance_id"] == instance and kill.get("exited_at") and kill["at"] >= window["start"]
+                    if kill["instance_id"] == instance
+                    and kill.get("exited_at")
+                    and kill["at"] >= window["tenure_started_at"]
                 ]
                 window["end"] = min(ends) if ends else now
                 # A kill before the promotion ends the window at the exit, which may precede the promotion.
