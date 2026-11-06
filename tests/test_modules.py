@@ -2,6 +2,7 @@
 of ``valkey.oracle.dataset-digest``, the deployment's modules on every private server that holds its data, and
 ``valkey.artifact.local-module``."""
 
+import base64
 import dataclasses
 import hashlib
 import os
@@ -14,7 +15,7 @@ from tests.test_compression_evidence import _bgsave
 from tests.test_valkey_components import FakeHandle, _spec
 from tests.valkey_experiments_support import evidence_values, fake_context, resolved, unit_plan, valkey_service
 from valkey_fuzzer.components import capabilities, providers, snapshots
-from valkey_fuzzer.components.keyspace import canonical_value, keyspace_digest
+from valkey_fuzzer.components.keyspace import canonical_value, keyspace_digest, keyspace_snapshot
 from valkey_fuzzer.components.snapshots import NONDETERMINISTIC, DatasetDigestOracle
 from valkey_fuzzer.environment import EnvironmentProviderRegistry, EnvironmentProvisioner, EnvironmentSpec
 from valkey_fuzzer.plan import ComponentSpec
@@ -320,3 +321,28 @@ def test_an_artifact_override_resolves_a_local_module_elsewhere():
         "use": "valkey.artifact.local-module",
         "with": {"path": "/here/libjson.so"},
     }
+
+
+class BytesClient:
+    """A client that does not decode: keys, types and values come back as bytes, as the digest oracle reads."""
+
+    def __init__(self, hashes):
+        self.hashes = hashes
+
+    def type(self, key):
+        return b"hash" if key in self.hashes else b"none"
+
+    def hgetall(self, key):
+        return dict(self.hashes[key])
+
+    def scan_iter(self, match=None, count=1000):
+        return iter(sorted(self.hashes))
+
+
+def test_binary_values_are_read_exactly_not_decoded():
+    # valkey-search's vectors are FLOAT32 bytes in a hash: the digest oracle could not read them (UnicodeDecodeError).
+    vector = b"\x00\x00\x80?\xc3\x28\x00\x00"
+    snapshot = keyspace_snapshot(BytesClient({b"d:1": {b"v": vector, b"tag": b"t1"}}))
+    assert snapshot == {"d:1": ["hash", [["tag", "t1"], ["v", {"$base64": base64.b64encode(vector).decode()}]]]}
+    other = keyspace_snapshot(BytesClient({b"d:1": {b"v": vector[:-1] + b"\x01", b"tag": b"t1"}}))
+    assert keyspace_digest(other) != keyspace_digest(snapshot)

@@ -1,5 +1,6 @@
 """An instance's keyspace as canonical data, and its digest."""
 
+import base64
 import hashlib
 import json
 from collections.abc import Mapping
@@ -20,29 +21,58 @@ def dump_body(payload: bytes) -> bytes:
     return payload[:-_DUMP_TRAILER_BYTES]
 
 
-def canonical_value(client: Any, key: str) -> Optional[list]:
-    """Return ``[type, content]`` with order-insensitive types sorted, or None.
+def exact(value: Any) -> Any:
+    """A reply as data that keeps every byte: bytes as the string they decode to as UTF-8, else
+    ``{"$base64": ...}``; a list element by element. Values a decoding client read stay as they are."""
+
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except UnicodeDecodeError:
+            return {"$base64": base64.b64encode(value).decode("ascii")}
+    if isinstance(value, (list, tuple)):
+        return [exact(item) for item in value]
+    return value
+
+
+def _ordered(items: Any) -> list:
+    return sorted(items, key=lambda item: json.dumps(item, sort_keys=True))
+
+
+def _key(key: Any) -> str:
+    """A key as a snapshot names it: its text, or ``$base64:...`` for a key that is not UTF-8."""
+
+    named = exact(key)
+    return named if isinstance(named, str) else f"$base64:{named['$base64']}"
+
+
+def canonical_value(client: Any, key: Any) -> Optional[list]:
+    """Return ``[type, content]`` with order-insensitive types sorted, or None. ``client`` may decode its replies
+    or not: one that does not reads binary values (valkey-search's vectors) exactly.
 
     A type it does not read, a module's, is ``[type, SHA-256 of its DUMP payload less the RDB version and
     CRC64]``: the module's serialization, which compares across processes only when the module writes a value
     the same way every time (``valkey.oracle.dataset-digest`` probes that).
     """
 
-    kind = client.type(key)
+    kind = exact(client.type(key))
     if kind == "none":
         return None
     if kind == "string":
-        content: Any = client.get(key)
+        content: Any = exact(client.get(key))
     elif kind == "hash":
-        content = sorted(client.hgetall(key).items())
+        content = _ordered([exact(field), exact(value)] for field, value in client.hgetall(key).items())
     elif kind == "list":
-        content = client.lrange(key, 0, -1)
+        content = exact(client.lrange(key, 0, -1))
     elif kind == "set":
-        content = sorted(client.smembers(key))
+        content = _ordered(exact(member) for member in client.smembers(key))
     elif kind == "zset":
-        content = [[member, repr(score)] for member, score in client.zrange(key, 0, -1, withscores=True)]
+        content = [[exact(member), repr(score)] for member, score in client.zrange(key, 0, -1, withscores=True)]
     elif kind == "stream":
-        content = [[entry_id, sorted(fields.items())] for entry_id, fields in client.xrange(key)]
+        content = [
+            [exact(entry_id), _ordered([exact(field), exact(value)] for field, value in fields.items())]
+            for entry_id, fields in client.xrange(key)
+        ]
     else:
         # DUMP is never decoded, so a decoding client returns the payload as bytes.
         payload = client.dump(key)
@@ -59,7 +89,7 @@ def keyspace_snapshot(client: Any, match: Optional[str] = None, count: int = 100
     for key in client.scan_iter(match=match, count=count):
         value = canonical_value(client, key)
         if value is not None:
-            snapshot[key] = value
+            snapshot[_key(key)] = value
     return snapshot
 
 

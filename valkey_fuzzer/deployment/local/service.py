@@ -385,8 +385,9 @@ class ValkeyDeploymentService:
 
     # -- Clients and roles ----------------------------------------------------
 
-    def new_client(self, instance_id: str, timeout: float = 5.0) -> Any:
-        """Return a fresh client for one instance; it is closed at deployment cleanup.
+    def new_client(self, instance_id: str, timeout: float = 5.0, *, decode_responses: bool = True) -> Any:
+        """Return a fresh client for one instance; it is closed at deployment cleanup. With
+        ``decode_responses`` false its replies are bytes, for values that are not text.
 
         It sends each command once: a re-sent write after a timeout would hide
         whether the first attempt was applied, which the workloads record.
@@ -398,7 +399,7 @@ class ValkeyDeploymentService:
                 port=info.port,
                 socket_timeout=timeout,
                 socket_connect_timeout=timeout,
-                decode_responses=True,
+                decode_responses=decode_responses,
                 retry=Retry(NoBackoff(), 0),
             )
             self._clients.add(client)

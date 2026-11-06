@@ -168,7 +168,7 @@ class FakeHandle:
     def process_output_file(self, node_id):
         return os.path.join(self.log_dir, f"{node_id}.stdio.log")
 
-    def new_client(self, node_id, timeout=5.0):
+    def new_client(self, node_id, timeout=5.0, decode_responses=True):
         return self.clients.setdefault(node_id, FakeClient())
 
     def send_signal(self, node_id, signum):
@@ -944,7 +944,7 @@ def test_evidence_a_config_names_that_no_component_declares_does_not_compile(com
 
 
 class _LivenessHandle(FakeHandle):
-    def new_client(self, node_id, timeout=5.0):
+    def new_client(self, node_id, timeout=5.0, decode_responses=True):
         client = FakeClient()
         client.ping, client.info = (lambda: True), (lambda section: {"loading": 0})
         return client

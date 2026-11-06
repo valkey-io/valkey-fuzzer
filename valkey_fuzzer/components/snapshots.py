@@ -569,7 +569,7 @@ class DatasetDigestOracle:
             problems.append("no instance is a primary, so no dataset was read")
 
         def read_primary(instance_id: str) -> dict[str, list]:
-            with handle.new_client(instance_id, timeout=10.0) as client:
+            with handle.new_client(instance_id, timeout=10.0, decode_responses=False) as client:
                 return keyspace_snapshot(client, config["match"])
 
         # One key of each module type, and the primary holding it: the determinism probe's sample.
@@ -598,7 +598,7 @@ class DatasetDigestOracle:
                 error = None
                 primary_id = None
                 snapshot: dict[str, list] = {}
-                with handle.new_client(instance_id, timeout=10.0) as client:
+                with handle.new_client(instance_id, timeout=10.0, decode_responses=False) as client:
                     try:
                         info = client.info("replication")
                         link = parse_replication(info)
