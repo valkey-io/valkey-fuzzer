@@ -425,12 +425,14 @@ def test_an_expect_the_candidate_violates_is_fail(builds):
         {"command": ["LRANGE", "l", 0, -1], "expect_difference": True, "expect": {"equals": ["a", "b"]}},
         {"command": ["PING"], "expect": {"error": True}},
     ]
-    result, _ = run(builds, commands)
+    result, value = run(builds, commands)
 
     assert result.status.value == "FAIL"
     assert 'command 0 (LRANGE l 0 -1) replied {"reply":["a","x"]}, not {"equals":["a","b"]}' in result.summary
     # PING violates its expect alike on both builds: not about the change, so not part of the failure.
     assert "command 1 (PING)" not in result.summary
+    # The evidence names every command whose reply violates its expect, for the walk (fuzzer#82).
+    assert value["violating"] == [0, 1]
 
 
 def test_an_expect_both_builds_violate_alike_is_disputed_not_fail(builds):

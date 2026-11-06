@@ -1178,6 +1178,7 @@ class CommandsAction:
             if server.exited is not None:
                 record[server.label]["exited"] = server.exited
                 record[server.label]["exited_node"] = server.exited_node
+        record["violating"] = _violating(commands, candidate.replies)
         checks: dict[str, dict[str, Any]] = {}
         check_logs: list[str] = []
         if config["checks"] is not None:
@@ -2343,6 +2344,8 @@ _COMMANDS_DECLARES = Declarations(
                     # Marked commands whose replies differ, and unmarked ones whose replies differ, by index.
                     "reached": ConfigField(list, items=INTEGER),
                     "unexplained": ConfigField(list, items=INTEGER),
+                    # With compare_with: the commands whose reply on the build under test violates their expect.
+                    "violating": optional(list),
                     # Without compare_with: the instance the sequence ran on.
                     "instance_id": optional(str),
                     # With checks: each enabled check's outcome, by name (see checks.py).
