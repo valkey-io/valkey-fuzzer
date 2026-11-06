@@ -1308,6 +1308,18 @@ def test_variants_leave_internals_and_configuration_alone(builds, command):
     assert result.status.value == "PASS", result.summary
 
 
+@pytest.mark.parametrize(("expect", "status"), [({"min": 1}, "PASS"), ({"equals": 36}, "FAIL")])
+def test_variants_compare_a_waited_reply_only_when_its_expect_fixes_it(builds, expect, status):
+    # As in the walk's test of valkey-io/valkey#4104 (fuzzer#83): CLUSTER COUNTKEYSINSLOT was polled until a slot
+    # migration had moved at least one key, so it replied with how far the migration had got (16 keys on one run,
+    # 36 on another); a wait for an exact reply ends on that reply.
+    for build in BUILDS.values():
+        build.replies = {("DBSIZE",): lambda server: 16 if _encodings_off(server) else 36}
+    result, _ = run(builds, [{"command": ["DBSIZE"], "wait_s": 1, "expect": expect}], checks={"variants": True})
+
+    assert result.status.value == status, result.summary
+
+
 def test_a_modules_command_may_reply_by_protocol_and_valkeys_may_not(builds):
     # As in the walk's test of valkey-io/valkey#5157: a test module's command replies otherwise to a RESP3 client.
     for build in BUILDS.values():

@@ -451,6 +451,9 @@ class _Checks:
             and " ".join(_words(item)[:2]) not in _VARIES
             and _words(item)[0] not in _VARIES
             and not _words(item)[0].endswith("SCAN")
+            # A command waited on until its reply met a predicate replies with whatever met it first, as far as
+            # some asynchronous work had got (fuzzer#83); only a wait for an exact reply ends on that reply.
+            and (item["wait_s"] is None or "equals" in (item["expect"] or {}))
         ]
         if self.modules["candidate"]:
             encodings = _skipped("modules are loaded")
