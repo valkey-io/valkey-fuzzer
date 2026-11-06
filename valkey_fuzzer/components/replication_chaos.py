@@ -113,14 +113,16 @@ class _Tenure:
     samples: list = field(default_factory=list)
 
     def synced_at(self, replid: Optional[str], offset: Optional[int]) -> float:
-        """The latest sample time whose offset ``offset`` reached; the term's start if none."""
+        """The latest sample time whose offset ``offset`` reached; the start of time if none. A replica behind
+        every sample may lack anything its primary acknowledged, from before this term too: one that was
+        promoted 0.3 s after the workload began seeding held none of it."""
 
         reached = [
             at
             for at, sample_replid, value in self.samples
             if sample_replid == replid and offset is not None and value <= offset
         ]
-        return max(reached, default=self.started_at)
+        return max(reached, default=0.0)
 
 
 def _replication_offset(info: Mapping[str, Any]) -> Optional[int]:

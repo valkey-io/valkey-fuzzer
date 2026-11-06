@@ -826,3 +826,13 @@ def test_a_topology_change_that_raised_is_an_error_unless_an_interfering_operati
     result, _ = run_chaos(Unreachable(), [[{"op": "promote", "target": "valkey-1", "mode": "force"}]])
     assert result.status is ComponentStatus.ERROR, result.summary
     assert "promote 1.0 was not injected: valkey-1 did not answer INFO" in result.summary
+
+
+def test_a_replica_behind_every_sample_may_lack_what_came_before_the_term():
+    # The soak (seed 1477792882): promoted with offset 0 just after the workload began seeding, the replica held
+    # none of the preload, which the window, opening at the term's start, did not cover.
+    from valkey_fuzzer.components.replication_chaos import _Tenure
+
+    tenure = _Tenure("valkey-0", 100.0, [(100.1, "r", 50), (100.5, "r", 900)])
+    assert tenure.synced_at("r", 0) == 0.0
+    assert tenure.synced_at("r", 60) == 100.1

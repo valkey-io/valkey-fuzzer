@@ -119,7 +119,40 @@ def write_test_keys(
             "deployment; see the log for each failed write"
         )
     logger.info("Successfully wrote %s test keys to the %s deployment", len(written), mode.value)
+    _await_replicas(live_instances, mode, config)
     return written
+
+
+def _await_replicas(live: list[TopologyNode], mode: DeploymentMode, config: DataConsistencyValidationConfig) -> None:
+    """WAIT on every live primary until its live replicas acknowledged the test keys, within half the timeout.
+
+    Otherwise a forced promotion right after the write could take a replica that had none of them, a loss no
+    chaos operation is to blame for. Replicas that do not catch up in time, or a primary that does not answer,
+    are left to the checks, which judge the keys later.
+    """
+
+    for primary in (row for row in live if row.role == "primary"):
+        replicas = [
+            row
+            for row in live
+            if row.role == "replica" and (mode != DeploymentMode.CLUSTER or row.primary_id == primary.node_id)
+        ]
+        if not replicas:
+            continue
+        try:
+            with valkey_client(primary.host, primary.port, config.timeout) as client:
+                acknowledged = int(client.execute_command("WAIT", len(replicas), int(config.timeout * 500)))
+        except Exception as exc:
+            logger.warning("WAIT for the test keys on %s:%s failed: %s", primary.host, primary.port, exc)
+            continue
+        if acknowledged < len(replicas):
+            logger.warning(
+                "%s of %s replica(s) of %s:%s acknowledged the test keys in time",
+                acknowledged,
+                len(replicas),
+                primary.host,
+                primary.port,
+            )
 
 
 def _check_test_keys(

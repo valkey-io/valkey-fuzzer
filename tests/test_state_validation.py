@@ -1285,3 +1285,19 @@ def test_an_instance_that_did_not_answer_is_retried_and_inconclusive_not_a_failu
     # Each read waited the configured check timeout, not a fixed 2 s.
     assert set(timeouts) == {config.replication_config.timeout}
     assert len(timeouts) == attempts * (2 if running else 1)
+
+
+def test_the_test_keys_are_on_every_replica_before_the_waves_begin():
+    # The replication-chaos soak (seed 1477792882): a forced promotion 0.3 s after the keys were written took a
+    # replica that had none of them, and the check reported all 100 lost, which no wave was to blame for.
+    rows = deployment_view(
+        node_row("valkey-0", 7000),
+        node_row("valkey-1", 7001, role="replica"),
+        node_row("valkey-2", 7002, role="replica"),
+        mode=DeploymentMode.STANDALONE,
+    )
+    primary = fake_client(replies=lambda *args: 2)
+    primary.set.return_value = True
+    with patch(f"{LOCAL}validation.data.valkey_client", return_value=client_context(primary)):
+        write_test_keys(rows, DataConsistencyValidationConfig(num_test_keys=3), random.Random(7))
+    assert primary.execute_command.call_args_list[-1].args[:2] == ("WAIT", 2)
