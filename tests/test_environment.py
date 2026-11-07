@@ -368,6 +368,17 @@ def test_environment_failures_decide_the_verdict_and_stay_out_of_the_outcome(
         assert deployment.calls == ["validate"]
 
 
+def test_a_failed_acquisition_names_the_dependency_and_error_type_without_its_message(tmp_path):
+    # "environment acquisition failed" alone made every cause one indistinguishable error; the summary now
+    # says what failed, by its report-safe signature, never the provider's message.
+    outcome = _run(tmp_path, {"artifacts": (_artifact(),)},
+                   ProviderBehavior(ARTIFACT, acquire_error=FileNotFoundError("SECRET path")))  # fmt: skip
+
+    assert outcome.status is OutcomeStatus.ERROR
+    assert outcome.summary == "environment acquisition failed (artifacts.c acquire: FileNotFoundError)"
+    assert "SECRET" not in outcome.to_json() + repr(outcome)
+
+
 # ---------------------------------------------------------------------------
 # The compiler and the runtime: scenario environments become typed references, resolved at run time
 # ---------------------------------------------------------------------------

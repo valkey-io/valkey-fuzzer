@@ -235,6 +235,17 @@ def _environment_diagnostics(
     return diagnostics
 
 
+def _acquisition_failure(report: Optional[EnvironmentReport], error: BaseException) -> str:
+    """What failed, report-safe: the dependency, phase and exception type the journal recorded, never a
+    provider's message, which may hold a secret."""
+    failed = [record for record in (report.records if report else ()) if record["outcome"] == "failed"]
+    if failed:
+        record = failed[-1]
+        kind = record["details"].get("exception_type") or exception_type(error)
+        return f"{record['dependency']} {record['phase']}: {kind}"
+    return exception_type(error)
+
+
 class Runner:
     """Execute compiled plans through the components and providers of one catalog."""
 
@@ -565,7 +576,8 @@ class _Execution:
             result = self.invoke(spec, ROLES[spec.role].call)
             if spec.id in required and result.status is ComponentStatus.SKIP:
                 raise _EarlyTerminalError(
-                    OutcomeStatus.SKIP_UNSUPPORTED, f"required capability {spec.id!r} is unsupported"
+                    OutcomeStatus.SKIP_UNSUPPORTED,
+                    f"required capability {spec.id!r} is unsupported: {result.summary}",
                 )
             if spec.id in required and result.status is ComponentStatus.FAIL:
                 raise _EarlyTerminalError(
@@ -878,12 +890,15 @@ class _Execution:
                 policies=plan.policies,
             )
         except Exception as exc:
-            self.early_diagnostics.update(_environment_diagnostics(getattr(exc, "environment_report", None), exc))
+            report = getattr(exc, "environment_report", None)
+            self.early_diagnostics.update(_environment_diagnostics(report, exc))
             if isinstance(exc, UnsupportedEnvironmentError):
                 raise _EarlyTerminalError(
                     OutcomeStatus.SKIP_UNSUPPORTED, "the requested environment is unsupported"
                 ) from exc
-            raise _EarlyTerminalError(OutcomeStatus.ERROR, "environment acquisition failed") from exc
+            raise _EarlyTerminalError(
+                OutcomeStatus.ERROR, f"environment acquisition failed ({_acquisition_failure(report, exc)})"
+            ) from exc
 
     def bind(self, references: bool) -> None:
         """Resolve the plan's environment references; a plan that had some is revalidated and probed now."""

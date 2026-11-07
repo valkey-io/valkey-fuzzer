@@ -161,7 +161,10 @@ OracleError = "runner execution failed during oracle.evaluate: RunnerError: orac
         pytest.param([_c(FAULT, "setup", FAIL), _c(ORACLE, "check")], "ERROR", UNTRUSTED, True, id="fault-fail"),
         pytest.param([_c(ACTION, "act", SKIP)], "ERROR", UNTRUSTED, True, id="required-skip"),
         pytest.param([_c(CAPABILITY, "probe", FAIL)], "ERROR", "capability 'probe' failed", False, id="capability-fail"),
-        pytest.param([_c(CAPABILITY, "probe", SKIP)], "SKIP_UNSUPPORTED", "", False, id="capability-skip"),
+        # The skip carries the probe's own summary: "required capability 'build' is unsupported" alone never
+        # said which setting or command the build lacked.
+        pytest.param([_c(CAPABILITY, "probe", SKIP)], "SKIP_UNSUPPORTED",
+                     "required capability 'probe' is unsupported: probe probe", False, id="capability-skip"),
         pytest.param([_c(ACTION, "act", depends_on=("probe",)), _c(CAPABILITY, "probe", SKIP, required=False)],
                      "SKIP_UNSUPPORTED", "", False, id="needed-optional-capability-skip"),
         pytest.param([_c(ACTION, "act", depends_on=("probe",)), _c(CAPABILITY, "probe", FAIL, required=False)],
