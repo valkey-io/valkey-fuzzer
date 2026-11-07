@@ -1378,6 +1378,25 @@ def test_variants_leave_a_script_that_calls_internals_alone(builds, loads, comma
     assert result.status.value == status, result.summary
 
 
+@pytest.mark.parametrize(("fresh_again", "status"), [(False, "PASS"), (True, "FAIL")])
+def test_variants_name_the_ids_a_cluster_command_makes_by_first_appearance(builds, fresh_again, status):
+    # The walk's test of valkey-io/valkey#3192 (fuzzer#98): CLUSTER RESET SOFT gave each side's node a new shard ID,
+    # at random. The same ID twice on each side is the same behavior; a new one the second time on one side is not.
+    calls = {}
+
+    def shard_id(server):
+        calls[id(server)] = calls.get(id(server), 0) + 1
+        again = fresh_again and _encodings_off(server) and calls[id(server)] > 1
+        return hashlib.sha1(f"{id(server)} {_encodings_off(server)} {again}".encode()).hexdigest().encode()
+
+    for build in BUILDS.values():
+        build.replies = {("CLUSTER", "MYSHARDID"): shard_id}
+    sequence = [{"command": ["CLUSTER", "MYSHARDID"], "expect_difference": True}] * 2
+    result, _ = run(builds, sequence, checks={"variants": True})
+
+    assert result.status.value == status, result.summary
+
+
 @pytest.mark.parametrize(("expect", "status"), [({"min": 1}, "PASS"), ({"equals": 36}, "FAIL")])
 def test_variants_compare_a_waited_reply_only_when_its_expect_fixes_it(builds, expect, status):
     # As in the walk's test of valkey-io/valkey#4104 (fuzzer#83): CLUSTER COUNTKEYSINSLOT was polled until a slot

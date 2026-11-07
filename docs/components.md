@@ -544,7 +544,8 @@ exits during one is a crash. `variants`: compact encodings off
 replies compare as multisets of their values shaped as RESP2's, except
 `compare: skip`, `raw`, `read`, `DEBUG`, `OBJECT`, `MEMORY`, `CONFIG`,
 `CLIENT INFO`/`LIST`, `HELLO`, and `INFO`, and a script that calls one of
-them (`variant-mismatch`).
+them (`variant-mismatch`); a node or shard ID the sequence makes (a
+`CLUSTER RESET`'s) is named by its first appearance in `CLUSTER` replies.
 `replica`: node 0 gets a synced replica, whose offset and `DEBUG DIGEST` must
 reach the primary's within 30 s of the sequence (`replica-diverged`). `acl`:
 as the default user with `+@all -@<category>` (from `COMMAND INFO`, the one

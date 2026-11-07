@@ -313,6 +313,32 @@ def _leaves(value: Any) -> list[Any]:
     return [_scalar(value)]
 
 
+# A node or shard ID: 40 lowercase hex digits.
+_NODE_ID = re.compile(r"(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])")
+
+
+def _named_fresh_ids(records: Mapping[int, Any], commands: Sequence[Mapping[str, Any]]) -> dict[int, Any]:
+    """``records`` with each node or shard ID in a CLUSTER command's reply named by its first appearance. The
+    side's own IDs are its placeholders already; these are the ones Valkey made during the sequence, at random (a
+    CLUSTER RESET's), so two sides that behave the same compare equal (fuzzer#98)."""
+
+    names: dict[str, str] = {}
+
+    def name(value: Any) -> Any:
+        if isinstance(value, str):
+            return _NODE_ID.sub(lambda match: names.setdefault(match.group(0), f"<new-id.{len(names)}>"), value)
+        if isinstance(value, list):
+            return [name(item) for item in value]
+        if isinstance(value, dict):
+            return {name(key): name(item) for key, item in value.items()}
+        return value
+
+    return {
+        index: name(record) if record is not None and _words(commands[index])[:1] == ["CLUSTER"] else record
+        for index, record in sorted(records.items())
+    }
+
+
 def _shape(record: Optional[Mapping[str, Any]]) -> str:
     """A reply record as variants compare it: an array or map reply as the sorted multiset of its values (member
     order differs between encodings, and RESP3 nests what RESP2 flattens), any other reply by its value, and a
@@ -597,8 +623,12 @@ class _Checks:
         if decided is not None:
             return decided
         differences = []
+        bases = _named_fresh_ids(
+            {index: actions._reply_at(self.base.replies, index) for index in compared}, self.commands
+        )
+        mines = _named_fresh_ids({index: actions._reply_at(side.replies, index) for index in compared}, self.commands)
         for index in compared:
-            base, mine = actions._reply_at(self.base.replies, index), actions._reply_at(side.replies, index)
+            base, mine = bases[index], mines[index]
             if _shape(base) != _shape(mine):
                 differences.append(
                     {"index": index, "command": actions._step_text(self.commands[index]), "base": base, "variant": mine}
