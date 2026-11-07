@@ -4,7 +4,6 @@ import logging
 import random
 import string
 from collections.abc import Mapping
-from contextlib import ExitStack
 from typing import Callable, Optional
 
 import valkey
@@ -86,32 +85,31 @@ def write_test_keys(
     if not live_instances:
         raise RuntimeError("no live nodes to write the data-consistency test keys to")
     mode = connection.mode
-    written: dict[str, str] = {}
-    with ExitStack() as client_stack:
-        if mode == DeploymentMode.CLUSTER:
-            test_keys = _cluster_test_keys(live_instances, _slot_owners(rows), config)
-            data_client = valkey.ValkeyCluster(
-                startup_nodes=[ClusterNode(host=node.host, port=node.port) for node in live_instances[:3]],
-                decode_responses=True,
-                skip_full_coverage_check=True,
-                socket_timeout=config.timeout,
-            )
-            client_stack.callback(data_client.close)
-        else:
-            primary = _find_primary(live_instances)
-            if primary is None:
-                raise RuntimeError(f"no live primary in the {mode.value} deployment to write the test keys to")
-            data_client = client_stack.enter_context(valkey_client(primary.host, primary.port, config.timeout))
-            test_keys = [f"{config.key_prefix}{i}" for i in range(config.num_test_keys)]
+    if mode == DeploymentMode.CLUSTER:
+        slot_owners = _slot_owners(rows)
+        test_keys = _cluster_test_keys(live_instances, slot_owners, config)
+        owner_of = {key: slot_owners[key_slot(key.encode())] for key in test_keys}
+    else:
+        primary = _find_primary(live_instances)
+        if primary is None:
+            raise RuntimeError(f"no live primary in the {mode.value} deployment to write the test keys to")
+        test_keys = [f"{config.key_prefix}{i}" for i in range(config.num_test_keys)]
+        owner_of = {key: primary.address for key in test_keys}
+    values = {key: "".join(rng.choices(string.ascii_letters + string.digits, k=32)) for key in test_keys}
 
-        for key in test_keys:
-            value = "".join(rng.choices(string.ascii_letters + string.digits, k=32))
-            try:
-                if not data_client.set(key, value):
-                    raise RuntimeError("SET was not acknowledged")
-                written[key] = value
-            except Exception as e:
-                logger.warning("Failed to write test key %s: %s", key, e)
+    # Each primary's keys go over one connection to it, which then WAITs for its replicas.
+    acknowledged: set[str] = set()
+    for owner in (row for row in live_instances if row.address in owner_of.values()):
+        with valkey_client(owner.host, owner.port, config.timeout) as client:
+            for key in (key for key in test_keys if owner_of[key] == owner.address):
+                try:
+                    if not client.set(key, values[key]):
+                        raise RuntimeError("SET was not acknowledged")
+                    acknowledged.add(key)
+                except Exception as e:
+                    logger.warning("Failed to write test key %s: %s", key, e)
+            _await_replicas(client, owner, live_instances, mode, config)
+    written = {key: values[key] for key in test_keys if key in acknowledged}
 
     if len(written) != config.num_test_keys:
         raise RuntimeError(
@@ -119,40 +117,46 @@ def write_test_keys(
             "deployment; see the log for each failed write"
         )
     logger.info("Successfully wrote %s test keys to the %s deployment", len(written), mode.value)
-    _await_replicas(live_instances, mode, config)
     return written
 
 
-def _await_replicas(live: list[TopologyNode], mode: DeploymentMode, config: DataConsistencyValidationConfig) -> None:
-    """WAIT on every live primary until its live replicas acknowledged the test keys, within half the timeout.
+def _await_replicas(
+    client,
+    primary: TopologyNode,
+    live: list[TopologyNode],
+    mode: DeploymentMode,
+    config: DataConsistencyValidationConfig,
+) -> None:
+    """WAIT, on the connection that wrote ``primary``'s test keys, until its live replicas acknowledged them, within
+    half the timeout.
 
     Otherwise a forced promotion right after the write could take a replica that had none of them, a loss no
-    chaos operation is to blame for. Replicas that do not catch up in time, or a primary that does not answer,
-    are left to the checks, which judge the keys later.
+    chaos operation is to blame for. WAIT counts the replicas that acknowledged its own connection's writes: on
+    another connection it returns at once (as in the replication-chaos soak, where a primary still held the
+    stream back from a replica just synced and a kill 0.04 s later lost every key). Replicas that do not catch
+    up in time, or a primary that does not answer, are left to the checks, which judge the keys later.
     """
 
-    for primary in (row for row in live if row.role == "primary"):
-        replicas = [
-            row
-            for row in live
-            if row.role == "replica" and (mode != DeploymentMode.CLUSTER or row.primary_id == primary.node_id)
-        ]
-        if not replicas:
-            continue
-        try:
-            with valkey_client(primary.host, primary.port, config.timeout) as client:
-                acknowledged = int(client.execute_command("WAIT", len(replicas), int(config.timeout * 500)))
-        except Exception as exc:
-            logger.warning("WAIT for the test keys on %s:%s failed: %s", primary.host, primary.port, exc)
-            continue
-        if acknowledged < len(replicas):
-            logger.warning(
-                "%s of %s replica(s) of %s:%s acknowledged the test keys in time",
-                acknowledged,
-                len(replicas),
-                primary.host,
-                primary.port,
-            )
+    replicas = [
+        row
+        for row in live
+        if row.role == "replica" and (mode != DeploymentMode.CLUSTER or row.primary_id == primary.node_id)
+    ]
+    if not replicas:
+        return
+    try:
+        acknowledged = int(client.execute_command("WAIT", len(replicas), int(config.timeout * 500)))
+    except Exception as exc:
+        logger.warning("WAIT for the test keys on %s:%s failed: %s", primary.host, primary.port, exc)
+        return
+    if acknowledged < len(replicas):
+        logger.warning(
+            "%s of %s replica(s) of %s:%s acknowledged the test keys in time",
+            acknowledged,
+            len(replicas),
+            primary.host,
+            primary.port,
+        )
 
 
 def _check_test_keys(

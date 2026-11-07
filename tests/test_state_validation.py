@@ -567,7 +567,7 @@ def test_cluster_test_keys_cover_every_primary_and_each_replica_needs_one():
     )
     # Too few keys for the primaries, or a write that fails, leaves the seeding incomplete.
     acks = Mock(**{"set.side_effect": [True, True, True, RuntimeError("SET failed")]})
-    with patch(f"{LOCAL}validation.data.valkey.ValkeyCluster", return_value=acks):
+    with patch(f"{LOCAL}validation.data.valkey_client", return_value=client_context(acks)):
         keys = write_test_keys(primaries, DataConsistencyValidationConfig(num_test_keys=2), random.Random(7))
         for count, error, message in ((1, ValueError, "insufficient"), (2, RuntimeError, "wrote 1 of 2")):
             with pytest.raises(error, match=message):
@@ -1296,8 +1296,18 @@ def test_the_test_keys_are_on_every_replica_before_the_waves_begin():
         node_row("valkey-2", 7002, role="replica"),
         mode=DeploymentMode.STANDALONE,
     )
-    primary = fake_client(replies=lambda *args: 2)
-    primary.set.return_value = True
-    with patch(f"{LOCAL}validation.data.valkey_client", return_value=client_context(primary)):
+    # WAIT counts only its own connection's writes, so it goes on the connection that wrote the keys: on another
+    # it returned at once, and a kill 0.04 s later, while the primary still held the stream back from a replica
+    # just synced, lost every key again (seed 1758730705).
+    connections = []
+
+    def connect(*args, **kwargs):
+        connections.append(fake_client(replies=lambda *args: 2))
+        connections[-1].set.return_value = True
+        return client_context(connections[-1])
+
+    with patch(f"{LOCAL}validation.data.valkey_client", side_effect=connect):
         write_test_keys(rows, DataConsistencyValidationConfig(num_test_keys=3), random.Random(7))
+    [primary] = connections
+    assert primary.set.call_count == 3
     assert primary.execute_command.call_args_list[-1].args[:2] == ("WAIT", 2)
