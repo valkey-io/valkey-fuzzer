@@ -64,8 +64,9 @@ _ENCODINGS = {
 # Commands whose replies depend on the encoding, the protocol or the configuration by design: variants never
 # compare them. DEBUG, OBJECT and MEMORY report internals (DEBUG HTSTATS-KEY a hashtable's buckets), DUMP serializes
 # a key in its encoding, CONFIG reports the encoding thresholds the variant changed, a SCAN's call returns as much as
-# the encoding holds together, SLOWLOG, LATENCY and TIME report times, and CLUSTER INFO reports gossip counters and
-# a save timestamp that differ between two independently formed clusters.
+# the encoding holds together, SLOWLOG, LATENCY and TIME report times, CLUSTER INFO reports gossip counters and
+# a save timestamp that differ between two independently formed clusters, and CLUSTER GETSLOTMIGRATIONS reports when
+# each job was created, updated and acknowledged (fuzzer#100).
 _VARIES = (
     "DEBUG",
     "OBJECT",
@@ -75,6 +76,7 @@ _VARIES = (
     "CLIENT INFO",
     "CLIENT LIST",
     "CLUSTER INFO",
+    "CLUSTER GETSLOTMIGRATIONS",
     "HELLO",
     "INFO",
     "SLOWLOG",

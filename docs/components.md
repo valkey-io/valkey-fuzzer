@@ -543,7 +543,7 @@ exits during one is a crash. `variants`: compact encodings off
 `list-max-listpack-size 0`; not with `modules`), then the other `resp` (Valkey's commands only: a module's, named with a dot, may reply by protocol; not on a connection first used while the sequence set a `requirepass`, which a RESP3 client's `HELLO 3` cannot open);
 replies compare as multisets of their values shaped as RESP2's, except
 `compare: skip`, `raw`, `read`, `DEBUG`, `OBJECT`, `MEMORY`, `CONFIG`,
-`CLIENT INFO`/`LIST`, `HELLO`, and `INFO`, and a script that calls one of
+`CLIENT INFO`/`LIST`, `CLUSTER INFO`/`GETSLOTMIGRATIONS`, `HELLO`, and `INFO`, and a script that calls one of
 them (`variant-mismatch`); a node or shard ID the sequence makes (a
 `CLUSTER RESET`'s) is named by its first appearance in `CLUSTER` replies.
 `replica`: node 0 gets a synced replica, whose offset and `DEBUG DIGEST` must
