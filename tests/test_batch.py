@@ -755,7 +755,8 @@ def test_a_guided_batch_derives_its_runs_from_those_that_reached_new_code(tmp_pa
         assert job["generate"]["pinned"] == {name: value for name, value in before["draws"].items() if name != changed}
         assert all(after["draws"][name] == value for name, value in job["generate"]["pinned"].items())
         assert changed == "seed" or changed in before["draws"]
-    assert all(" coverage +" in line for line in _log(runner))
+    # Only the job lines: without root the host sweep logs an "unchecked" line first (iptables needs root).
+    assert all(" coverage +" in line for line in _log(runner) if line.startswith("["))
 
 
 def test_a_guided_batch_without_coverage_draws_fresh_seeds_and_a_resume_draws_the_rest(
