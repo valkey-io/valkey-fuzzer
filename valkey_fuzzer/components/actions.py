@@ -18,6 +18,7 @@ import re
 import shutil
 import socket
 import subprocess
+import threading
 import time
 from collections.abc import Iterator, Mapping, Sequence
 from typing import Any, ClassVar, Optional
@@ -847,7 +848,7 @@ class _Side:
                 # Another process took a port between its free check and Valkey's bind (a batch runs dozens of
                 # workers at once): the node starts again on fresh ports.
                 node.owned.discharge()
-                fresh = iter(_free_ports(1 + ("cluster-port" in node.options)))
+                fresh = iter(_free_ports(1 + ("cluster-port" in node.options), _port_block(context)))
                 node.options["port"] = next(fresh)
                 if "cluster-port" in node.options:
                     node.options["cluster-port"] = next(fresh)
@@ -1052,22 +1053,57 @@ def _private_port_span() -> Optional[tuple[int, int]]:
     return span[1] + 1, 65535
 
 
-def _free_ports(count: int) -> list[int]:
-    """``count`` distinct TCP ports free on the loopback address right now: above the ephemeral range where it
-    leaves room (see :func:`_private_port_span`), else any the kernel hands out."""
+# Ports of the private span (see _private_port_span) each batch worker takes its private servers' ports from, by its
+# deployment's loopback_block: no other worker's server takes one, even while its node restarts.
+_PRIVATE_SLICE = 64
+# Every port this process handed out (a run is one process): never handed out twice, so none goes to another server
+# of the run while its own node restarts.
+_GIVEN: set[int] = set()
+_GIVEN_LOCK = threading.Lock()
+
+
+def _port_block(context: Any) -> Optional[int]:
+    """The run's deployment loopback_block, which a batch gives each worker its own of; None outside a batch."""
+
+    block = plain_config(context.plan.deployment).get("loopback_block") if context is not None else None
+    return block if isinstance(block, int) and block > 0 else None
+
+
+def _free_ports(count: int, block: Optional[int] = None) -> list[int]:
+    """``count`` distinct TCP ports free on the loopback address right now, none handed out before by this process:
+    above the ephemeral range where it leaves room (see :func:`_private_port_span`), in worker ``block``'s own slice
+    of it while that has room, else any the kernel hands out."""
 
     span = _private_port_span()
+    if span is not None and block is not None:
+        low = span[0] + (block - 1) * _PRIVATE_SLICE
+        own = range(low, min(low + _PRIVATE_SLICE, span[1] + 1))
+    else:
+        own = range(0)
     ports: list[int] = []
-    while len(ports) < count:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            try:
-                sock.bind(("127.0.0.1", 0 if span is None else random.randint(*span)))
-            except OSError:
-                continue
-            port = sock.getsockname()[1]
-        if port not in ports:
-            ports.append(port)
+    with _GIVEN_LOCK:
+        for port in own:
+            if len(ports) == count:
+                break
+            if port not in _GIVEN and _bindable(port):
+                ports.append(port)
+        while len(ports) < count:
+            port = _bindable(0 if span is None else random.randint(*span))
+            if port and port not in _GIVEN and port not in ports:
+                ports.append(port)
+        _GIVEN.update(ports)
     return ports
+
+
+def _bindable(port: int) -> int:
+    """``port`` (or, for 0, the one the kernel picks) if it binds on the loopback address now, else 0."""
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind(("127.0.0.1", port))
+        except OSError:
+            return 0
+        return sock.getsockname()[1]
 
 
 def new_side(label: str, binary: str, config: Mapping[str, Any], modules: Sequence[str], ports: Iterator[int]) -> _Side:
@@ -1162,7 +1198,7 @@ class CommandsAction:
             "candidate": list(config["modules"]),
             "parent": list(config["modules"] if config["modules_parent"] is None else config["modules_parent"]),
         }
-        ports = iter(_free_ports(2 * config["nodes"] * (2 if config["cluster"] else 1)))
+        ports = iter(_free_ports(2 * config["nodes"] * (2 if config["cluster"] else 1), _port_block(context)))
         candidate = new_side("candidate", candidate_binary, config, modules["candidate"], ports)
         parent = new_side("parent", parent_binary, config, modules["parent"], ports)
 

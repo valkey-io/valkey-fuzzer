@@ -105,8 +105,6 @@ _QUICK_SYNC = {"repl-diskless-sync-delay": 0}
 _SYNC_TIMEOUT_S = 30.0
 _NUMBER = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
 _INTEGER = re.compile(r"[-+]?\d+")
-# Guards the ports the checks of a sequence took (see _Checks.free_ports).
-_PORTS_LOCK = threading.Lock()
 
 
 def run_checks(
@@ -128,10 +126,7 @@ def run_checks(
     enabled = [name for name in _ORDER if config["checks"][name]]
     if candidate.exited is not None or any(record.get("unanswered") for record in candidate.replies):
         return {name: _skipped("the sequence did not complete on the candidate") for name in enabled}, []
-    taken: set[int] = set()
-    checks = {
-        name: _Checks(context, spec, config, candidate, parent_binary, server_config, files, taken) for name in enabled
-    }
+    checks = {name: _Checks(context, spec, config, candidate, parent_binary, server_config, files) for name in enabled}
     # Each check runs in a copy of this call's context, so the runner's cancellation of the call reaches it; every
     # check returns, its servers stopped, before the outcomes are read, in _ORDER whichever finished first.
     with ThreadPoolExecutor(max_workers=max(len(enabled), 1)) as pool:
@@ -388,7 +383,6 @@ class _Checks:
         parent_binary: str,
         server_config: Mapping[str, Any],
         files: Mapping[str, bytes],
-        taken: set[int],
     ):
         self.context, self.spec, self.config = context, spec, config
         self.commands = config["commands"]
@@ -401,18 +395,13 @@ class _Checks:
         }
         self.server_config, self.files = server_config, files
         # The ports every check of the sequence took, shared.
-        self.taken = taken
         self.kept: list[str] = []
 
     def free_ports(self, count: int) -> list[int]:
-        """``count`` loopback ports, free now, that no check of the sequence took before: a port stays free until
-        its server binds it, so a check running at once could be given it too."""
+        """``count`` loopback ports, free now, that no check of the sequence took before (see
+        :func:`actions._free_ports`, which never hands a port out twice in a run)."""
 
-        with _PORTS_LOCK:
-            # Of that many free ports, at most len(self.taken) were taken.
-            ports = [port for port in actions._free_ports(count + len(self.taken)) if port not in self.taken][:count]
-            self.taken.update(ports)
-        return ports
+        return actions._free_ports(count, actions._port_block(self.context))
 
     def start(
         self,

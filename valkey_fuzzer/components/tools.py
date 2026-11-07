@@ -22,7 +22,7 @@ from valkey_fuzzer.protocols import component_artifact_dir
 from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
 from valkey_fuzzer.schema import BASE64_KEY, ConfigError, ConfigField, plain_config
 
-from .actions import _PRIVATE_SERVER_DEFAULTS, _free_ports, _is_binary, _text
+from .actions import _PRIVATE_SERVER_DEFAULTS, _free_ports, _is_binary, _port_block, _text
 from .actions import _Side as _ServerSide
 from .capabilities import resolve_binary
 from .oracles import CRASH_PATTERNS, crash_cause
@@ -294,7 +294,7 @@ class ToolsAction:
 
         try:
             if config["server"]:
-                ports = iter(_free_ports(4 if config["cluster"] else 2))
+                ports = iter(_free_ports(4 if config["cluster"] else 2, _port_block(context)))
                 for side in sides:
                     side.port = next(ports)
                     side.server = _ServerSide(side.label, side.binary, 1, 2, config["timeout_s"])

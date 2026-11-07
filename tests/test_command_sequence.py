@@ -1895,6 +1895,7 @@ def test_private_servers_take_ports_above_the_ephemeral_range(monkeypatch, ephem
     # A private server's port in the ephemeral range can go to an outgoing connection before Valkey binds it, and
     # the server aborts, "Failed listening on port" (the faults check's restarts made it frequent on the soak).
     monkeypatch.setattr(actions, "ephemeral_port_range", lambda: ephemeral)
+    monkeypatch.setattr(actions, "_GIVEN", set())
     actions._private_port_span.cache_clear()
     try:
         ports = actions._free_ports(20)
@@ -1928,6 +1929,21 @@ def test_a_private_server_whose_port_was_taken_starts_again_on_fresh_ports(build
         assert _nodes(BUILDS[builds["candidate"]])[0].option("port") not in failures
     else:
         assert result.status.value == "ERROR" and "exited at startup" in result.summary
+
+
+def test_a_batch_worker_takes_private_ports_from_its_own_slice_and_never_twice(monkeypatch):
+    # Workers that shared the private span still took each other's ports, a restarting node's included (the soak,
+    # replaying the walk's test of valkey#4019): each worker (its deployment's loopback_block) has its own slice.
+    monkeypatch.setattr(actions, "ephemeral_port_range", lambda: (32768, 60999))
+    monkeypatch.setattr(actions, "_GIVEN", set())
+    actions._private_port_span.cache_clear()
+    try:
+        first, second = actions._free_ports(10, block=3), actions._free_ports(10, block=3)
+    finally:
+        actions._private_port_span.cache_clear()
+    low = 61000 + 2 * actions._PRIVATE_SLICE
+    assert all(low <= port < low + actions._PRIVATE_SLICE for port in first + second)
+    assert not set(first) & set(second)
 
 
 def test_concurrent_connections_each_run_the_whole_sequence(builds):
