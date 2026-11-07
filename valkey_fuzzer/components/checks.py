@@ -196,9 +196,13 @@ def _debugs_sync(commands: Sequence[Mapping[str, Any]]) -> bool:
 
 def _writes_unreplicated(commands: Sequence[Mapping[str, Any]]) -> bool:
     """Whether the sequence writes keys its node does not replicate: DEBUG POPULATE adds them on the primary
-    alone."""
+    alone, and a script that calls set_repl may keep its writes from the replicas (fuzzer#88's replay)."""
 
-    return any([str(word).upper() for word in _words(item)[:2]] == ["DEBUG", "POPULATE"] for item in commands)
+    return any(
+        [str(word).upper() for word in _words(item)[:2]] == ["DEBUG", "POPULATE"]
+        or any("SET_REPL" in word for word in _words(item))
+        for item in commands
+    )
 
 
 def _set_on_replica(side: Any, commands: Sequence[Mapping[str, Any]]) -> None:
@@ -434,7 +438,9 @@ class _Checks:
             crash=True,
         )
 
-    def replicate(self, primary: tuple[Any, int], replica: tuple[Any, int]) -> tuple[bool, dict[str, Any]]:
+    def replicate(
+        self, primary: tuple[Any, int], replica: tuple[Any, int], digests: bool = True
+    ) -> tuple[bool, dict[str, Any]]:
         """Make ``replica`` (a side and a node's index) a replica of ``primary``, and wait until it caught up (see
         :meth:`converged`)."""
 
@@ -442,11 +448,13 @@ class _Checks:
         sent = _ask(*replica, "REPLICAOF", "127.0.0.1", side.nodes[index].options["port"])
         if "reply" not in sent:
             return False, {"replicaof": sent}
-        return self.converged(primary, replica)
+        return self.converged(primary, replica, digests)
 
-    def converged(self, primary: tuple[Any, int], replica: tuple[Any, int]) -> tuple[bool, dict[str, Any]]:
-        """Wait until ``replica``'s link is up and it has ``primary``'s replication offset and ``DEBUG DIGEST``:
-        whether it did, and the last state read."""
+    def converged(
+        self, primary: tuple[Any, int], replica: tuple[Any, int], digests: bool = True
+    ) -> tuple[bool, dict[str, Any]]:
+        """Wait until ``replica``'s link is up and it has ``primary``'s replication offset and (with ``digests``)
+        ``DEBUG DIGEST``: whether it did, and the last state read."""
 
         def attempt() -> tuple[bool, dict[str, Any]]:
             state: dict[str, Any] = {}
@@ -454,6 +462,8 @@ class _Checks:
                 info = _fields(_ask(side, index, "INFO", "replication"))
                 state[role] = {"offset": info.get("master_repl_offset"), "digest": _ask(side, index, "DEBUG", "DIGEST")}
             state["link"] = info.get("master_link_status")
+            if not digests:
+                return state["link"] == "up" and state["primary"]["offset"] == state["replica"]["offset"], state
             done = state["link"] == "up" and state["primary"] == state["replica"]
             return done and "reply" in state["primary"]["digest"], state
 
@@ -539,7 +549,9 @@ class _Checks:
         if _sets_replication(self.commands):
             return _skipped("the sequence sets its node's replication itself")
         if _writes_unreplicated(self.commands):
-            return _skipped("the sequence writes keys its node does not replicate (DEBUG POPULATE)")
+            return _skipped(
+                "the sequence writes keys its node does not replicate (DEBUG POPULATE, or a script's set_repl)"
+            )
         # Node 1 is the replica; the sequence names node 0 only.
         side, failed = self.start("candidate.replica", nodes=2, options=_QUICK_SYNC)
         synced, state = False, {}
@@ -757,7 +769,7 @@ class _Checks:
         side, failed = self.start(
             "candidate.faults", nodes=nodes + (replica is not None), options={**_QUICK_SYNC, **persistence}
         )
-        synced, state, problem = True, {}, None
+        synced, state, problem, exact = True, {}, None, True
         try:
             if not failed and replica is not None:
                 synced, state = self.replicate((side, 0), (side, replica))
@@ -773,12 +785,18 @@ class _Checks:
                     start = end
                     if fault is None or (side.replies and side.replies[-1].get("unanswered")):
                         break
-                    problem = self.inject(side, fault, replica)
+                    problem = self.inject(side, fault, replica, exact)
+                    # A DEBUG RELOAD, or a replica restarted (as a primary, until it is made a replica again), drops
+                    # what expired by then, which the other node keeps: from there the replica must only catch up
+                    # with its primary's offset (fuzzer#88's replay).
+                    exact = exact and not (
+                        (fault["fault"] == "reload" or fault["node"] == replica) and _volatile(side, 0)
+                    )
                     if problem is not None:
                         break
                 answered = not (side.replies and side.replies[-1].get("unanswered"))
                 if problem is None and answered and replica is not None:
-                    synced, state = self.converged((side, 0), (side, replica))
+                    synced, state = self.converged((side, 0), (side, replica), exact)
         finally:
             self.finish(side)
         decided = self.judge("faults", side, failed, faults=schedule, persistence=persistence)
@@ -812,14 +830,16 @@ class _Checks:
 
         return poll_until(attempt, timeout_s=_SYNC_TIMEOUT_S, interval_s=0.05, context=self.context)[0]
 
-    def inject(self, side: Any, fault: Mapping[str, Any], replica: Optional[int]) -> Optional[dict[str, Any]]:
+    def inject(
+        self, side: Any, fault: Mapping[str, Any], replica: Optional[int], exact: bool = True
+    ) -> Optional[dict[str, Any]]:
         """Apply one fault of the faults check to ``side``: None once it is in place and the side is whole again,
-        else the check's outcome."""
+        else the check's outcome. ``exact``: a replica must also reach its primary's DEBUG DIGEST."""
 
         node, what = fault["node"], "DEBUG RELOAD" if fault["fault"] == "reload" else "a restart"
         if node == replica:
             # The replica's data before the fault is the primary's: it must have caught up first.
-            synced, state = self.converged((side, 0), (side, replica))
+            synced, state = self.converged((side, 0), (side, replica), exact)
             if not synced:
                 return self.diverged("faults", "replica-diverged", synced, state, fault=dict(fault))
         # The node must keep its data, judged when nothing else changes it meanwhile: nothing it holds can expire,
@@ -829,6 +849,9 @@ class _Checks:
         slots = _owned_slots(side, node) if self.config["cluster"] else None
         if fault["fault"] == "reload":
             reloaded = _ask(side, node, "DEBUG", "RELOAD")
+            if str(reloaded.get("error", "")).startswith("BUSY"):
+                # A script the sequence left running holds the node (fuzzer#88's replay): no reload to judge.
+                return None
             if "reply" not in reloaded:
                 return _failed(
                     f"DEBUG RELOAD on node {node} before command {fault['before']} failed: {canonical_json(reloaded)}",
@@ -857,7 +880,8 @@ class _Checks:
                 )
         if node == replica and fault["fault"] == "restart":
             # The replica starts as a primary: REPLICAOF was a command, not its configuration.
-            synced, state = self.replicate((side, 0), (side, replica))
+            # Restarted as a primary, it dropped what expired: its digest then need not match (see faults).
+            synced, state = self.replicate((side, 0), (side, replica), exact and not _volatile(side, 0))
             _set_on_replica(side, self.commands)
             if not synced:
                 return self.diverged("faults", "replica-diverged", synced, state, fault=dict(fault))

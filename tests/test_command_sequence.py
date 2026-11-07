@@ -1487,6 +1487,17 @@ def test_a_reload_that_fails_in_the_faults_check_fails_the_run(builds, monkeypat
     assert result.summary.startswith("DEBUG RELOAD on node ")
 
 
+def test_a_reload_refused_while_a_script_runs_is_no_failure(builds, monkeypatch):
+    # The walk's test of valkey#5108 keeps a script running on purpose: DEBUG RELOAD then replies BUSY.
+    monkeypatch.setattr(checks, "_FAULTS", ("reload",))
+    _replicating()
+    for build in BUILDS.values():
+        build.replies[("DEBUG", "RELOAD")] = Error("BUSY Valkey is busy running a script.")
+    result, _ = run(builds, _WRITES, checks={"faults": True})
+
+    assert result.status.value == "PASS", result.summary
+
+
 def test_a_node_that_does_not_come_back_from_a_restart_in_the_faults_check_crashed(builds, monkeypatch):
     monkeypatch.setattr(checks, "_FAULTS", ("restart",))
     _replicating()
@@ -1594,6 +1605,35 @@ def test_a_cluster_nodes_data_is_judged_only_while_it_owns_the_same_slots(builds
         assert result.status.value == "FAIL" and result.diagnostics["reason"] == "lost-data"
 
 
+@pytest.mark.parametrize(("fault", "exact"), [("reload", False), ("restart", True)])
+def test_a_reload_with_expiring_data_leaves_the_replica_to_catch_up_by_offset(builds, monkeypatch, fault, exact):
+    # fuzzer#88's replay: the primary's DEBUG RELOAD dropped hashes whose fields had all expired, which its replica
+    # keeps; a restart of the primary is judged in full.
+    monkeypatch.setattr(checks, "_FAULTS", (fault,))
+    primary_of = lambda server: server is _faults_side(builds)[0]  # noqa: E731
+    _replicating(lambda server: b"d2" if primary_of(server) and server.sent.count(("DEBUG", "RELOAD")) else b"d1")
+    for build in BUILDS.values():
+        build.replies[("INFO", "keyspace")] = b"# Keyspace\r\ndb0:keys=6,expires=0,keys_with_volatile_items=2\r\n"
+    result, value = run(builds, _WRITES, checks={"faults": True})
+
+    assert result.status.value == "PASS", result.summary
+    if exact:
+        assert _check(value, "faults")["outcome"] == "pass"
+
+
+def test_a_script_that_calls_set_repl_writes_unreplicated(builds):
+    # fuzzer#88's replay: the walk's test of valkey#5116 kept its SWAPDB from the replica with
+    # server.set_repl(server.REPL_NONE), and the replica diverged by design.
+    script = "server.set_repl(server[ARGV[1]]); return server.call('swapdb','0','1')"
+    result, value = run(builds, [{"command": ["EVAL", script, 0, "REPL_NONE"]}], checks={"replica": True})
+
+    assert result.status.value == "PASS", result.summary
+    assert _check(value, "replica") == {
+        "outcome": "skipped",
+        "reason": "the sequence writes keys its node does not replicate (DEBUG POPULATE, or a script's set_repl)",
+    }
+
+
 def test_a_restarted_nodes_data_is_judged_once_it_loaded(builds, monkeypatch):
     # The walk's test of valkey#5170 replayed: a replica restarted from its AOF answered while it still loaded it,
     # and DEBUG DIGEST then digested the empty dataset loaded so far.
@@ -1630,11 +1670,16 @@ def test_a_node_holding_what_may_expire_is_not_judged_across_a_fault(builds, mon
 def test_a_replica_that_stays_apart_after_a_restart_in_the_faults_check_diverged(builds, monkeypatch):
     monkeypatch.setattr(checks, "_FAULTS", ("restart",))
     monkeypatch.setattr(checks, "_SYNC_TIMEOUT_S", 0.2)
-    # A restarted replica comes back with data of its own; a restarted primary keeps the same.
-    _replicating(lambda server: b"d2" if server.shut_downs and server is _faults_side(builds)[1] else b"d1")
-    # Keys that may expire: no node's data is judged across a restart, only the replica's catching up.
+
+    def replication(server):
+        # A restarted replica never catches up with its primary's offset again.
+        offset = 41 if server.shut_downs and server is _faults_side(builds)[1] else 42
+        return f"# Replication\r\nmaster_link_status:up\r\nmaster_repl_offset:{offset}\r\n".encode()
+
+    _replicating()
     for build in BUILDS.values():
-        build.replies[("INFO", "keyspace")] = b"# Keyspace\r\ndb0:keys=6,expires=6,avg_ttl=9\r\n"
+        build.replies[("INFO", "replication")] = replication
+        build.replies[("INFO", "keyspace")] = _PERSISTENT
     # Seed 2 restarts the replica (node 1) first.
     result, _ = run(builds, _WRITES, seed=2, checks={"faults": True})
 
@@ -1672,7 +1717,7 @@ def test_a_sequence_that_writes_without_replicating_runs_no_replica(builds):
 
     assert _check(value, "replica") == {
         "outcome": "skipped",
-        "reason": "the sequence writes keys its node does not replicate (DEBUG POPULATE)",
+        "reason": "the sequence writes keys its node does not replicate (DEBUG POPULATE, or a script's set_repl)",
     }
     assert _check(value, "concurrency") == {"outcome": "pass"}
     assert not any(sent[0] == "REPLICAOF" for server in _nodes(BUILDS[builds["candidate"]]) for sent in server.sent)

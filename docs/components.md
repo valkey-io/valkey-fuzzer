@@ -567,7 +567,9 @@ RELOAD` is `reload-failed`, a node whose `DEBUG DIGEST` differs afterwards is
 `lost-data` (judged only when it holds no expiring key or hash field, its
 digest holds still for a moment before the fault, and in a cluster it owns the
 same slots before and after), and a
-replica must reach its primary's digest after its restarts and at the end
+replica must reach its primary's digest after its restarts (its offset alone after a `DEBUG
+RELOAD` or a restart of the replica while anything may expire, which drops
+expired data the other node keeps) and at the end
 (`replica-diverged`); a passing outcome lists the faults and the persistence.
 `acl` and
 `concurrency` leave restarts out and do not wait (`wait_s`); `replica` and
