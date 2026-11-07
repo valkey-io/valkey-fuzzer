@@ -1641,6 +1641,24 @@ def test_a_reload_with_expiring_data_leaves_the_replica_to_catch_up_by_offset(bu
         assert _check(value, "faults")["outcome"] == "pass"
 
 
+def test_what_may_expire_is_asked_before_the_reload_that_drops_it(builds, monkeypatch):
+    # The walk's test of valkey#2972 replayed: a key with a 1 ms TTL expired, the primary's DEBUG RELOAD dropped it
+    # (the replica kept it), and asked only afterwards, the primary held nothing that could expire.
+    monkeypatch.setattr(checks, "_FAULTS", ("reload",))
+
+    def reloaded(server):
+        return server is _faults_side(builds)[0] and ("DEBUG", "RELOAD") in server.sent
+
+    _replicating(lambda server: b"d2" if reloaded(server) else b"d1")
+    for build in BUILDS.values():
+        build.replies[("INFO", "keyspace")] = lambda server: (
+            b"# Keyspace\r\ndb0:keys=5,expires=0\r\n" if reloaded(server) else b"# Keyspace\r\ndb0:keys=6,expires=1\r\n"
+        )
+    result, _ = run(builds, _WRITES, checks={"faults": True})
+
+    assert result.status.value == "PASS", result.summary
+
+
 def test_a_script_that_calls_set_repl_writes_unreplicated(builds):
     # fuzzer#88's replay: the walk's test of valkey#5116 kept its SWAPDB from the replica with
     # server.set_repl(server.REPL_NONE), and the replica diverged by design.

@@ -801,13 +801,12 @@ class _Checks:
                     start = end
                     if fault is None or (side.replies and side.replies[-1].get("unanswered")):
                         break
-                    problem = self.inject(side, fault, replica, exact)
                     # A DEBUG RELOAD, or a replica restarted (as a primary, until it is made a replica again), drops
                     # what expired by then, which the other node keeps: from there the replica must only catch up
-                    # with its primary's offset (fuzzer#88's replay).
-                    exact = exact and not (
-                        (fault["fault"] == "reload" or fault["node"] == replica) and _volatile(side, 0)
-                    )
+                    # with its primary's offset (fuzzer#88's replay). Asked before the fault, which drops it.
+                    drops = (fault["fault"] == "reload" or fault["node"] == replica) and _volatile(side, 0)
+                    problem = self.inject(side, fault, replica, exact)
+                    exact = exact and not drops
                     if problem is not None:
                         break
                 answered = not (side.replies and side.replies[-1].get("unanswered"))
