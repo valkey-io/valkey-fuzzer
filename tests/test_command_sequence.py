@@ -1487,6 +1487,15 @@ def test_a_reload_that_fails_in_the_faults_check_fails_the_run(builds, monkeypat
     assert result.summary.startswith("DEBUG RELOAD on node ")
 
 
+def test_the_faults_check_skips_a_sync_script_debugging_session(builds):
+    # The walk's tests of valkey#4574 replayed: a SYNC debugging session held the server, and DEBUG RELOAD on another
+    # connection got no reply.
+    result, value = run(builds, [{"command": ["SCRIPT", "DEBUG", "SYNC"]}], checks={"faults": True})
+
+    assert result.status.value == "PASS", result.summary
+    assert _check(value, "faults")["outcome"] == "skipped"
+
+
 def test_a_reload_refused_while_a_script_runs_is_no_failure(builds, monkeypatch):
     # The walk's test of valkey#5108 keeps a script running on purpose: DEBUG RELOAD then replies BUSY.
     monkeypatch.setattr(checks, "_FAULTS", ("reload",))

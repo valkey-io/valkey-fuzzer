@@ -750,6 +750,11 @@ class _Checks:
     def faults(self) -> dict[str, Any]:
         if _sets_replication(self.commands):
             return _skipped("the sequence sets its node's replication itself")
+        if _debugs_sync(self.commands):
+            # A SYNC debugging session holds the node: no restart or DEBUG RELOAD reaches it meanwhile.
+            return _skipped(
+                "the sequence debugs a script with SCRIPT DEBUG SYNC, which blocks the server for the session"
+            )
         nodes = self.config["nodes"]
         # A single standalone node gets a replica, the side's last node; several nodes or a cluster keep the
         # topology the sequence sets up.

@@ -570,7 +570,8 @@ same slots before and after), and a
 replica must reach its primary's digest after its restarts (its offset alone after a `DEBUG
 RELOAD` or a restart of the replica while anything may expire, which drops
 expired data the other node keeps) and at the end
-(`replica-diverged`); a passing outcome lists the faults and the persistence.
+(`replica-diverged`); a passing outcome lists the faults and the persistence; a sequence debugging a script with `SCRIPT DEBUG SYNC`,
+which holds the server, is skipped.
 `acl` and
 `concurrency` leave restarts out and do not wait (`wait_s`); `replica` and
 `compat` skip several nodes and `cluster`, `compat` also a module loaded on
