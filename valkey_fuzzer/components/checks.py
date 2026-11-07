@@ -215,6 +215,20 @@ def _writes_unreplicated(commands: Sequence[Mapping[str, Any]]) -> bool:
     )
 
 
+def _delays_persistence(commands: Sequence[Mapping[str, Any]], server_config: Mapping[str, Any]) -> bool:
+    """Whether the sequence or its server_config sets rdb-key-save-delay or key-load-delay above 0: a save or a
+    load then takes the delay once per key, so a restart's shutdown save or a DEBUG RELOAD outlasts any timeout
+    (the walk's aaeee8d5b replay: 100,000 keys at 10 ms each is 1,000 s)."""
+
+    delays = ("rdb-key-save-delay", "key-load-delay")
+    settings = [(str(name).lower(), value) for name, value in server_config.items()]
+    for item in commands:
+        words = [str(word) for word in _words(item)]
+        if [word.upper() for word in words[:2]] == ["CONFIG", "SET"]:
+            settings += [(words[index].lower(), words[index + 1]) for index in range(2, len(words) - 1, 2)]
+    return any(name in delays and str(value).strip() not in ("0", "") for name, value in settings)
+
+
 def _debug_settings(commands: Sequence[Mapping[str, Any]]) -> bool:
     """Whether the sequence changes a DEBUG SET-* setting, which holds until the server restarts."""
 
@@ -771,6 +785,8 @@ class _Checks:
             return _skipped(
                 "the sequence debugs a script with SCRIPT DEBUG SYNC, which blocks the server for the session"
             )
+        if _delays_persistence(self.commands, self.server_config):
+            return _skipped("the sequence delays each key a save or a load takes, so no restart or reload ends")
         nodes = self.config["nodes"]
         # A single standalone node gets a replica, the side's last node; several nodes or a cluster keep the
         # topology the sequence sets up.

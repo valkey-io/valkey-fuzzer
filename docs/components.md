@@ -571,7 +571,8 @@ replica must reach its primary's digest after its restarts (its offset alone aft
 RELOAD` or a restart of the replica while anything may expire, which drops
 expired data the other node keeps) and at the end
 (`replica-diverged`); a passing outcome lists the faults and the persistence; a sequence debugging a script with `SCRIPT DEBUG SYNC`,
-which holds the server, is skipped.
+which holds the server, is skipped, and so is one that sets `rdb-key-save-delay` or `key-load-delay` above 0
+(in `server_config` or by `CONFIG SET`), as every save or load then takes the delay once per key.
 `acl` and
 `concurrency` leave restarts out and do not wait (`wait_s`); `replica` and
 `compat` skip several nodes and `cluster`, `compat` also a module loaded on

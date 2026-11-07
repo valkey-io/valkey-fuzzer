@@ -1501,6 +1501,27 @@ def test_the_faults_check_skips_a_sequence_that_manages_auth(builds, command):
     }
 
 
+@pytest.mark.parametrize(
+    "commands, server_config, skipped",
+    [
+        ([["CONFIG", "SET", "rdb-key-save-delay", "10000"]], {}, True),
+        ([["CONFIG", "SET", "maxmemory", "0", "key-load-delay", "50"]], {}, True),
+        ([], {"rdb-key-save-delay": 100}, True),
+        ([["CONFIG", "SET", "rdb-key-save-delay", "0"]], {}, False),
+    ],
+)
+def test_the_faults_check_skips_a_sequence_that_delays_saves_or_loads(builds, commands, server_config, skipped):
+    # The walk's aaeee8d5b replayed: 100,000 keys at rdb-key-save-delay 10000 made the check's DEBUG RELOAD a
+    # 1,000 s save, and it timed out.
+    commands = [{"command": command} for command in commands] or [{"command": ["PING"]}]
+    _, value = run(builds, commands, checks={"faults": True}, server_config=server_config)
+
+    check = _check(value, "faults")
+    assert (check["outcome"] == "skipped") is skipped, check
+    if skipped:
+        assert check["reason"] == "the sequence delays each key a save or a load takes, so no restart or reload ends"
+
+
 def test_the_faults_check_skips_a_sync_script_debugging_session(builds):
     # The walk's tests of valkey#4574 replayed: a SYNC debugging session held the server, and DEBUG RELOAD on another
     # connection got no reply.
