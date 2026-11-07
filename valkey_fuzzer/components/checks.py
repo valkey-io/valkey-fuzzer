@@ -91,12 +91,10 @@ _RUNS_OTHERS = ("EVAL", "EVALSHA", "EVAL_RO", "EVALSHA_RO", "FCALL", "FCALL_RO")
 # A NOPERM error, as the connection records it: valkey-py drops the NOPERM (and ERR) code, so it is known by its
 # message ("User default has no permissions to run the 'hset' command", "No permissions to access a key").
 _NOPERM = "no permissions"
-# Errors Valkey replies before it checks a command's permissions, so a refused command may reply them.
-_BEFORE_ACL = (
-    "unknown command",
-    "unknown subcommand",
-    "wrong number of arguments",
-    "Command not allowed inside a transaction",
+# Errors Valkey replies before it checks a command's permissions, so a refused command may reply them. A newer
+# Valkey names the command it refuses inside a transaction ("Command 'watch' not allowed inside a transaction").
+_BEFORE_ACL = re.compile(
+    r"unknown command|unknown subcommand|wrong number of arguments|Command (?:'[^']*' )?not allowed inside a transaction"
 )
 # ACL categories of speed, not function: never the one the ACL check denies.
 _SPEED = ("@fast", "@slow")
@@ -216,6 +214,25 @@ def _manages_auth(commands: Sequence[Mapping[str, Any]]) -> bool:
         )
         for words in map(_words, commands)
     )
+
+
+def _opened_behind_password(commands: Sequence[Mapping[str, Any]]) -> set[int]:
+    """The commands on a connection first used while the sequence had set a requirepass: a RESP3 client opens it
+    with HELLO 3, which Valkey refuses before AUTH (NOAUTH), so the connection never opens (fuzzer#92)."""
+
+    password, behind, found = False, {}, set()
+    for index, item in enumerate(commands):
+        words = _words(item)
+        if not words:
+            continue
+        behind.setdefault(item["connection"], password)
+        if behind[item["connection"]]:
+            found.add(index)
+        if words[:2] == ["CONFIG", "SET"]:
+            pairs = dict(zip(words[2::2], words[3::2]))
+            if "REQUIREPASS" in pairs:
+                password = pairs["REQUIREPASS"] != ""
+    return found
 
 
 def _debugs_sync(commands: Sequence[Mapping[str, Any]]) -> bool:
@@ -560,7 +577,8 @@ class _Checks:
         own = [index for index in compared if "." not in _words(self.commands[index])[0]]
         # A RESP2 client that subscribed may run only the Pub/Sub commands, PING, QUIT and RESET; a RESP3 one, any.
         subscribed = _subscribed(self.commands)
-        own = [index for index in own if index not in subscribed]
+        behind = _opened_behind_password(self.commands)
+        own = [index for index in own if index not in subscribed and index not in behind]
         return _combine(encodings=encodings, protocol=self.variant("protocol", own, {"resp": resp}, resp=resp))
 
     def variant(self, name: str, compared: Sequence[int], change: Mapping[str, Any], **start: Any) -> dict[str, Any]:
@@ -702,7 +720,7 @@ class _Checks:
                 "command": actions._step_text(commands[index]),
                 "reply": actions._without_index(record),
             }
-            if refused[index] and not denied and not error.startswith(_BEFORE_ACL):
+            if refused[index] and not denied and not _BEFORE_ACL.match(error):
                 bypass.append(found)
             elif not refused[index] and denied:
                 overreach.append(found)

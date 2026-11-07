@@ -1420,6 +1420,22 @@ def test_a_subscribed_connections_commands_may_reply_by_protocol(builds):
     assert result.status.value == "FAIL" and result.diagnostics["variant"] == "protocol"
 
 
+def test_a_connection_opened_behind_a_password_is_left_out_of_the_protocol_variant(builds):
+    # As in the walk's test of valkey-io/valkey#2936 (fuzzer#92): a RESP3 client opens a connection with HELLO 3,
+    # which Valkey refuses before AUTH once a password is required, so the connection never opens.
+    for build in BUILDS.values():
+        build.replies = {("GET", "k"): ByResp({2: b"v", 3: b"w"})}
+    password = {"command": ["CONFIG", "SET", "requirepass", "s3cret"]}
+    unset = {"command": ["CONFIG", "SET", "requirepass", ""]}
+    behind = {"command": ["GET", "k"], "connection": "unauth"}
+    result, _ = run(builds, [password, behind, unset], checks={"variants": True})
+    assert result.status.value == "PASS", result.summary
+    # Opened before the password, or after it was unset, the connection's replies are compared.
+    for commands in ([behind, password, unset], [password, unset, behind]):
+        result, _ = run(builds, commands, checks={"variants": True})
+        assert result.status.value == "FAIL" and result.diagnostics["variant"] == "protocol"
+
+
 def test_encodings_are_not_varied_with_modules_loaded(builds):
     result, value = run(builds, [{"command": ["PING"]}], modules=["/m/a.so"], checks={"variants": True})
 
@@ -1949,6 +1965,20 @@ def test_a_subcommand_without_categories_is_refused_with_its_denied_container(bu
 
     assert result.status.value == "PASS", result.summary
     assert _check(value, "acl")["category"] == {"outcome": "pass", "user": "default +@all -@json"}
+
+
+@pytest.mark.parametrize(
+    ("error", "before"),
+    [
+        ("Command not allowed inside a transaction", True),
+        # As in the walk's test of valkey-io/valkey#3360 (fuzzer#93): WATCH inside MULTI, refused before the ACL.
+        ("Command 'watch' not allowed inside a transaction", True),
+        ("unknown subcommand 'x'. Try CLIENT HELP.", True),
+        ("WATCH inside MULTI is not allowed", False),
+    ],
+)
+def test_the_acl_check_knows_the_errors_valkey_replies_before_it(error, before):
+    assert bool(checks._BEFORE_ACL.match(error)) is before
 
 
 def test_the_acl_check_skips_a_sequence_that_manages_users(builds):
