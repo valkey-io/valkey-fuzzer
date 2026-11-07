@@ -1551,7 +1551,15 @@ def test_a_reload_that_fails_in_the_faults_check_fails_the_run(builds, monkeypat
 
 
 @pytest.mark.parametrize(
-    "command", [["CONFIG", "SET", "requirepass", "secret"], ["ACL", "SETUSER", "u", "on"], ["AUTH", "u", "p"]]
+    "command",
+    [
+        ["CONFIG", "SET", "requirepass", "secret"],
+        ["ACL", "SETUSER", "u", "on"],
+        ["AUTH", "u", "p"],
+        # As in the walk's test of valkey-io/valkey#3471, replayed in the soak: the faults check's replica, given
+        # the masterauth, could not AUTH to a primary that had no password, and its link stayed down.
+        ["CONFIG", "SET", "masterauth", "topsecretvalue"],
+    ],
 )
 def test_the_faults_check_skips_a_sequence_that_manages_auth(builds, command):
     # The walk's test of valkey#3538 replayed: the sequence set a password, and the check's own DEBUG RELOAD got

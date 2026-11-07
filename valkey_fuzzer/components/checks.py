@@ -201,16 +201,20 @@ def _sets_replication(commands: Sequence[Mapping[str, Any]]) -> bool:
     return any(words and words[0].upper() in ("REPLICAOF", "SLAVEOF") for words in map(_words, commands))
 
 
+_AUTH_SETTINGS = {"REQUIREPASS", "MASTERAUTH", "PRIMARYAUTH", "MASTERUSER", "PRIMARYUSER"}
+
+
 def _manages_auth(commands: Sequence[Mapping[str, Any]]) -> bool:
     """Whether the sequence sets users, a password, or authenticates: ACL, AUTH, HELLO ... AUTH, or a CONFIG SET of
-    requirepass."""
+    requirepass, or of the user and password a replica authenticates to its primary with (a replica given them
+    cannot sync with a primary that has no password)."""
 
     return any(
         words
         and (
             words[0] in ("ACL", "AUTH")
             or (words[0] == "HELLO" and "AUTH" in words)
-            or (words[:2] == ["CONFIG", "SET"] and "REQUIREPASS" in words)
+            or (words[:2] == ["CONFIG", "SET"] and not _AUTH_SETTINGS.isdisjoint(words[2::2]))
         )
         for words in map(_words, commands)
     )
