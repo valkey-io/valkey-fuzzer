@@ -45,7 +45,7 @@ class Wire(bytes):
 class Build:
     """A fake valkey-server build: the options it rejects at start, and its reply to each command, keyed by
     the arguments as sent (strings, or bytes for a binary argument; raw bytes as they are); an unlisted command
-    gets ``OK`` (CLUSTER MYID the server's ID, CLUSTER INFO a state ok knowing every server of the build;
+    gets ``OK`` (CLUSTER MYID the server's ID, CLUSTER MYSHARDID it reversed, CLUSTER INFO a state ok knowing every server of the build;
     SUBSCRIBE and PUBLISH work, on the connections of one server). A
     reply may be an :class:`Error`, a :class:`Wire`, :data:`DIE` (the server exits without answering), :data:`CLOSE` (it closes the
     connection without answering), :data:`TIMEOUT`,
@@ -173,6 +173,7 @@ class FakeWire:
         known = len(_nodes(self.server.build))
         defaults = {
             ("CLUSTER", "MYID"): self.server.id.encode(),
+            ("CLUSTER", "MYSHARDID"): self.server.id[::-1].encode(),
             ("CLUSTER", "INFO"): f"cluster_state:ok\r\ncluster_known_nodes:{known}\r\n".encode(),
         }
         if pending[0] == "SUBSCRIBE":
@@ -646,7 +647,12 @@ def test_cluster_starts_both_servers_as_one_node_clusters_serving_every_slot(bui
         ports.add(running[running.index("--cluster-port") + 1])
         ports.add(running[running.index("--port") + 1])
         assert running[running.index("--bind") + 1] == "127.0.0.1"
-        assert build.sent[:3] == [("CLUSTER", "ADDSLOTSRANGE", "0", "16383"), ("CLUSTER", "MYID"), ("CLUSTER", "INFO")]
+        assert build.sent[:4] == [
+            ("CLUSTER", "ADDSLOTSRANGE", "0", "16383"),
+            ("CLUSTER", "MYID"),
+            ("CLUSTER", "MYSHARDID"),
+            ("CLUSTER", "INFO"),
+        ]
         assert build.sent[-1] == ("SET", "k", "v")
     assert len(ports) == 4
     assert _replies(value["candidate"]) == [{"reply": "OK"}]
@@ -719,6 +725,17 @@ def test_placeholders_name_each_sides_own_nodes_and_replies_name_them_back(build
         {"reply": "<node.1.id> 127.0.0.1:<node.1.port>@<node.1.cluster-port> myself,master"},
         {"reply": [[0, 1, ["127.0.0.1", "<node.1.port>", "<node.1.id>"]]]},
     ]
+
+
+def test_replies_name_each_nodes_shard_id_back(builds):
+    # fuzzer#89: CLUSTER SHARDS of two clusters differed by the random shard ID alone, a variant mismatch.
+    for build in BUILDS.values():
+        build.replies = {("CLUSTER", "SHARDS"): lambda server: [[b"id", _nodes(server.build)[0].id[::-1].encode()]]}
+    result, value = run(builds, [{"command": ["CLUSTER", "SHARDS"], "node": 1}], cluster=True, nodes=2)
+
+    assert result.status.value == "PASS", result.summary
+    assert _replies(value["candidate"]) == [{"reply": [["id", "<node.0.shard-id>"]]}]
+    assert value["candidate"]["digest"] == value["parent"]["digest"]
 
 
 def test_standalone_nodes_take_their_topology_from_the_sequence(builds):

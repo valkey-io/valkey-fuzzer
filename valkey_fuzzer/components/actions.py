@@ -258,11 +258,11 @@ _STOP_TIMEOUT_S = 30.0
 # The files of a private server's directory the harness writes itself.
 _HARNESS_FILES = ("valkey.conf", "server.log", "output.log", "s.sock", OWNER_FILE)
 # A node of the side a command runs on, in an argument: <node.1.id>, <node.1.host>, <node.1.port>,
-# <node.1.cluster-port>. Angle brackets, not braces: YAML reads {node.1.id} as a mapping, and Valkey braces as a
+# <node.1.cluster-port>, <node.1.shard-id> (its shard's ID as the cluster formed). Angle brackets, not braces: YAML reads {node.1.id} as a mapping, and Valkey braces as a
 # hash tag.
 _PLACEHOLDER = re.compile(r"<node\.(\d+)\.([a-z-]+)>")
-_NODE_FIELDS = ("id", "host", "port", "cluster-port")
-_CLUSTER_FIELDS = ("id", "cluster-port")
+_NODE_FIELDS = ("id", "host", "port", "cluster-port", "shard-id")
+_CLUSTER_FIELDS = ("id", "cluster-port", "shard-id")
 
 
 def _is_binary(item: Any) -> bool:
@@ -793,8 +793,9 @@ class _Node:
         self.server: Any = None
         self.owned: Any = None
         self.connections: dict[str, RawConnection] = {}
-        # Its cluster node ID, with cluster.
+        # Its cluster node ID and shard ID (as the cluster formed), with cluster.
         self.id: Optional[str] = None
+        self.shard_id: Optional[str] = None
         self.logs: list[str] = []
 
 
@@ -873,6 +874,10 @@ class _Side:
             if "reply" not in myid:
                 return f"the {node.name} server: CLUSTER MYID failed: {myid.get('error')}"
             node.id = str(myid["reply"])
+            # Random like the node ID, so two clusters' replies differ by it alone (fuzzer#89: CLUSTER SHARDS).
+            # A build without CLUSTER MYSHARDID has none to name.
+            shard = node.connections["main"].send(["CLUSTER", "MYSHARDID"])
+            node.shard_id = str(shard["reply"]) if "reply" in shard else None
         for node in self.nodes[1:]:
             met = node.connections["main"].send(
                 ["CLUSTER", "MEET", "127.0.0.1", first.options["port"], first.options["cluster-port"]]
@@ -934,6 +939,7 @@ class _Side:
         for index, node in enumerate(self.nodes):
             fields = {
                 "id": node.id,
+                "shard-id": node.shard_id,
                 "host": "127.0.0.1",
                 **{key: node.options.get(key) for key in ("port", "cluster-port")},
             }

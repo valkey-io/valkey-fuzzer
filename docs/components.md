@@ -475,13 +475,14 @@ Each command has:
 
 With `compare_with`, a string argument may name a node of the side it runs
 on: `<node.1.id>` (its cluster node ID, with `cluster`), `<node.1.host>`,
-`<node.1.port>`, and `<node.1.cluster-port>` (with `cluster`) are replaced by
+`<node.1.port>`, `<node.1.cluster-port>`, and `<node.1.shard-id>` (its shard's ID
+as the cluster formed; both with `cluster`) are replaced by
 each side's own values, for example `[CLUSTER, SETSLOT, 7, NODE, <node.1.id>]`
 or `[REPLICAOF, <node.0.host>, <node.0.port>]`. Angle brackets, not braces:
 YAML reads `{node.1.id}` as a mapping, and Valkey braces as a hash tag. Every
 node listens on its own loopback port (and cluster bus port), so the nodes can
 meet and replicate; the sequence itself talks to each over its unix socket.
-Before the two sides are compared, each side's node IDs and ports in its replies
+Before the two sides are compared, each side's node IDs, shard IDs, and ports in its replies
 and errors (a port also as an integer, as `CLUSTER SLOTS` replies it) are
 replaced back by their placeholders, so `CLUSTER NODES` and `MOVED` errors
 compare equal when the builds behave the same, and an `expect` names them the
