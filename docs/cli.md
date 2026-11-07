@@ -247,6 +247,7 @@ port_base: 11000
 valkey_binary: /opt/valkey/src/valkey-server   # for scenarios that name no binary
 prune_pass: true
 serial_reruns: 2
+corpus_from: earlier-batch           # a guided batch starts from this batch's corpus
 sources:
   - random:
       experiments: all               # or a list of experiment IDs
@@ -288,6 +289,7 @@ run names its build.
 | `valkey_binary` | `--valkey-binary PATH` | See above. |
 | `prune_pass` | `--prune-pass` | Keep only `report.json` and `scenario.yaml` of a run that passed and left nothing behind. |
 | `serial_reruns` | `--serial-reruns N` | After the parallel runs, run `N` jobs of each `FAIL` or `ERROR` signature again, one at a time (load can explain those, not an unsupported run). |
+| `corpus_from` | `--corpus-from BATCH` | Start the corpus of the batch's guided runs from an earlier batch folder's (see [Coverage-guided batches](#coverage-guided-batches)). |
 | | `--out DIR` | The batch folder; default `<root>/batches/<time>-<batch id>-<suffix>`. |
 | | `--resume DIR` | Finish the batch in `DIR`. Takes only `--workers` and `--allow-unsupported`: the folder holds the sources and every other option. |
 | | `--dry-run` | List the jobs, the invalid matrix cases, and the skipped zoo cases; run nothing. |
@@ -431,6 +433,20 @@ run, so the cost adds to each run, not to the batch's scheduling. `corpus.json` 
 continues the corpus. A result's `code_coverage` is `reached` and `new`, or
 `null` when the run left no counters to read (its console says why);
 `batch.log` ends each line with `coverage +<new>`.
+
+With `corpus_from: BATCH` (`--corpus-from BATCH`), a new batch starts from
+an earlier batch's corpus, so guidance carries over from one batch to the
+next. When the batch is created, it copies the earlier `corpus.json` entries
+into its own, each with `run` (the earlier run's folder) and `draws` (what
+that run drew, from its report). An entry the earlier batch brought from a
+batch before it comes as it is, so a chain of batches keeps every entry. The
+new batch never reads the earlier one again, and never writes to it. Its
+`covered` starts at the earlier batch's, so a run makes an entry only with a
+feature new to both, and a guided job derived from an imported entry names
+that entry's run folder as its `parent`. A folder with no readable
+`corpus.json` is an error, as is `corpus_from` without a source that has
+`guided` runs. The earlier batch should run the same Valkey commit; its
+features are `file:line` of that build.
 
 ### Resuming
 

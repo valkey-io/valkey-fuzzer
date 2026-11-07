@@ -37,6 +37,7 @@ The batch folder::
     runs/<id>/          the job's run folder: plan.json, report.json, scenario.yaml,
                         components/, logs/ (instance logs), console.log
     corpus.json         a guided batch's corpus: the runs that reached new Valkey code, and what they reached
+                        (with ``corpus_from``, an earlier batch's entries first)
     summary.json        counts, failure signatures, serial re-runs, zoo verdicts, leaks, exit code
     batch.log           one line per finished job
 
@@ -73,7 +74,7 @@ from typing import Any, Callable, Optional
 from ._data import canonical_json, error_record, exception_type
 from .catalog import Catalog
 from .compiler import with_valkey_binary
-from .corpus import Corpus, mutation
+from .corpus import CORPUS_FILE, Corpus, mutation, parent
 from .coverage import gcov_features
 from .deployment.local.config import CLUSTER_BUS_PORT_OFFSET, MAX_TCP_PORT
 from .deployment.local.ports import LOCK_DIRECTORY, ephemeral_overlap
@@ -152,6 +153,7 @@ _OPTION_FIELDS = {
     "valkey_binary": ConfigField(str, required=False, allow_none=True),
     "prune_pass": ConfigField(bool, required=False),
     "serial_reruns": ConfigField(int, minimum=0, required=False),
+    "corpus_from": ConfigField(str, required=False, allow_none=True),
 }
 _SPEC = ConfigSchema({**_OPTION_FIELDS, "sources": ConfigField(list, required=False, allow_none=True)})
 
@@ -209,6 +211,8 @@ class BatchOptions:
     valkey_binary: Optional[str] = None
     prune_pass: bool = False
     serial_reruns: int = 0
+    # An earlier batch folder whose corpus a guided batch starts from.
+    corpus_from: Optional[str] = None
     experiment_directories: tuple[str, ...] = ()
 
     def check(self) -> None:
@@ -311,8 +315,9 @@ def load_spec(path: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         raise BatchError(str(exc)) from None
     base_dir = os.path.dirname(os.path.abspath(path))
     sources = document.pop("sources", None) or []
-    if document.get("valkey_binary"):
-        document["valkey_binary"] = _absolute(document["valkey_binary"], base_dir, "valkey_binary")
+    for name in ("valkey_binary", "corpus_from"):
+        if document.get(name):
+            document[name] = _absolute(document[name], base_dir, name)
     return document, [normalize_source(source, base_dir) for source in sources]
 
 
@@ -838,9 +843,14 @@ class BatchRunner:
 
         if not expansion.jobs:
             raise BatchError("the batch has no jobs")
-        os.makedirs(folder, exist_ok=True)
         if os.path.exists(os.path.join(folder, "batch.json")):
             raise BatchError(f"{folder} already holds a batch; resume it instead")
+        corpus = None
+        if options.corpus_from:
+            if not any(source.get("random", {}).get("guided") for source in sources):
+                raise BatchError("corpus_from needs a random source with guided runs")
+            corpus = Corpus.of(_earlier_corpus(options.corpus_from))
+        os.makedirs(folder, exist_ok=True)
         _copy_experiments(folder, options.experiment_directories)
         spec = {
             "options": asdict(options),
@@ -851,8 +861,10 @@ class BatchRunner:
             "catalog_digest": expansion.catalog_digest,
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
-        # jobs.json first: a folder with batch.json is complete.
+        # jobs.json and corpus.json first: a folder with batch.json is complete.
         write_document(os.path.join(folder, "jobs.json"), expansion.jobs)
+        if corpus is not None:
+            corpus.save(folder)
         write_document(os.path.join(folder, "batch.json"), spec)
         return cls(folder)
 
@@ -1210,15 +1222,14 @@ class BatchRunner:
                 return job
         return None
 
-    def _parent_draws(self, job_id: str) -> Optional[Mapping[str, Any]]:
-        """What the run of ``job_id`` drew (its report's ``reproducer.generated.draws``); None for a scenario
-        it did not draw."""
+    def _parent_draws(self, entry: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
+        """What the run of corpus ``entry`` drew; None for a scenario it did not draw."""
 
-        if job_id not in self._draws:
-            path = self._path("runs", job_id, REPORT_FILE)
-            report = _read_json(path) if os.path.exists(path) else {}
-            self._draws[job_id] = ((report.get("reproducer") or {}).get("generated") or {}).get("draws")
-        return self._draws[job_id]
+        if "run" in entry:
+            return entry["draws"]
+        if entry["job"] not in self._draws:
+            self._draws[entry["job"]] = _run_draws(self._path("runs", entry["job"]))
+        return self._draws[entry["job"]]
 
     def _guided_job(self, index: int, source: Mapping[str, Any], number: int) -> dict[str, Any]:
         """Guided job ``number`` of random source ``index``: a scenario derived from a corpus entry of one of its
@@ -1241,13 +1252,13 @@ class BatchRunner:
         }
 
         def eligible(entry: Mapping[str, Any]) -> bool:
-            return entry["experiment"] in experiments and self._parent_draws(entry["job"]) is not None
+            return entry["experiment"] in experiments and self._parent_draws(entry) is not None
 
         for _ in range(GUIDED_TRIES):
             entry = self.corpus.pick(rng, eligible, picked)
             if entry is None:
                 break
-            experiment, draws = entry["experiment"], self._parent_draws(entry["job"])
+            experiment, draws = entry["experiment"], self._parent_draws(entry)
             changed = mutation(rng, [name for name in draws if name not in placement])
             seed = rng.randrange(2**31)
             try:
@@ -1265,7 +1276,7 @@ class BatchRunner:
                     pinned=pinned,
                 )
             except GeneratorError:
-                picked[entry["job"]] += 1
+                picked[parent(entry)] += 1
                 continue
             change = changed or "seed"
             return {
@@ -1273,7 +1284,7 @@ class BatchRunner:
                 "source": "guided",
                 "label": f"{experiment} seed {seed}: {entry['job']}, new {change}",
                 "generate": {"seed": seed, "experiment": experiment, **common, "pinned": pinned},
-                "guided": {"source": index, "parent": entry["job"], "mutation": change},
+                "guided": {"source": index, "parent": parent(entry), "mutation": change},
             }
         experiment, seed = rng.choice(experiments), rng.randrange(2**31)
         return {
@@ -1424,6 +1435,33 @@ class BatchRunner:
             "not_held": [case["case"] for case in cases if case.get("holds") is False],
             "undecided": [case["case"] for case in cases if case.get("undecided")],
         }
+
+
+def _run_draws(run_dir: str) -> Optional[Mapping[str, Any]]:
+    """What the run in ``run_dir`` drew (its report's ``reproducer.generated.draws``); None for a scenario it did
+    not draw, or a run without a report."""
+
+    path = os.path.join(run_dir, REPORT_FILE)
+    report = _read_json(path) if os.path.exists(path) else {}
+    return ((report.get("reproducer") or {}).get("generated") or {}).get("draws")
+
+
+def _earlier_corpus(folder: str) -> list[dict[str, Any]]:
+    """The corpus entries of earlier batch ``folder``, to start a new batch's from, each with the run folder it
+    names (``run``) and what that run drew (``draws``): the new batch never reads the earlier one again, and an
+    entry the earlier batch brought from one before it comes as it is."""
+
+    try:
+        entries = _read_json(os.path.join(folder, CORPUS_FILE))["entries"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise BatchError(f"corpus_from {folder} holds no corpus to start from: {type(exc).__name__}: {exc}") from None
+    imported = []
+    for entry in entries:
+        if "run" not in entry:
+            run = os.path.join(folder, "runs", entry["job"])
+            entry = {**entry, "run": run, "draws": _run_draws(run)}
+        imported.append(entry)
+    return imported
 
 
 def _swept(leaks: Sequence[Mapping[str, Any]]) -> str:

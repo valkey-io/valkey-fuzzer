@@ -71,6 +71,9 @@ def register(subparsers: Any) -> None:
         help="Keep only report.json and scenario.yaml of a passing run",
     )
     options.add_argument("--valkey-binary", help="valkey-server for every scenario that names none")
+    options.add_argument(
+        "--corpus-from", metavar="BATCH", help="Start the guided runs' corpus from an earlier batch folder's"
+    )
     options.add_argument("--batch-id", help="Name of the batch folder (default: batch)")
     folder = parser.add_argument_group("folder")
     folder.add_argument(
@@ -189,8 +192,9 @@ def batch_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
                 settings[name] = getattr(args, name)
         if args.timeout is not None:
             settings["timeout_s"] = args.timeout
-        if args.valkey_binary:
-            settings["valkey_binary"] = os.path.abspath(args.valkey_binary)
+        for name in ("valkey_binary", "corpus_from"):
+            if getattr(args, name):
+                settings[name] = os.path.abspath(getattr(args, name))
         options = BatchOptions(
             **settings,
             experiment_directories=tuple(os.path.abspath(path) for path in args.experiment_dirs),

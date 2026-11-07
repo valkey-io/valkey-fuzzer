@@ -20,7 +20,15 @@ import yaml
 
 from valkey_fuzzer import batch, hoststate
 from valkey_fuzzer._data import to_plain_data
-from valkey_fuzzer.batch import PORT_BLOCK, BatchError, BatchOptions, BatchRunner, expand, normalize_source
+from valkey_fuzzer.batch import (
+    PORT_BLOCK,
+    BatchError,
+    BatchOptions,
+    BatchRunner,
+    expand,
+    load_spec,
+    normalize_source,
+)
 from valkey_fuzzer.cli import main
 from valkey_fuzzer.commands import batch as batch_command
 from valkey_fuzzer.deployment.local import ports
@@ -660,7 +668,7 @@ RESUME_REFUSES = [
     ["--dry-run"], ["--timeout", "5"], ["--profile", "adversarial"], ["--port-base", "15000"],
     ["--serial-reruns", "1"], ["--prune-pass"], ["--valkey-binary", "/other/valkey-server"],
     ["--batch-id", "x"], ["--out", "elsewhere"], ["--experiment-dir", "experiments"],
-    ["--artifact-dir", "artifacts"], ["--random", SNAPSHOT], ["--seeds", "3"],
+    ["--artifact-dir", "artifacts"], ["--random", SNAPSHOT], ["--seeds", "3"], ["--corpus-from", "earlier"],
 ]  # fmt: skip
 
 
@@ -784,3 +792,72 @@ def test_a_guided_batch_without_coverage_draws_fresh_seeds_and_a_resume_draws_th
         "No code coverage: OSError: gcov: not found"
         in Path(runner.folder, "runs", jobs[1]["id"], "console.log").read_text()
     )
+
+
+def _files(folder):
+    return {path: path.read_bytes() for path in Path(folder).rglob("*") if path.is_file()}
+
+
+def test_a_guided_batch_starts_from_an_earlier_batchs_corpus_and_adds_only_what_is_new_to_both(
+    tmp_path, workers, stub, coverage
+):
+    earlier = _batch(tmp_path, [_random(2, guided=2)], name="earlier")
+    earlier.run()
+    before = _files(earlier.folder)
+    old = json.loads(Path(earlier.folder, "corpus.json").read_text())
+    runner = _batch(tmp_path, [_random(1, guided=3)], name="later", corpus_from=earlier.folder)
+
+    # Created with the earlier corpus: each entry with its run folder and what that run drew.
+    seeded = json.loads(Path(runner.folder, "corpus.json").read_text())
+    assert seeded["covered"] == old["covered"] and len(seeded["entries"]) == len(old["entries"])
+    for entry, imported in zip(old["entries"], seeded["entries"]):
+        run = os.path.join(earlier.folder, "runs", entry["job"])
+        assert imported == {**entry, "run": run, "draws": _drawn(earlier, entry["job"])["draws"]}
+    summary = runner.run()
+
+    assert summary["complete"] and summary["counts"] == {"PASS": 4}
+    results = _results(runner)
+    # Seed 0 draws what the earlier batch's seed 0 drew: nothing new to the combined corpus, so no entry,
+    # although an imported entry has its job ID.
+    assert results[_id(0)]["code_coverage"]["reached"] > 0 and results[_id(0)]["code_coverage"]["new"] == 0
+    corpus = json.loads(Path(runner.folder, "corpus.json").read_text())
+    assert corpus["entries"][: len(seeded["entries"])] == seeded["entries"]
+    assert all(entry["job"] != _id(0) for entry in corpus["entries"][len(seeded["entries"]) :])
+    assert summary["code_coverage"]["covered"] == old["covered"] + sum(
+        r["code_coverage"]["new"] for r in results.values()
+    )
+    # The first guided job can only derive from an imported entry: it names that entry's run folder.
+    first = next(job for job in runner.jobs if job["source"] == "guided")
+    parent, changed = first["guided"]["parent"], first["guided"]["mutation"]
+    assert parent in {entry["run"] for entry in seeded["entries"]}
+    drawn = _drawn(earlier, os.path.basename(parent))["draws"]
+    assert first["generate"]["pinned"] == {name: value for name, value in drawn.items() if name != changed}
+    assert results[first["id"]]["guided"] == first["guided"]
+    # The earlier batch is only read.
+    assert _files(earlier.folder) == before
+
+    # A batch after it brings the entries it imported as they are, and its own with their run folders.
+    after = _batch(tmp_path, [_random(1, guided=1)], name="next", corpus_from=runner.folder)
+    chained = json.loads(Path(after.folder, "corpus.json").read_text())
+    assert chained["covered"] == corpus["covered"]
+    assert chained["entries"][: len(seeded["entries"])] == seeded["entries"]
+    assert all(
+        entry["run"] == os.path.join(runner.folder, "runs", entry["job"])
+        for entry in chained["entries"][len(seeded["entries"]) :]
+    )
+
+
+def test_corpus_from_needs_an_earlier_corpus_and_a_guided_source(tmp_path, workers, stub):
+    plain = _batch(tmp_path, [_random(1)], name="plain")
+    for folder in (str(tmp_path / "missing"), plain.folder):
+        with pytest.raises(BatchError, match=f"corpus_from {folder} holds no corpus"):
+            _batch(tmp_path, [_random(1, guided=1)], name="later", corpus_from=folder)
+    Path(plain.folder, "corpus.json").write_text("{not json")
+    with pytest.raises(BatchError, match="holds no corpus to start from: JSONDecodeError"):
+        _batch(tmp_path, [_random(1, guided=1)], name="later", corpus_from=plain.folder)
+    with pytest.raises(BatchError, match="needs a random source with guided runs"):
+        _batch(tmp_path, [_random(1)], name="later", corpus_from=plain.folder)
+    assert not (tmp_path / "later").exists()
+    spec = tmp_path / "spec.yaml"
+    spec.write_text("corpus_from: plain\nsources: []\n")
+    assert load_spec(str(spec))[0]["corpus_from"] == str(tmp_path / "plain")
