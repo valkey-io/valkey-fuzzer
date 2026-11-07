@@ -1572,6 +1572,17 @@ def test_a_sequence_that_writes_unreplicated_keys_persists_them_by_rdb(builds, m
     monkeypatch.setattr(checks, "_PERSISTENCE", ({"save": "3600 1"}, {"appendonly": "yes"}))
     commands = [{"command": ["DEBUG", "POPULATE", 10]}, *_WRITES]
     persistences = set()
+    # And one whose AOF would replay RESTOREs without the DEBUG setting they ran under (the walk's test of
+    # valkey#5212 replayed).
+    _replicating()
+    for seed in range(1, 9):
+        _, value = run(
+            builds,
+            [{"command": ["DEBUG", "SET-SKIP-CHECKSUM-VALIDATION", "1"]}, *_WRITES],
+            seed=seed,
+            checks={"faults": True},
+        )
+        persistences.add(str(_check(value, "faults")["persistence"]))
     for seed in range(1, 9):
         _, value = run(builds, commands, seed=seed, checks={"faults": True})
         persistences.add(str(_check(value, "faults")["persistence"]))

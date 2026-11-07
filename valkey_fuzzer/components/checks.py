@@ -205,6 +205,15 @@ def _writes_unreplicated(commands: Sequence[Mapping[str, Any]]) -> bool:
     )
 
 
+def _debug_settings(commands: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether the sequence changes a DEBUG SET-* setting, which holds until the server restarts."""
+
+    return any(
+        len(words) >= 2 and words[0] == "DEBUG" and words[1].startswith("SET-")
+        for words in ([str(word).upper() for word in _words(item)[:2]] for item in commands)
+    )
+
+
 def _set_on_replica(side: Any, commands: Sequence[Mapping[str, Any]]) -> None:
     """Make on node 1 the settings the sequence makes on node 0. They are not replicated, and some change how
     a replica applies the stream: DEBUG SET-SKIP-CHECKSUM-VALIDATION lets in a RESTORE the replica would
@@ -768,8 +777,10 @@ class _Checks:
             for before in sorted(gaps)
         ]
         persistence = rng.choice(_PERSISTENCE)
-        if _writes_unreplicated(self.commands):
-            # DEBUG POPULATE's keys reach no AOF (fuzzer#86): only an RDB saved at shutdown keeps them.
+        if _writes_unreplicated(self.commands) or _debug_settings(self.commands):
+            # DEBUG POPULATE's keys reach no AOF (fuzzer#86), and an AOF replays its commands without the DEBUG
+            # SET-* settings they ran under, which a restart drops (a RESTORE of a payload whose checksum was not
+            # checked is refused): only an RDB saved at shutdown keeps the data as it was.
             persistence = _PERSISTENCE[0]
         side, failed = self.start(
             "candidate.faults", nodes=nodes + (replica is not None), options={**_QUICK_SYNC, **persistence}
