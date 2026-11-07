@@ -1487,6 +1487,20 @@ def test_a_reload_that_fails_in_the_faults_check_fails_the_run(builds, monkeypat
     assert result.summary.startswith("DEBUG RELOAD on node ")
 
 
+@pytest.mark.parametrize(
+    "command", [["CONFIG", "SET", "requirepass", "secret"], ["ACL", "SETUSER", "u", "on"], ["AUTH", "u", "p"]]
+)
+def test_the_faults_check_skips_a_sequence_that_manages_auth(builds, command):
+    # The walk's test of valkey#3538 replayed: the sequence set a password, and the check's own DEBUG RELOAD got
+    # NOAUTH.
+    _, value = run(builds, [{"command": command}], checks={"faults": True})
+
+    assert _check(value, "faults") == {
+        "outcome": "skipped",
+        "reason": "the sequence manages users or a password itself",
+    }
+
+
 def test_the_faults_check_skips_a_sync_script_debugging_session(builds):
     # The walk's tests of valkey#4574 replayed: a SYNC debugging session held the server, and DEBUG RELOAD on another
     # connection got no reply.

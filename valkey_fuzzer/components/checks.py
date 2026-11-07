@@ -187,6 +187,21 @@ def _sets_replication(commands: Sequence[Mapping[str, Any]]) -> bool:
     return any(words and words[0].upper() in ("REPLICAOF", "SLAVEOF") for words in map(_words, commands))
 
 
+def _manages_auth(commands: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether the sequence sets users, a password, or authenticates: ACL, AUTH, HELLO ... AUTH, or a CONFIG SET of
+    requirepass."""
+
+    return any(
+        words
+        and (
+            words[0] in ("ACL", "AUTH")
+            or (words[0] == "HELLO" and "AUTH" in words)
+            or (words[:2] == ["CONFIG", "SET"] and "REQUIREPASS" in words)
+        )
+        for words in map(_words, commands)
+    )
+
+
 def _debugs_sync(commands: Sequence[Mapping[str, Any]]) -> bool:
     """Whether the sequence debugs a script with SCRIPT DEBUG SYNC: the server serves only the debugging client
     until its session ends, so every other connection waits on it by design."""
@@ -759,6 +774,9 @@ class _Checks:
     def faults(self) -> dict[str, Any]:
         if _sets_replication(self.commands):
             return _skipped("the sequence sets its node's replication itself")
+        if _manages_auth(self.commands):
+            # The check's own connection would need the password or user the sequence set (fuzzer#88's replay).
+            return _skipped("the sequence manages users or a password itself")
         if _debugs_sync(self.commands):
             # A SYNC debugging session holds the node: no restart or DEBUG RELOAD reaches it meanwhile.
             return _skipped(
