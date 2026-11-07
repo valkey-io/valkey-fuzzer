@@ -1401,7 +1401,8 @@ component named by `ledger` (its loss windows, scope, `window_reads`, and
 
 - an ambiguous write (a timeout or a lost connection), and an acknowledged
   write the policy lets be lost, are indeterminate: each may take effect at
-  any point after its invocation, or never;
+  any point after its invocation, or never; one whose value no checked read
+  returned is left out, as never applying it changes no verdict;
 - a read that returned the value of a write the policy lets be lost is not
   checked, since the write may be lost after the read; with
   `window_reads: written`, neither is a read that completed inside a loss

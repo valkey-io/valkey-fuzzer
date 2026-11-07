@@ -79,8 +79,7 @@ def test_the_history_holds_every_operation_with_its_invocation_completion_and_co
     assert history == [
         {"process": 0, "key": KEY, "f": "write", "value": "v0", "call": 0, "return": 0},
         {"process": 1, "key": KEY, "f": "write", "value": "v1", "call": 500_000_000, "return": 1_000_000_000},
-        # Ambiguous: it may take effect at any point after its call, or never. The rejected SET is left out.
-        {"process": 3, "key": KEY, "f": "write", "value": "v2", "call": 2_500_000_000, "return": None},
+        # The ambiguous SET of v2, which no read returned, and the rejected SET are left out.
         {"process": 5, "key": KEY, "f": "write", "value": None, "call": 4_500_000_000, "return": 5_000_000_000},
         {"process": 2, "key": KEY, "f": "read", "value": "v1", "call": 1_500_000_000, "return": 2_000_000_000},
         # The final read, on a connection after every other.
@@ -108,10 +107,31 @@ def test_the_history_holds_every_operation_with_its_invocation_completion_and_co
     ],
 )  # fmt: skip
 def test_the_history_follows_the_ledger_loss_policy(ledger, options, indeterminate, unchecked):
-    history, skipped = register_history({}, ledger, ({}, 100.0, 101.0), started_at=0.0, **options)
+    # The final read returns v1, so an indeterminate write of it is kept (see the next test).
+    history, skipped = register_history({}, ledger, _final("v1"), started_at=0.0, **options)
 
     assert [op["return"] is None for op in history if op["f"] == "write"] == indeterminate
     assert skipped == unchecked
+
+
+def test_an_indeterminate_write_no_read_returned_is_left_out():
+    # A replication-chaos run's 352 such writes on one key kept Porcupine from finishing in 300 s. Taking one never
+    # to have applied changes no verdict, as no read saw it.
+    ledger = [
+        _op(1, "set", "ambiguous", "unread"),
+        _op(2, "set", "ambiguous", "read"),
+        _op(3, "get", reply="read"),
+        _op(4, "del", "ambiguous"),
+        _op(5, "set", value="acknowledged"),
+    ]
+
+    history, _ = register_history({}, ledger, _final("acknowledged"), started_at=0.0)
+
+    assert [(op["value"], op["return"] is None) for op in history if op["f"] == "write"] == [
+        ("read", True),
+        (None, True),
+        ("acknowledged", False),
+    ]
 
 
 # valkey.oracle.history with the porcupine checker
