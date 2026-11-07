@@ -543,7 +543,8 @@ exits during one is a crash. `variants`: compact encodings off
 `list-max-listpack-size 0`; not with `modules`), then the other `resp` (Valkey's commands only: a module's, named with a dot, may reply by protocol);
 replies compare as multisets of their values shaped as RESP2's, except
 `compare: skip`, `raw`, `read`, `DEBUG`, `OBJECT`, `MEMORY`, `CONFIG`,
-`CLIENT INFO`/`LIST`, `HELLO`, and `INFO` (`variant-mismatch`).
+`CLIENT INFO`/`LIST`, `HELLO`, and `INFO`, and a script that calls one of
+them (`variant-mismatch`).
 `replica`: node 0 gets a synced replica, whose offset and `DEBUG DIGEST` must
 reach the primary's within 30 s of the sequence (`replica-diverged`). `acl`:
 as the default user with `+@all -@<category>` (from `COMMAND INFO`, the one

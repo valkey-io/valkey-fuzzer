@@ -1348,6 +1348,36 @@ def test_variants_leave_internals_and_configuration_alone(builds, command):
     assert result.status.value == "PASS", result.summary
 
 
+@pytest.mark.parametrize(
+    ("loads", "command", "status"),
+    [
+        # As in the walk's test of valkey-io/valkey#3601 (fuzzer#90): an EVAL returned the length of a DUMP.
+        ([], ["EVAL", "return #redis.call('DUMP', KEYS[1])", "1", "h"], "PASS"),
+        ([], ["EVAL", 'return server.pcall("CLIENT", "INFO")', "0"], "PASS"),
+        (
+            [
+                [
+                    "FUNCTION",
+                    "LOAD",
+                    "#!lua name=l\nserver.register_function('f', function(k) "
+                    "return server.call('OBJECT', 'ENCODING', k[1]) end)",
+                ]
+            ],
+            ["FCALL", "f", "1", "h"],
+            "PASS",
+        ),
+        ([], ["EVAL", "return redis.call('GET', KEYS[1])", "1", "h"], "FAIL"),
+    ],
+)
+def test_variants_leave_a_script_that_calls_internals_alone(builds, loads, command, status):
+    for build in BUILDS.values():
+        build.replies = {tuple(command): lambda server: "off" if _encodings_off(server) else "on"}
+    sequence = [{"command": load, "compare": "skip"} for load in loads] + [{"command": command}]
+    result, _ = run(builds, sequence, checks={"variants": True})
+
+    assert result.status.value == status, result.summary
+
+
 @pytest.mark.parametrize(("expect", "status"), [({"min": 1}, "PASS"), ({"equals": 36}, "FAIL")])
 def test_variants_compare_a_waited_reply_only_when_its_expect_fixes_it(builds, expect, status):
     # As in the walk's test of valkey-io/valkey#4104 (fuzzer#83): CLUSTER COUNTKEYSINSLOT was polled until a slot

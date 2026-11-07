@@ -81,6 +81,9 @@ _VARIES = (
     "LATENCY",
     "TIME",
 )
+# A script's call of a command (redis.call, server.pcall) in its upper-cased words: the command's name and, when the
+# next argument is a literal word too, that (CLIENT, INFO).
+_SCRIPT_CALL = re.compile(r"""CALL\s*\(\s*(['"])([\w-]+)\1(?:\s*,\s*(['"])([\w-]+)\3)?""")
 # Why the compat check leaves the parent's data uncompared: see changed_write.
 _CHANGED = "the merge changes what {} writes, so the parent's data may hold what the candidate never makes"
 # Commands that reply with the NOPERM of the commands they run: the ACL check does not judge them.
@@ -155,6 +158,24 @@ def _combine(**parts: dict[str, Any]) -> dict[str, Any]:
 
 def _words(item: Mapping[str, Any]) -> list[str]:
     return [] if item["command"] is None else actions._validate_sequence_command(item["command"], "command")
+
+
+def _script_varies(words: list[str], commands: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether a script command calls a command in _VARIES: an EVAL from its script, an EVALSHA or FCALL from any
+    script or library the sequence loads (fuzzer#90: an EVAL returned the length of a DUMP)."""
+
+    if words[0] in ("EVAL", "EVAL_RO"):
+        bodies = words[1:2]
+    elif words[0] in _RUNS_OTHERS:
+        loads = (["SCRIPT", "LOAD"], ["FUNCTION", "LOAD"])
+        bodies = [_words(item)[-1] for item in commands if _words(item)[:2] in loads]
+    else:
+        return False
+    return any(
+        match[2] in _VARIES or f"{match[2]} {match[4]}" in _VARIES
+        for body in bodies
+        for match in _SCRIPT_CALL.finditer(body)
+    )
 
 
 def _subscribed(commands: Sequence[Mapping[str, Any]]) -> set[int]:
@@ -522,6 +543,7 @@ class _Checks:
             and " ".join(_words(item)[:2]) not in _VARIES
             and _words(item)[0] not in _VARIES
             and not _words(item)[0].endswith("SCAN")
+            and not _script_varies(_words(item), self.commands)
             # A command waited on until its reply met a predicate replies with whatever met it first, as far as
             # some asynchronous work had got (fuzzer#83); only a wait for an exact reply ends on that reply.
             and (item["wait_s"] is None or "equals" in (item["expect"] or {}))
