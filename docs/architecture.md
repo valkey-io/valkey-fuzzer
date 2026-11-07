@@ -311,7 +311,10 @@ taking its recorded value instead of a draw, so a derived scenario stays in
 the experiment's legal space, under its exclusions, reject rules, profile,
 and compile checks. The job, with its `pinned` draws, is appended to
 `jobs.json` before it starts; a resume continues from `jobs.json` and
-`corpus.json`.
+`corpus.json`. With `corpus_from`, `BatchRunner.create` starts `corpus.json`
+from an earlier batch's entries, each carrying its run folder (`run`) and its
+draws, so the new batch derives from them without reading the earlier batch
+again.
 
 ## The local deployment provider
 
@@ -555,8 +558,7 @@ them.
   effective config the plan records, after start. Experiments that need a
   setting check it before the run with `valkey.capability.build-probe`.
 - **Multiple hosts.** Every instance runs on the local host.
-- **Object-store, proxy, and sidecar providers, and a corpus kept across
-  batches.** A guided batch's corpus lives in its own folder.
+- **Object-store, proxy, and sidecar providers.**
 - **Hermetic replay.** Replay checks provenance and refuses on drift, but it
   runs with what is installed and cannot reproduce timing.
 

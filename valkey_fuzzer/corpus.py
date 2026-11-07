@@ -8,7 +8,9 @@ entries, as AFL derives inputs from its queue: :meth:`Corpus.pick` chooses an
 entry, weighted by the features it added and less each time a scenario was
 derived from it, and :func:`mutation` chooses what the new scenario changes.
 The corpus lives in the batch folder's ``corpus.json``, so a resumed batch
-continues from it.
+continues from it, and a new batch may start from an earlier batch's
+(``corpus_from``): its entries come along with the run folder each names and
+what that run drew, and only features new to the combined corpus make entries.
 """
 
 import json
@@ -38,7 +40,12 @@ class Corpus:
         if not os.path.exists(path):
             return cls()
         with open(path, encoding="utf-8") as handle:
-            entries = json.load(handle)["entries"]
+            return cls.of(json.load(handle)["entries"])
+
+    @classmethod
+    def of(cls, entries: list[dict[str, Any]]) -> "Corpus":
+        """The corpus of ``entries``: what they reached first is everything it covers."""
+
         return cls(entries, {feature for entry in entries for feature in entry["new"]})
 
     def save(self, folder: str) -> None:
@@ -50,7 +57,7 @@ class Corpus:
         A job already in the corpus (a resumed batch runs again a job whose result was not written) adds nothing.
         """
 
-        if any(entry["job"] == job_id for entry in self.entries):
+        if any(parent(entry) == job_id for entry in self.entries):
             return 0
         new = sorted(set(features) - self.covered)
         if new:
@@ -62,13 +69,20 @@ class Corpus:
         self, rng: random.Random, eligible: Callable[[Mapping[str, Any]], bool], picked: Mapping[str, int]
     ) -> Optional[dict[str, Any]]:
         """An ``eligible`` entry, weighted by the features it added divided by one more than the times it was
-        ``picked`` (by job ID) before; None when none is eligible."""
+        ``picked`` (by :func:`parent`) before; None when none is eligible."""
 
         candidates = [entry for entry in self.entries if eligible(entry)]
         if not candidates:
             return None
-        weights = [len(entry["new"]) / (1 + picked.get(entry["job"], 0)) for entry in candidates]
+        weights = [len(entry["new"]) / (1 + picked.get(parent(entry), 0)) for entry in candidates]
         return rng.choices(candidates, weights)[0]
+
+
+def parent(entry: Mapping[str, Any]) -> str:
+    """What a scenario derived from ``entry`` names as its parent: the job ID of a run of this batch, the run
+    folder of an entry an earlier batch's corpus brought (``run``)."""
+
+    return entry.get("run", entry["job"])
 
 
 def mutation(rng: random.Random, dimensions: Sequence[str]) -> Optional[str]:
