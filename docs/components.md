@@ -552,8 +552,8 @@ most commands but not all are in, never `@fast` or `@slow`), then with `+@all
 resetkeys ~nomatch-*`, a refused command (in the category; with keys, from
 `COMMAND GETKEYS`) must reply NOPERM or an error Valkey replies before it
 checks permissions (`acl-bypass`), and no other NOPERM (`acl-overreach`);
-scripts are not judged, and a sequence sending `ACL`, `AUTH`, or `HELLO ...
-AUTH` is skipped. `concurrency`: N connections run it at once, replies
+scripts and `no_auth` commands (`HELLO`, which no rule refuses) are not
+judged, and a sequence sending `ACL`, `AUTH`, or `HELLO ... AUTH` is skipped. `concurrency`: N connections run it at once, replies
 unjudged; a command unanswered while the server answers no `PING` within
 `timeout_s` is `hang` (a crash), and with `replica` the replica must catch
 up. `compat`: a fresh parent runs it and `SAVE`s; its RDB (kept as

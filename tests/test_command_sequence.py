@@ -1975,6 +1975,38 @@ def test_a_subcommand_without_categories_is_refused_with_its_denied_container(bu
     assert _check(value, "acl")["category"] == {"outcome": "pass", "user": "default +@all -@json"}
 
 
+def test_the_acl_check_leaves_out_a_command_no_rule_refuses(builds):
+    # The walk's test of valkey-io/valkey#3352 (fuzzer#95): Valkey's ACL lets a no_auth command (HELLO) run
+    # whatever its categories, so denying @connection does not refuse it.
+    def answer(categories, reply, keyed=False):
+        def respond(server):
+            rule = next((sent[3:] for sent in reversed(server.sent) if sent[:3] == ("ACL", "SETUSER", "default")), ())
+            denied = any(part[1:].encode() in categories for part in rule if part.startswith("-")) or (
+                keyed and "resetkeys" in rule
+            )
+            return Error("NOPERM User default has no permissions to run the command") if denied else reply
+
+        return respond
+
+    for build in BUILDS.values():
+        build.replies = {
+            ("HELLO",): [b"server", b"valkey"],
+            ("PING",): answer([b"@connection"], b"PONG"),
+            ("GET", "k"): answer([b"@string"], None, keyed=True),
+            ("COMMAND", "GETKEYS", "HELLO"): Error("ERR The command has no key arguments"),
+            ("COMMAND", "GETKEYS", "PING"): Error("ERR The command has no key arguments"),
+            ("COMMAND", "GETKEYS", "GET", "k"): [b"k"],
+            ("COMMAND", "INFO", "HELLO"): [[b"hello", -1, [b"no_auth"], 0, 0, 0, [b"@connection"], [], [], []]],
+            ("COMMAND", "INFO", "PING"): [[b"ping", -1, [], 0, 0, 0, [b"@connection"], [], [], []]],
+            ("COMMAND", "INFO", "GET"): [[b"get", 2, [], 0, 0, 0, [b"@string"], [], [], []]],
+        }
+    commands = [{"command": ["HELLO"]}, {"command": ["PING"]}, {"command": ["GET", "k"]}]
+    result, value = run(builds, commands, checks={"acl": True})
+
+    assert result.status.value == "PASS", result.summary
+    assert _check(value, "acl")["category"] == {"outcome": "pass", "user": "default +@all -@connection"}
+
+
 @pytest.mark.parametrize(
     ("error", "before"),
     [

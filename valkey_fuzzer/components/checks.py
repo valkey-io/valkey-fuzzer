@@ -377,10 +377,11 @@ def _ping(side: Any, index: int) -> dict[str, Any]:
 def _categories(side: Any, words: Sequence[str]) -> Optional[set[str]]:
     """The ACL categories of the command ``words`` name (its subcommand's and its container's together, for a
     container command, since denying the container denies every subcommand), from ``COMMAND INFO`` on node 0 of
-    ``side``; None when it knows none."""
+    ``side``; None when it knows none, or when no rule refuses the command: Valkey's ACL lets a ``no_auth`` one
+    (AUTH, HELLO) run whatever its categories (fuzzer#95)."""
 
     info = (_ask(side, 0, "COMMAND", "INFO", words[0]).get("reply") or [None])[0]
-    if not isinstance(info, list) or len(info) < 7:
+    if not isinstance(info, list) or len(info) < 7 or b"no_auth" in info[2] or "no_auth" in info[2]:
         return None
     container = set(info[6])
     if len(info) > 9 and info[9] and len(words) > 1:
