@@ -1858,6 +1858,21 @@ def test_the_acl_check_skips_a_sequence_that_manages_users(builds):
     assert _check(value, "acl") == {"outcome": "skipped", "reason": "the sequence manages users itself"}
 
 
+@pytest.mark.parametrize(("ephemeral", "above"), [((32768, 60999), True), ((49152, 65535), False), (None, False)])
+def test_private_servers_take_ports_above_the_ephemeral_range(monkeypatch, ephemeral, above):
+    # A private server's port in the ephemeral range can go to an outgoing connection before Valkey binds it, and
+    # the server aborts, "Failed listening on port" (the faults check's restarts made it frequent on the soak).
+    monkeypatch.setattr(actions, "ephemeral_port_range", lambda: ephemeral)
+    actions._private_port_span.cache_clear()
+    try:
+        ports = actions._free_ports(20)
+    finally:
+        actions._private_port_span.cache_clear()
+    assert len(set(ports)) == 20
+    if above:
+        assert all(61000 <= port <= 65535 for port in ports)
+
+
 def test_concurrent_connections_each_run_the_whole_sequence(builds):
     for build in BUILDS.values():
         build.replies = {("INCR", "n"): 1}

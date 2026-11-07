@@ -13,6 +13,7 @@ import json
 import math
 import os
 import posixpath
+import random
 import re
 import shutil
 import socket
@@ -25,6 +26,7 @@ import valkey
 
 from valkey_fuzzer._data import canonical_json, jsonable
 from valkey_fuzzer.declarations import Declarations
+from valkey_fuzzer.deployment.local.ports import ephemeral_port_range
 from valkey_fuzzer.deployment.local.queries import replication_role
 from valkey_fuzzer.deployment.local.server_config import MANAGED_SERVER_OPTIONS, canonicalize_server_config
 from valkey_fuzzer.hoststate import OWNER_FILE
@@ -1016,13 +1018,34 @@ class _Side:
         return bool(scan_for_crashes({path: path for path in logs}, CRASH_PATTERNS))
 
 
-def _free_ports(count: int) -> list[int]:
-    """``count`` distinct TCP ports free on the loopback address right now."""
+# The fewest ports above the host's ephemeral range for private servers to take theirs there.
+_PRIVATE_SPAN_MIN = 1000
 
+
+@functools.lru_cache(maxsize=1)
+def _private_port_span() -> Optional[tuple[int, int]]:
+    """Ports above the host's ephemeral range, where no outgoing connection takes one between the free-port check
+    and Valkey's bind (the server would abort, "Failed listening on port"); None where there are too few, or the
+    range cannot be read. Below it, a batch's workers own the ports of their deployments and cluster buses."""
+
+    span = ephemeral_port_range()
+    if span is None or 65535 - span[1] < _PRIVATE_SPAN_MIN:
+        return None
+    return span[1] + 1, 65535
+
+
+def _free_ports(count: int) -> list[int]:
+    """``count`` distinct TCP ports free on the loopback address right now: above the ephemeral range where it
+    leaves room (see :func:`_private_port_span`), else any the kernel hands out."""
+
+    span = _private_port_span()
     ports: list[int] = []
     while len(ports) < count:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.bind(("127.0.0.1", 0))
+            try:
+                sock.bind(("127.0.0.1", 0 if span is None else random.randint(*span)))
+            except OSError:
+                continue
             port = sock.getsockname()[1]
         if port not in ports:
             ports.append(port)
