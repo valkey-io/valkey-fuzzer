@@ -1891,6 +1891,31 @@ def test_private_servers_take_ports_above_the_ephemeral_range(monkeypatch, ephem
         assert all(61000 <= port <= 65535 for port in ports)
 
 
+@pytest.mark.parametrize("taken", [1, actions._START_ATTEMPTS])
+def test_a_private_server_whose_port_was_taken_starts_again_on_fresh_ports(builds, monkeypatch, taken):
+    # The soak's batches start private servers in dozens of workers at once: one can take another's port between
+    # its free check and Valkey's bind, and Valkey aborts, "Failed listening on port".
+    start, failures = FakeServer.start, []
+
+    def contested(server):
+        if server.node and server.build is BUILDS[builds["candidate"]] and len(failures) < taken:
+            failures.append(server.option("port"))
+            with open(server.log_path, "w") as log:
+                log.write(f"1:M 07 Nov 2026 03:01:23.689 # Failed listening on port {server.option('port')} (tcp)\n")
+            server.process.returncode = 1
+            return f"Failed listening on port {server.option('port')} (tcp), aborting."
+        return start(server)
+
+    monkeypatch.setattr(FakeServer, "start", contested)
+    result, _ = run(builds, [{"command": ["PING"]}])
+
+    if taken < actions._START_ATTEMPTS:
+        assert result.status.value == "PASS", result.summary
+        assert _nodes(BUILDS[builds["candidate"]])[0].option("port") not in failures
+    else:
+        assert result.status.value == "ERROR" and "exited at startup" in result.summary
+
+
 def test_concurrent_connections_each_run_the_whole_sequence(builds):
     for build in BUILDS.values():
         build.replies = {("INCR", "n"): 1}

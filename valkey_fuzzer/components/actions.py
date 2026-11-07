@@ -243,6 +243,8 @@ _PRIVATE_SERVER_DEFAULTS = {"sanitize-dump-payload": "yes", "enable-debug-comman
 # starting at once), and how long a lost connection waits for its process to exit before the loss counts as
 # anything but a crash.
 _START_TIMEOUT_S = 60.0
+# How many times a private server starts, on fresh ports each time, while another process takes its port first.
+_START_ATTEMPTS = 3
 _EXIT_WAIT_S = 5.0
 # How often a command with wait_s is sent again.
 _WAIT_INTERVAL_S = 0.1
@@ -823,16 +825,32 @@ class _Side:
         open its main connection; what went wrong, or an empty string."""
 
         for index, node in enumerate(self.nodes):
-            arguments = server_arguments({**server_config, **self.options, **node.options})
-            node.server = PrivateServer(
-                self.binary, arguments, timeout_s=_START_TIMEOUT_S, prefix="vfc-", files=files, config_file=True
-            )
-            node.owned = context.obligations.open(spec, "process.private-server", node.server.workdir, node.server.stop)
-            try:
-                # PrivateServer.start polls with time.sleep: not cancellable, but bounded by its timeout.
-                exit_output = node.server.start()
-            except (OSError, TimeoutError) as exc:
-                return f"the {node.name} server did not start: {exc}"
+            for attempt in range(_START_ATTEMPTS):
+                arguments = server_arguments({**server_config, **self.options, **node.options})
+                node.server = PrivateServer(
+                    self.binary, arguments, timeout_s=_START_TIMEOUT_S, prefix="vfc-", files=files, config_file=True
+                )
+                node.owned = context.obligations.open(
+                    spec, "process.private-server", node.server.workdir, node.server.stop
+                )
+                try:
+                    # PrivateServer.start polls with time.sleep: not cancellable, but bounded by its timeout.
+                    exit_output = node.server.start()
+                except (OSError, TimeoutError) as exc:
+                    return f"the {node.name} server did not start: {exc}"
+                if (
+                    exit_output is None
+                    or attempt + 1 == _START_ATTEMPTS
+                    or "Failed listening on port" not in exit_output
+                ):
+                    break
+                # Another process took a port between its free check and Valkey's bind (a batch runs dozens of
+                # workers at once): the node starts again on fresh ports.
+                node.owned.discharge()
+                fresh = iter(_free_ports(1 + ("cluster-port" in node.options)))
+                node.options["port"] = next(fresh)
+                if "cluster-port" in node.options:
+                    node.options["cluster-port"] = next(fresh)
             if exit_output is not None:
                 return f"the {node.name} server exited at startup: {exit_output[-500:]}"
             try:
