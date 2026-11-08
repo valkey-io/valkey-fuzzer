@@ -1338,6 +1338,8 @@ def test_a_reply_that_changes_with_the_encoding_is_a_variant_mismatch(builds):
         ["CLUSTER", "INFO"],
         # As in the walk's test of valkey-io/valkey#3135 (fuzzer#100): a job's create_time and last_update_time.
         ["CLUSTER", "GETSLOTMIGRATIONS"],
+        # As in the walk's test of valkey-io/valkey#2886 (fuzzer#104): FULLRESYNC and the server's replication ID.
+        ["PSYNC", "0000000000000000000000000000000000000000", "-1"],
     ],
 )
 def test_variants_leave_internals_and_configuration_alone(builds, command):

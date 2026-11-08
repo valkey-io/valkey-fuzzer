@@ -66,7 +66,8 @@ _ENCODINGS = {
 # a key in its encoding, CONFIG reports the encoding thresholds the variant changed, a SCAN's call returns as much as
 # the encoding holds together, SLOWLOG, LATENCY and TIME report times, CLUSTER INFO reports gossip counters and
 # a save timestamp that differ between two independently formed clusters, and CLUSTER GETSLOTMIGRATIONS reports when
-# each job was created, updated and acknowledged (fuzzer#100).
+# each job was created, updated and acknowledged (fuzzer#100), and PSYNC's full resynchronization names the
+# server's random replication ID (fuzzer#104).
 _VARIES = (
     "DEBUG",
     "OBJECT",
@@ -79,6 +80,7 @@ _VARIES = (
     "CLUSTER GETSLOTMIGRATIONS",
     "HELLO",
     "INFO",
+    "PSYNC",
     "SLOWLOG",
     "LATENCY",
     "TIME",
