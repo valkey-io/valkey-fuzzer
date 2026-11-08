@@ -1388,6 +1388,23 @@ def test_variants_leave_a_script_that_calls_internals_alone(builds, loads, comma
     assert result.status.value == status, result.summary
 
 
+@pytest.mark.parametrize(
+    ("queued", "status"),
+    [
+        # As in the walk's test of valkey-io/valkey#2458 (fuzzer#108): EXEC returned CLUSTER INFO's counters.
+        (["CLUSTER", "INFO"], "PASS"),
+        (["GET", "k"], "FAIL"),
+    ],
+)
+def test_variants_leave_a_transaction_that_queued_internals_alone(builds, queued, status):
+    for build in BUILDS.values():
+        build.replies = {("EXEC",): lambda server: ["off"] if _encodings_off(server) else ["on"]}
+    sequence = [{"command": ["MULTI"]}, {"command": queued}, {"command": ["EXEC"]}]
+    result, _ = run(builds, sequence, checks={"variants": True})
+
+    assert result.status.value == status, result.summary
+
+
 @pytest.mark.parametrize(("fresh_again", "status"), [(False, "PASS"), (True, "FAIL")])
 def test_variants_name_the_ids_a_cluster_command_makes_by_first_appearance(builds, fresh_again, status):
     # The walk's test of valkey-io/valkey#3192 (fuzzer#98): CLUSTER RESET SOFT gave each side's node a new shard ID,

@@ -180,6 +180,36 @@ def _script_varies(words: list[str], commands: Sequence[Mapping[str, Any]]) -> b
     )
 
 
+def _varies(words: list[str], commands: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether a command's reply varies by design between two servers that behave the same: internals,
+    configuration, a SCAN's cursor order, or a script that calls any of them."""
+
+    return (
+        " ".join(words[:2]) in _VARIES
+        or words[0] in _VARIES
+        or words[0].endswith("SCAN")
+        or _script_varies(words, commands)
+    )
+
+
+def _transaction_varies(index: int, commands: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether the command at ``index`` is an EXEC whose transaction queued a command whose reply varies: EXEC
+    replies with them all (fuzzer#108: CLUSTER INFO's message counters)."""
+
+    if _words(commands[index])[:1] != ["EXEC"]:
+        return False
+    connection = commands[index]["connection"]
+    for item in reversed(commands[:index]):
+        words = _words(item)
+        if not words or item["connection"] != connection:
+            continue
+        if words[0] == "MULTI":
+            return False
+        if _varies(words, commands):
+            return True
+    return False
+
+
 def _subscribed(commands: Sequence[Mapping[str, Any]]) -> set[int]:
     """The commands sent on a connection that subscribed before them, and did not RESET since."""
 
@@ -598,10 +628,8 @@ class _Checks:
             for index, item in enumerate(self.commands)
             if item["command"] is not None
             and item["compare"] != "skip"
-            and " ".join(_words(item)[:2]) not in _VARIES
-            and _words(item)[0] not in _VARIES
-            and not _words(item)[0].endswith("SCAN")
-            and not _script_varies(_words(item), self.commands)
+            and not _varies(_words(item), self.commands)
+            and not _transaction_varies(index, self.commands)
             # A command waited on until its reply met a predicate replies with whatever met it first, as far as
             # some asynchronous work had got (fuzzer#83); only a wait for an exact reply ends on that reply.
             and (item["wait_s"] is None or "equals" in (item["expect"] or {}))
