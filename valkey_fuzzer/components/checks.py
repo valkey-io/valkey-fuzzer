@@ -985,7 +985,20 @@ class _Checks:
                     f"node {node} was still loading {_SYNC_TIMEOUT_S:g}s after a restart before "
                     f"command {fault['before']}"
                 )
-        if before is not None and "reply" in before and (slots is None or _owned_slots(side, node) == slots):
+        # What a reload before the fault dropped as expired, a restart from the AOF replays: the node holds it again
+        # until it expires it (the walk's test of valkey#3091 replayed). Its data is judged once it holds nothing
+        # that may expire.
+        if (
+            before is not None
+            and "reply" in before
+            and (slots is None or _owned_slots(side, node) == slots)
+            and poll_until(
+                lambda: (not _volatile(side, node), None),
+                timeout_s=_SYNC_TIMEOUT_S,
+                interval_s=0.05,
+                context=self.context,
+            )[0]
+        ):
             after = _ask(side, node, "DEBUG", "DIGEST")
             if "reply" in after and after != before:
                 return _failed(

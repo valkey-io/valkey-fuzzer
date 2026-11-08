@@ -1664,6 +1664,27 @@ def test_a_node_that_comes_back_from_a_fault_with_other_data_lost_it(builds, mon
     assert (result.diagnostics["before"], result.diagnostics["after"]) == ({"reply": "d1"}, {"reply": "d2"})
 
 
+def test_a_restarted_nodes_data_is_judged_once_it_expired_what_its_aof_replayed(builds, monkeypatch):
+    # The walk's test of valkey#3091 replayed: a DEBUG RELOAD dropped hash fields that had expired, the AOF still
+    # held the writes that made them, and the node restarted from it held them until it expired them.
+    monkeypatch.setattr(checks, "_FAULTS", ("restart",))
+    expired = set()
+
+    def keyspace(server):
+        if server.shut_downs and id(server) not in expired:
+            expired.add(id(server))
+            return b"# Keyspace\r\ndb0:keys=7,expires=0,keys_with_volatile_items=1\r\n"
+        return _PERSISTENT
+
+    _replicating(lambda server: b"d2" if server.shut_downs and id(server) not in expired else b"d1")
+    for build in BUILDS.values():
+        build.replies[("INFO", "keyspace")] = keyspace
+    result, value = run(builds, _WRITES, checks={"faults": True})
+
+    assert result.status.value == "PASS", result.summary
+    assert _check(value, "faults")["outcome"] == "pass"
+
+
 def test_a_replicas_data_is_judged_once_it_caught_up(builds, monkeypatch):
     # The walk's test of valkey#5170 replayed: the replica had not yet applied the primary's writes when its digest
     # was read, then applied and saved them before its restart, and came back with them.
