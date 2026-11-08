@@ -506,7 +506,9 @@ reply. A reply the client cannot parse (a RESP3 double `,abc`) is recorded as
 `{protocol_error, raw}`, the client's message and the first 4 KB of the bytes
 the command gets again on a fresh connection (same RESP and `SELECT`),
 escaped; it is a `FAIL` with `diagnostics: {reason: protocol-error, commands:
-[...]}`, even where the parent gives the same, and without `compare_with`.
+[...]}`, even where the parent gives the same, and without `compare_with`;
+not on a connection from its `SYNC` or `PSYNC` on, which reads the
+replication stream.
 
 The outcome, with `compare_with`:
 

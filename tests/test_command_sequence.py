@@ -892,6 +892,12 @@ def test_what_a_replicas_link_reads_is_no_protocol_error(builds):
     other = [commands[0], {**commands[1], "connection": "main"}]
     result, _ = run(builds, other)
     assert result.status.value == "FAIL" and result.diagnostics["reason"] == "protocol-error"
+    # The SYNC's own reply too: the newline that keeps the link alive while the RDB waits to start (the walk's test
+    # of valkey-io/valkey#2833 replayed).
+    for build in BUILDS.values():
+        build.replies = {b"SYNC\r\n": Wire(b"\n")}
+    result, _ = run(builds, commands[:1])
+    assert result.status.value == "PASS", result.summary
 
 
 # ---------------------------------------------------------------------------

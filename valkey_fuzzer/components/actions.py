@@ -1460,8 +1460,9 @@ def _same_on_parent(commands: Sequence[Mapping[str, Any]], index: int, candidate
 
 
 def _replication_links(commands: Sequence[Mapping[str, Any]]) -> set[int]:
-    """The commands sent on a connection after it sent SYNC or PSYNC: it is a replica's link since, and what it
-    reads is the replication stream, not replies."""
+    """The commands sent on a connection from its SYNC or PSYNC on: it is a replica's link since, and what it
+    reads is the replication stream, not replies (the SYNC's own, the newlines that keep it alive while the RDB
+    waits to start)."""
 
     links, found = set(), set()
     for index, item in enumerate(commands):
@@ -1476,6 +1477,7 @@ def _replication_links(commands: Sequence[Mapping[str, Any]]) -> set[int]:
             found.add(index)
         elif words and words[0].upper() in ("SYNC", "PSYNC"):
             links.add(key)
+            found.add(index)
     return found
 
 
