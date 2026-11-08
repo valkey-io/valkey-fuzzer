@@ -612,8 +612,10 @@ class _Checks:
         own = [index for index in compared if "." not in _words(self.commands[index])[0]]
         # A RESP2 client that subscribed may run only the Pub/Sub commands, PING, QUIT and RESET; a RESP3 one, any.
         subscribed = _subscribed(self.commands)
-        behind = _opened_behind_password(self.commands)
-        own = [index for index in own if index not in subscribed and index not in behind]
+        # The RESP3 sequence stops at the first command on a connection opened behind a password, which never
+        # opens: nothing from there on ran (fuzzer#106).
+        stop = min(_opened_behind_password(self.commands), default=len(self.commands))
+        own = [index for index in own if index not in subscribed and index < stop]
         return _combine(encodings=encodings, protocol=self.variant("protocol", own, {"resp": resp}, resp=resp))
 
     def variant(self, name: str, compared: Sequence[int], change: Mapping[str, Any], **start: Any) -> dict[str, Any]:

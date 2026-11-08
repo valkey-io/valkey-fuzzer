@@ -267,6 +267,23 @@ def test_every_check_passes_on_one_build(checks):
         assert value["checks"]["acl"]["keys"]["outcome"] == "pass"
 
 
+def test_the_protocol_variant_compares_only_what_ran_before_a_connection_opened_behind_a_password():
+    # The walk's test of valkey#2237 (fuzzer#106): in RESP3, a connection first used while a password is required
+    # opens with HELLO 3, which Valkey refuses, and the sequence stops there; the main connection's later
+    # commands never ran.
+    commands = [
+        {"command": ["CONFIG", "SET", "requirepass", "s3cret"], "expect": {"equals": "OK"}},
+        {"command": ["AUTH", "s3cret"], "expect": {"equals": "OK"}},
+        {"command": ["PING"], "connection": "late", "expect": {"error": "NOAUTH"}},
+        {"command": ["AUTH", "nope"], "expect": {"error": "WRONGPASS"}},
+        {"command": ["CONFIG", "SET", "requirepass", ""], "expect": {"equals": "OK"}},
+    ]
+    result, value = run(BINARY, commands, compare_with=BINARY, checks={"variants": True})
+
+    assert result.status.value == "PASS", result.summary
+    assert value["checks"]["variants"]["outcome"] == "pass"
+
+
 def test_checks_on_a_two_node_cluster_skip_what_needs_one_standalone_node():
     commands = [
         {"command": ["SET", "k", "v"], "expect": {"equals": "OK"}},
