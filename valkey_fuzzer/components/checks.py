@@ -319,17 +319,23 @@ def _leaves(value: Any) -> list[Any]:
 
 # A node or shard ID: 40 lowercase hex digits.
 _NODE_ID = re.compile(r"(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])")
+# A CLUSTER NODES (or REPLICAS) line's ping-sent, pong-recv and config-epoch, after its id, address, flags and
+# primary: wall-clock milliseconds and an epoch given out at cluster formation, none the same between two
+# independently formed clusters (fuzzer#107).
+_GOSSIP = re.compile(r"(?m)^((?:\S+ ){4})\d+ \d+ \d+ ")
 
 
 def _named_fresh_ids(records: Mapping[int, Any], commands: Sequence[Mapping[str, Any]]) -> dict[int, Any]:
-    """``records`` with each node or shard ID in a CLUSTER command's reply named by its first appearance. The
-    side's own IDs are its placeholders already; these are the ones Valkey made during the sequence, at random (a
-    CLUSTER RESET's), so two sides that behave the same compare equal (fuzzer#98)."""
+    """``records`` with each node or shard ID in a CLUSTER command's reply named by its first appearance, and each
+    line's gossip times and epoch masked. The side's own IDs are its placeholders already; these are the ones
+    Valkey made during the sequence, at random (a CLUSTER RESET's), so two sides that behave the same compare
+    equal (fuzzer#98)."""
 
     names: dict[str, str] = {}
 
     def name(value: Any) -> Any:
         if isinstance(value, str):
+            value = _GOSSIP.sub(r"\g<1><gossip> ", value)
             return _NODE_ID.sub(lambda match: names.setdefault(match.group(0), f"<new-id.{len(names)}>"), value)
         if isinstance(value, list):
             return [name(item) for item in value]

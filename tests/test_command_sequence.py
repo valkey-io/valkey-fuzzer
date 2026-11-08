@@ -1407,6 +1407,25 @@ def test_variants_name_the_ids_a_cluster_command_makes_by_first_appearance(build
     assert result.status.value == status, result.summary
 
 
+@pytest.mark.parametrize(("port", "status"), [(21212, "PASS"), (21213, "FAIL")])
+def test_variants_leave_cluster_nodes_gossip_times_and_epoch_alone(builds, port, status):
+    # The walk's test of valkey-io/valkey#2429 (fuzzer#107): CLUSTER NODES reports each node's ping-sent,
+    # pong-recv and config epoch, wall-clock times and an epoch of the cluster's formation, never the same
+    # between two independently formed clusters; the announced port must still agree.
+    def nodes(server):
+        ping, pong, epoch = (1794174096996, 1794174096796, 1) if _encodings_off(server) else (0, 1794174084994, 0)
+        shown = port if _encodings_off(server) else 21212
+        return f"{'0' * 40} 127.0.0.1:{shown}@17000 myself,master - {ping} {pong} {epoch} connected 0-16383\n".encode()
+
+    BUILDS[builds["candidate"]].replies = {("CLUSTER", "NODES"): nodes}
+    BUILDS[builds["parent"]].replies = {
+        ("CLUSTER", "NODES"): f"{'0' * 40} 127.0.0.1:7000@17000 myself,master - 0 0 0 connected 0-16383\n".encode()
+    }
+    result, _ = run(builds, [{"command": ["CLUSTER", "NODES"], "expect_difference": True}], checks={"variants": True})
+
+    assert result.status.value == status, result.summary
+
+
 @pytest.mark.parametrize(("expect", "status"), [({"min": 1}, "PASS"), ({"equals": 36}, "FAIL")])
 def test_variants_compare_a_waited_reply_only_when_its_expect_fixes_it(builds, expect, status):
     # As in the walk's test of valkey-io/valkey#4104 (fuzzer#83): CLUSTER COUNTKEYSINSLOT was polled until a slot
