@@ -163,6 +163,25 @@ def test_raw_bytes_are_answered_or_left_unanswered():
     assert value["candidate"]["replies"][-1] == {"index": 4, "no_reply": True}
 
 
+def test_a_command_that_holds_its_connection_goes_raw_and_a_later_read_takes_its_reply():
+    # The walk's test of valkey#2858 sent this EVAL as a command, which waited for a reply SCRIPT KILL never came
+    # to send.
+    commands = [
+        {"command": ["CONFIG", "SET", "busy-reply-threshold", 100], "expect": {"equals": "OK"}},
+        {"raw": 'EVAL "while true do end" 0\r\n', "connection": "busy"},
+        {"command": ["SCRIPT", "KILL"], "wait_s": 20, "expect": {"equals": "OK"}},
+        {"read": True, "connection": "busy"},
+        {"command": ["PING"], "expect": {"equals": "PONG"}},
+    ]
+    result, value = run(BINARY, commands, compare_with=BINARY)
+
+    assert result.status.value == "PASS", result.summary
+    replies = value["candidate"]["replies"]
+    assert replies[1] == {"index": 1, "no_reply": True}
+    ((killed,),) = [record["reply"] for record in replies if record["index"] == 3]
+    assert "killed" in killed["$error"]
+
+
 @pytest.mark.parametrize("resp", [2, 3])
 def test_a_subscriber_on_its_own_connection_reads_what_was_published(resp):
     commands = [
