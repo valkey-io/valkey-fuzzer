@@ -252,9 +252,10 @@ def _subscribed(commands: Sequence[Mapping[str, Any]]) -> set[int]:
 
 def _sets_replication(commands: Sequence[Mapping[str, Any]]) -> bool:
     """Whether the sequence makes its node a replica (or a primary) itself: a replica whose own link is down
-    refuses replicas of its own (NOMASTERLINK), so no replica of it can catch up."""
+    refuses replicas of its own (NOMASTERLINK), so no replica of it can catch up. A FAILOVER does it too, with the
+    check's own replica: it fails without one, and with one swaps the two nodes' roles."""
 
-    return any(words and words[0].upper() in ("REPLICAOF", "SLAVEOF") for words in map(_words, commands))
+    return any(words and words[0].upper() in ("REPLICAOF", "SLAVEOF", "FAILOVER") for words in map(_words, commands))
 
 
 _AUTH_SETTINGS = {"REQUIREPASS", "MASTERAUTH", "PRIMARYAUTH", "MASTERUSER", "PRIMARYUSER"}

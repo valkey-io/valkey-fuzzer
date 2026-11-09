@@ -1994,10 +1994,12 @@ def test_the_replica_check_skips_several_nodes(builds):
     assert _check(value, "replica")["outcome"] == "skipped"
 
 
-def test_a_sequence_that_sets_its_replication_itself_skips_the_replica_checks(builds):
-    # A replica whose own link is down refuses replicas of its own, so none can catch up with it (fuzzer#53).
+@pytest.mark.parametrize("command", [["REPLICAOF", "127.0.0.1", 1], ["FAILOVER"]])
+def test_a_sequence_that_sets_its_replication_itself_skips_the_replica_checks(builds, command):
+    # A replica whose own link is down refuses replicas of its own, so none can catch up with it (fuzzer#53). A
+    # FAILOVER, which fails on a node alone, would swap roles with the check's own replica.
     _saving(BUILDS[builds["parent"]])
-    result, value = run(builds, [{"command": ["REPLICAOF", "127.0.0.1", 1]}], checks={"replica": True, "compat": True})
+    result, value = run(builds, [{"command": command}], checks={"replica": True, "compat": True})
 
     assert _check(value, "replica") == {
         "outcome": "skipped",
