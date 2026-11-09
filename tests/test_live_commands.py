@@ -284,6 +284,20 @@ def test_the_protocol_variant_compares_only_what_ran_before_a_connection_opened_
     assert value["checks"]["variants"]["outcome"] == "pass"
 
 
+def test_a_raw_packet_opens_its_connection_behind_a_password_too():
+    # The walk's test of valkey#2092 (fuzzer#109): a raw packet's connection opens with HELLO 3 in RESP3 as well.
+    commands = [
+        {"command": ["CONFIG", "SET", "requirepass", "s3cret"], "expect": {"equals": "OK"}},
+        {"raw": "*1\r\n$4\r\nPING\r\n", "connection": "late", "expect": {"error": "NOAUTH"}},
+        {"command": ["CONFIG", "SET", "requirepass", ""], "expect": {"equals": "OK"}},
+        {"command": ["PING"], "expect": {"equals": "PONG"}},
+    ]
+    result, value = run(BINARY, commands, compare_with=BINARY, checks={"variants": True})
+
+    assert result.status.value == "PASS", result.summary
+    assert value["checks"]["variants"]["outcome"] == "pass"
+
+
 def test_checks_on_a_two_node_cluster_skip_what_needs_one_standalone_node():
     commands = [
         {"command": ["SET", "k", "v"], "expect": {"equals": "OK"}},

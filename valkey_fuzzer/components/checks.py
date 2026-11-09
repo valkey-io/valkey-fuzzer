@@ -256,13 +256,12 @@ def _manages_auth(commands: Sequence[Mapping[str, Any]]) -> bool:
 
 def _opened_behind_password(commands: Sequence[Mapping[str, Any]]) -> set[int]:
     """The commands on a connection first used while the sequence had set a requirepass: a RESP3 client opens it
-    with HELLO 3, which Valkey refuses before AUTH (NOAUTH), so the connection never opens (fuzzer#92)."""
+    with HELLO 3, which Valkey refuses before AUTH (NOAUTH), so the connection never opens (fuzzer#92). A raw
+    packet or a read opens its connection alike (fuzzer#109)."""
 
     password, behind, found = False, {}, set()
     for index, item in enumerate(commands):
         words = _words(item)
-        if not words:
-            continue
         behind.setdefault(item["connection"], password)
         if behind[item["connection"]]:
             found.add(index)
