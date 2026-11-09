@@ -1817,6 +1817,21 @@ def test_a_cluster_nodes_data_is_judged_only_while_it_owns_the_same_slots(builds
         assert result.status.value == "FAIL" and result.diagnostics["reason"] == "lost-data"
 
 
+def test_a_cluster_node_that_became_a_replica_is_not_judged_across_a_fault(builds, monkeypatch):
+    # The walk's test of valkey#2533 replayed: node 0's last slot migrated to node 1, which made node 0 its
+    # replica, and the check's DEBUG RELOAD came during node 0's full resync, which replaced its data.
+    monkeypatch.setattr(checks, "_FAULTS", ("reload",))
+    _replicating(lambda server: b"d2" if ("DEBUG", "RELOAD") in server.sent else b"d1")
+    for build in BUILDS.values():
+        build.replies[("INFO", "keyspace")] = _PERSISTENT
+        build.replies[("INFO", "replication")] = b"# Replication\r\nrole:slave\r\nmaster_link_status:up\r\n"
+        build.replies[("CLUSTER", "INFO")] = b"cluster_state:ok\r\ncluster_known_nodes:2\r\n"
+    result, value = run(builds, _WRITES, cluster=True, nodes=2, checks={"faults": True})
+
+    assert result.status.value == "PASS", result.summary
+    assert _check(value, "faults")["outcome"] == "pass"
+
+
 @pytest.mark.parametrize(("fault", "exact"), [("reload", False), ("restart", True)])
 def test_a_reload_with_expiring_data_leaves_the_replica_to_catch_up_by_offset(builds, monkeypatch, fault, exact):
     # fuzzer#88's replay: the primary's DEBUG RELOAD dropped hashes whose fields had all expired, which its replica

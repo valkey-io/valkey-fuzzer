@@ -426,6 +426,12 @@ def _owned_slots(side: Any, index: int) -> Optional[tuple[str, ...]]:
     return None if "reply" not in record or myself is None else tuple(myself[8:])
 
 
+def _is_replica(side: Any, index: int) -> bool:
+    """Whether node ``index`` of ``side`` is a replica, by its INFO replication."""
+
+    return _fields(_ask(side, index, "INFO", "replication")).get("role") == "slave"
+
+
 def _ping(side: Any, index: int) -> dict[str, Any]:
     """PING on a new connection to node ``index`` of ``side``: its record."""
 
@@ -1001,8 +1007,12 @@ class _Checks:
         # The node must keep its data, judged when nothing else changes it meanwhile: nothing it holds can expire,
         # its data holds still (no asynchronous work, as a slot migration, moves it), and in a cluster it owns the
         # same slots before and after.
-        before = None if _volatile(side, node) else self.settled_digest(side, node)
-        slots = _owned_slots(side, node) if self.config["cluster"] else None
+        # A cluster node that became a replica (one whose last slot migrated away, as in the walk's test of
+        # valkey#2533 replayed) holds its primary's data, which a full resync replaces meanwhile.
+        cluster = self.config["cluster"]
+        judged = not _volatile(side, node) and not (cluster and _is_replica(side, node))
+        before = self.settled_digest(side, node) if judged else None
+        slots = _owned_slots(side, node) if cluster else None
         if fault["fault"] == "reload":
             reloaded = _ask(side, node, "DEBUG", "RELOAD")
             if str(reloaded.get("error", "")).startswith("BUSY"):
@@ -1032,7 +1042,7 @@ class _Checks:
         if (
             before is not None
             and "reply" in before
-            and (slots is None or _owned_slots(side, node) == slots)
+            and (slots is None or (_owned_slots(side, node) == slots and not _is_replica(side, node)))
             and poll_until(
                 lambda: (not _volatile(side, node), None),
                 timeout_s=_SYNC_TIMEOUT_S,
