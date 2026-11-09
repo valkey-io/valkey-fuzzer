@@ -1352,6 +1352,8 @@ def test_a_reply_that_changes_with_the_encoding_is_a_variant_mismatch(builds):
         ["HEXPIRETIME", "h", "FIELDS", "1", "f"],
         ["LASTSAVE"],
         ["COMMANDLOG", "GET", "-1", "slow"],
+        # The first members in a set's internal order, which its encoding decides.
+        ["SORT", "s", "BY", "nosort", "LIMIT", "0", "2"],
     ],
 )
 def test_variants_leave_internals_and_configuration_alone(builds, command):

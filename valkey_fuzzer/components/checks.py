@@ -204,12 +204,15 @@ def _script_varies(words: list[str], commands: Sequence[Mapping[str, Any]]) -> b
 
 def _varies(words: list[str], commands: Sequence[Mapping[str, Any]]) -> bool:
     """Whether a command's reply varies by design between two servers that behave the same: internals,
-    configuration, a SCAN's cursor order, or a script that calls any of them."""
+    configuration, a SCAN's cursor order, a SORT BY nosort with a LIMIT (the first members in a set's internal
+    order, which its encoding decides), or a script that calls any of them."""
 
+    upper = [str(word).upper() for word in words]
     return (
         " ".join(words[:2]) in _VARIES
         or words[0] in _VARIES
         or words[0].endswith("SCAN")
+        or (words[0] in ("SORT", "SORT_RO") and "NOSORT" in upper and "LIMIT" in upper)
         or _script_varies(words, commands)
     )
 
