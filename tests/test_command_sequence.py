@@ -1502,6 +1502,23 @@ def test_a_subscribed_connections_commands_may_reply_by_protocol(builds):
     assert result.status.value == "FAIL" and result.diagnostics["variant"] == "protocol"
 
 
+def test_a_variant_that_stopped_early_compares_only_what_ran_before(builds):
+    # As ACL SETUSER default with a password leaves a later connection unopened in RESP3 (HELLO 3 gets NOAUTH):
+    # the variant ran nothing after its stop, which is no mismatch.
+    for build in BUILDS.values():
+        build.replies = {("SLOW",): ByResp({2: b"OK", 3: TIMEOUT}), ("GET", "k"): b"v"}
+    commands = [{"command": ["GET", "k"]}, {"command": ["SLOW"]}, {"command": ["GET", "k"]}]
+    result, value = run(builds, commands, checks={"variants": True})
+
+    assert result.status.value == "PASS", result.summary
+    assert _check(value, "variants")["protocol"]["outcome"] == "error"
+    assert "stopped at command 1 (SLOW)" in _check(value, "variants")["protocol"]["reason"]
+    # What ran before the stop still compares.
+    BUILDS[builds["candidate"]].replies[("GET", "k")] = ByResp({2: b"v", 3: b"w"})
+    result, _ = run(builds, commands, checks={"variants": True})
+    assert result.status.value == "FAIL" and result.diagnostics["variant"] == "protocol"
+
+
 @pytest.mark.parametrize("first", [["CLIENT", "TRACKING", "ON"], ["DEBUG", "PROTOCOL", "attrib"]])
 def test_a_connection_sent_pushes_is_left_out_of_the_protocol_variant(builds, first):
     # In RESP3, a tracking connection is sent an invalidation push after its own write, and DEBUG PROTOCOL attrib

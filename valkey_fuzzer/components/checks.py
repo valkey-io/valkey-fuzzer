@@ -738,6 +738,12 @@ class _Checks:
         decided = self.judge("variants", side, failed, variant=name, **change)
         if decided is not None:
             return decided
+        # A variant's sequence that stopped at a command it got no reply to (a connection that never opened, as
+        # with ACL SETUSER default and a password in RESP3, or a timeout) ran nothing after it: only what came
+        # before compares, and the stop itself is no mismatch.
+        stopped = next((record for record in side.replies if record.get("unanswered")), None)
+        if stopped is not None:
+            compared = [index for index in compared if index < stopped["index"]]
         differences = []
         bases = _named_fresh_ids(
             {index: actions._reply_at(self.base.replies, index) for index in compared}, self.commands
@@ -749,6 +755,13 @@ class _Checks:
                 differences.append(
                     {"index": index, "command": actions._step_text(self.commands[index]), "base": base, "variant": mine}
                 )
+        # The protocol variant stops by design at a connection opened behind a password (see variants).
+        expected = _opened_behind_password(self.commands) if name == "protocol" else set()
+        if not differences and stopped is not None and stopped["index"] not in expected:
+            return _errored(
+                f"the {name} variant stopped at command {stopped['index']} "
+                f"({actions._step_text(self.commands[stopped['index']])}): {stopped.get('error')}"
+            )
         if not differences:
             return {"outcome": "pass"}
         first = differences[0]
