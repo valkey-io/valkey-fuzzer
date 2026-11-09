@@ -1883,6 +1883,28 @@ def test_a_restarted_nodes_data_is_judged_once_it_loaded(builds, monkeypatch):
     assert _check(value, "faults")["outcome"] == "pass"
 
 
+def test_a_node_the_sequence_restarted_is_judged_once_it_loaded(builds, monkeypatch):
+    # The walk's test of valkey#2631 replayed: a fault right after the sequence's own restart digested the node
+    # while it still loaded its data, an empty dataset, and the data it then loaded looked changed.
+    monkeypatch.setattr(checks, "_FAULTS", ("restart",))
+    persistence, marks = ("INFO", "persistence"), {}
+
+    def loading(server):
+        # Each start loads until it was asked twice whether it still loads.
+        start = marks.setdefault((id(server), server.shut_downs), len(server.sent))
+        return bool(server.shut_downs) and server.sent[start:].count(persistence) < 2
+
+    _replicating(lambda server: b"0000" if loading(server) else b"d1")
+    for build in BUILDS.values():
+        build.replies[("INFO", "keyspace")] = _PERSISTENT
+        build.replies[persistence] = lambda server: f"loading:{int(loading(server))}\r\n".encode()
+    commands = [{"command": ["DEBUG", "POPULATE", 3]}, {"restart": True}, {"command": ["PING"]}]
+    result, value = run(builds, commands, checks={"faults": True})
+
+    assert result.status.value == "PASS", result.summary
+    assert _check(value, "faults")["outcome"] == "pass"
+
+
 @pytest.mark.parametrize(
     "keyspace", [b"db0:keys=6,expires=1,avg_ttl=9", b"db0:keys=6,expires=0,keys_with_volatile_items=2"]
 )

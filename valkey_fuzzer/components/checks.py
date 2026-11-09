@@ -994,6 +994,10 @@ class _Checks:
             synced, state = self.converged((side, 0), (side, replica), exact)
             if not synced:
                 return self.diverged("faults", "replica-diverged", synced, state, fault=dict(fault))
+        # The sequence's own restart returns once the node answers, while it may still load its data (the walk's
+        # test of valkey#2631 replayed): DEBUG DIGEST would digest what it loaded so far.
+        if not self.loaded(side, node):
+            return _errored(f"node {node} was still loading {_SYNC_TIMEOUT_S:g}s before command {fault['before']}")
         # The node must keep its data, judged when nothing else changes it meanwhile: nothing it holds can expire,
         # its data holds still (no asynchronous work, as a slot migration, moves it), and in a cluster it owns the
         # same slots before and after.
