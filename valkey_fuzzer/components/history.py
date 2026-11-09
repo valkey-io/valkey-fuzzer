@@ -128,17 +128,13 @@ def register_history(
         history.append(_operation(read, "read", values[key], read_end))
     # An indeterminate write whose value no checked read returned may be taken never to have applied: the history
     # is linearizable with it exactly when it is without it, and each one multiplies Porcupine's search (352 of
-    # them, on one key of a replication-chaos run, kept it from finishing in 300 s; without them it took 3 s).
+    # them, on one key of a replication-chaos run, kept it from finishing in 300 s; without them it took 3 s). A
+    # delete alike, when no read found its key absent (87 on two keys of another run: over 300 s, then 0.2 s).
     observed = {(op["key"], op["value"]) for op in history if op["f"] == "read"}
     history = [
         op
         for op in history
-        if not (
-            op["f"] == "write"
-            and op["return"] is None
-            and op["value"] is not None
-            and (op["key"], op["value"]) not in observed
-        )
+        if not (op["f"] == "write" and op["return"] is None and (op["key"], op["value"]) not in observed)
     ]
     return history, unchecked
 

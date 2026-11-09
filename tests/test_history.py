@@ -127,6 +127,14 @@ def test_an_indeterminate_write_no_read_returned_is_left_out():
 
     history, _ = register_history({}, ledger, _final("acknowledged"), started_at=0.0)
 
+    # The DEL too: no read found the key absent.
+    assert [(op["value"], op["return"] is None) for op in history if op["f"] == "write"] == [
+        ("read", True),
+        ("acknowledged", False),
+    ]
+    # A read that found it absent keeps the DEL.
+    history, _ = register_history({}, [*ledger, _op(6, "get")], _final("acknowledged"), started_at=0.0)
+
     assert [(op["value"], op["return"] is None) for op in history if op["f"] == "write"] == [
         ("read", True),
         (None, True),
