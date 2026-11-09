@@ -209,17 +209,19 @@ def test_ignore_removes_what_differs_between_processes_from_the_comparison_not_t
 
 
 def test_an_expect_the_candidate_violates_and_the_parent_meets_is_fail(builds):
-    result, _, _ = run(builds, [cli("exit:1@candidate", expect={"exit": {"equals": 0}})])
+    result, value, _ = run(builds, [cli("exit:1@candidate", expect={"exit": {"equals": 0}})])
 
     assert result.status.value == "FAIL" and not result.crash
     assert result.summary.startswith("run 0 (valkey-cli exit:1@candidate) gave {")
+    assert value["violating"] == [0]
 
 
 def test_an_expect_both_builds_violate_alike_is_disputed(builds):
-    result, _, _ = run(builds, [cli("exit:1", expect={"exit": {"equals": 0}})])
+    result, value, _ = run(builds, [cli("exit:1", expect={"exit": {"equals": 0}})])
 
     assert result.status.value == "ERROR" and result.diagnostics["reason"] == "expect-disputed"
     assert to_plain_data(result.diagnostics["runs"])[0]["expect"] == {"exit": {"equals": 0}}
+    assert value["violating"] == [0]
 
 
 @pytest.mark.parametrize(
@@ -235,6 +237,16 @@ def test_a_candidate_tool_that_crashes_is_a_fail(builds, steps, cause):
     assert result.status.value == "FAIL" and result.crash, result.summary
     assert dict(result.diagnostics["crashes"]) == {"run 1": cause}
     assert len(value["candidate"]["runs"]) == 2
+
+
+def test_a_marked_run_the_candidate_crashes_against_its_expect_is_recorded_as_violating(builds):
+    # valkey#2177's merge: the marked cli runs differed only because the candidate aborted where its expect
+    # wanted exit 0, which is the merge breaking the run, not the change showing (fuzzer#113).
+    marked = cli("crash@candidate", "out:OK", expect_difference=True, expect={"exit": {"equals": 0}})
+    result, value, _ = run(builds, [marked])
+
+    assert result.status.value == "FAIL" and result.crash, result.summary
+    assert value["reached"] == [0] and value["violating"] == [0]
 
 
 def test_a_candidate_server_that_exits_is_a_fail(builds, monkeypatch):

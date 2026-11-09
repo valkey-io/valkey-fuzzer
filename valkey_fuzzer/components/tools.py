@@ -353,6 +353,7 @@ class ToolsAction:
             "server": config["server"],
             "reached": reached,
             "unexplained": unexplained,
+            "violating": sorted(disputed + violations),
         }
         evidence = (make_evidence(spec, "valkey.tool.runs", "action.completed", record, artifacts=logs),)
 
@@ -467,6 +468,8 @@ _TOOLS_DECLARES = Declarations(
                     # Marked runs that differ, and unmarked ones that differ, by index.
                     "reached": ConfigField(list, items=INTEGER),
                     "unexplained": ConfigField(list, items=INTEGER),
+                    # The runs whose record on the build under test violates their expect.
+                    "violating": ConfigField(list, items=INTEGER),
                 }
             )
         )
