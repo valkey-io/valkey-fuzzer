@@ -1620,6 +1620,21 @@ def test_the_faults_check_restarts_a_clusters_nodes_without_a_replica(builds, mo
     assert not any(sent[0] == "REPLICAOF" for node in nodes for sent in node.sent)
 
 
+@pytest.mark.parametrize(
+    "setting", [["save", ""], ["appendonly", "no"], ["dbfilename", "x.rdb"], ["shutdown-on-sigterm", "nosave"]]
+)
+def test_a_sequence_that_changes_persistence_gets_only_reloads(builds, setting):
+    # A restart after CONFIG SET save "" saves nothing at SIGTERM, and the node comes back without its data by
+    # design; a DEBUG RELOAD saves and loads one file whatever the settings.
+    _replicating()
+    commands = [{"command": ["CONFIG", "SET", *setting]}, *_WRITES]
+    for seed in range(1, 6):
+        result, value = run(builds, commands, seed=seed, checks={"faults": True})
+
+        assert result.status.value == "PASS", result.summary
+        assert {item["fault"] for item in _check(value, "faults")["faults"]} == {"reload"}
+
+
 def test_a_reload_that_fails_in_the_faults_check_fails_the_run(builds, monkeypatch):
     monkeypatch.setattr(checks, "_FAULTS", ("reload",))
     _replicating()

@@ -326,6 +326,31 @@ def _delays_persistence(commands: Sequence[Mapping[str, Any]], server_config: Ma
     return any(name in delays and str(value).strip() not in ("0", "") for name, value in settings)
 
 
+# What decides whether a shutdown saves the data and where a start loads it from.
+_PERSISTENCE_SETTINGS = (
+    "save",
+    "appendonly",
+    "dbfilename",
+    "appendfilename",
+    "appenddirname",
+    "dir",
+    "shutdown-on-sigterm",
+)
+
+
+def _changes_persistence(commands: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether the sequence CONFIG SETs what a restart's shutdown save or its load depends on (``CONFIG SET save
+    ""`` saves nothing at SIGTERM, and a start reads the check's own configuration file again): only a DEBUG RELOAD,
+    which saves and loads one file whatever the settings, keeps the data then."""
+
+    for item in commands:
+        words = [str(word) for word in _words(item)]
+        if [word.upper() for word in words[:2]] == ["CONFIG", "SET"]:
+            if any(words[index].lower() in _PERSISTENCE_SETTINGS for index in range(2, len(words) - 1, 2)):
+                return True
+    return False
+
+
 def _debug_settings(commands: Sequence[Mapping[str, Any]]) -> bool:
     """Whether the sequence changes a DEBUG SET-* setting, which holds until the server restarts."""
 
@@ -941,8 +966,9 @@ class _Checks:
         rng = self.context.rng(self.spec.id, "faults")
         # Each fault comes before a command, or after the last one (before == len(commands)).
         gaps = rng.sample(range(1, len(self.commands) + 1), k=min(len(self.commands), rng.randint(1, 3)))
+        kinds = ("reload",) if _changes_persistence(self.commands) else _FAULTS
         schedule = [
-            {"before": before, "fault": rng.choice(_FAULTS), "node": rng.randrange(nodes + (replica is not None))}
+            {"before": before, "fault": rng.choice(kinds), "node": rng.randrange(nodes + (replica is not None))}
             for before in sorted(gaps)
         ]
         persistence = rng.choice(_PERSISTENCE)
