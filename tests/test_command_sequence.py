@@ -1556,6 +1556,21 @@ def test_encodings_are_not_varied_with_modules_loaded(builds):
     assert _check(value, "variants")["encodings"] == {"outcome": "skipped", "reason": "modules are loaded"}
 
 
+@pytest.mark.parametrize(
+    ("config", "commands"),
+    [({"maxmemory": "2mb"}, []), ({}, [{"command": ["CONFIG", "SET", "maxmemory", "2mb"]}])],
+)
+def test_encodings_are_not_varied_under_a_maxmemory(builds, config, commands):
+    # With the compact encodings off the same data takes far more memory: writes are refused or keys evicted.
+    for build in BUILDS.values():
+        build.replies = {("HSET", "h", "f", "v"): lambda server: Error("OOM") if _encodings_off(server) else 1}
+    commands = [*commands, {"command": ["HSET", "h", "f", "v"]}]
+    result, value = run(builds, commands, server_config=config, checks={"variants": True})
+
+    assert result.status.value == "PASS", result.summary
+    assert _check(value, "variants")["encodings"]["outcome"] == "skipped"
+
+
 def test_a_replica_of_node_0_reaches_the_primarys_digest(builds):
     _replicating()
     result, value = run(builds, [{"command": ["SET", "k", "v"]}], checks={"replica": True})

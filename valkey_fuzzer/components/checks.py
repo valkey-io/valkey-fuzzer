@@ -371,6 +371,18 @@ def _changes_persistence(commands: Sequence[Mapping[str, Any]]) -> bool:
     return False
 
 
+def _limits_memory(commands: Sequence[Mapping[str, Any]], server_config: Mapping[str, Any]) -> bool:
+    """Whether the sequence or its server_config sets a maxmemory: with the compact encodings off the same data
+    takes far more memory, so writes are refused (OOM) or other keys evicted by design."""
+
+    settings = [(str(name).lower(), value) for name, value in server_config.items()]
+    for item in commands:
+        words = [str(word) for word in _words(item)]
+        if [word.upper() for word in words[:2]] == ["CONFIG", "SET"]:
+            settings += [(words[index].lower(), words[index + 1]) for index in range(2, len(words) - 1, 2)]
+    return any(name == "maxmemory" and str(value).strip().lower() not in ("0", "0b", "") for name, value in settings)
+
+
 def _debug_settings(commands: Sequence[Mapping[str, Any]]) -> bool:
     """Whether the sequence changes a DEBUG SET-* setting, which holds until the server restarts."""
 
@@ -712,6 +724,8 @@ class _Checks:
         ]
         if self.modules["candidate"]:
             encodings = _skipped("modules are loaded")
+        elif _limits_memory(self.commands, self.server_config):
+            encodings = _skipped("the sequence sets a maxmemory, which the encodings use up otherwise")
         else:
             encodings = self.variant(
                 "encodings", compared, {"server_config": _ENCODINGS}, server_config={**self.server_config, **_ENCODINGS}
