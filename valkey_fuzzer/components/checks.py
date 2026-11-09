@@ -232,6 +232,25 @@ def _transaction_varies(index: int, commands: Sequence[Mapping[str, Any]]) -> bo
     return False
 
 
+def _pushed(commands: Sequence[Mapping[str, Any]]) -> set[int]:
+    """The commands sent on a connection after it turned CLIENT TRACKING on or asked DEBUG PROTOCOL for an attribute
+    or a push: in RESP3 it is sent an invalidation push, or a reply of two parts, that RESP2 is not, and each of
+    its later replies is read one off."""
+
+    connections, found = set(), set()
+    for index, item in enumerate(commands):
+        words = [str(word).upper() for word in _words(item)]
+        if not words:
+            continue
+        if item["connection"] in connections:
+            found.add(index)
+        if words[:3] == ["CLIENT", "TRACKING", "ON"] or (
+            words[:2] == ["DEBUG", "PROTOCOL"] and words[2:3] in (["ATTRIB"], ["PUSH"])
+        ):
+            connections.add(item["connection"])
+    return found
+
+
 def _subscribed(commands: Sequence[Mapping[str, Any]]) -> set[int]:
     """The commands sent on a connection that subscribed before them, and did not RESET since."""
 
@@ -702,7 +721,7 @@ class _Checks:
         # the client's protocol on purpose: only Valkey's own commands must agree across RESP2 and RESP3.
         own = [index for index in compared if "." not in _words(self.commands[index])[0]]
         # A RESP2 client that subscribed may run only the Pub/Sub commands, PING, QUIT and RESET; a RESP3 one, any.
-        subscribed = _subscribed(self.commands)
+        subscribed = _subscribed(self.commands) | _pushed(self.commands)
         # The RESP3 sequence stops at the first command on a connection opened behind a password, which never
         # opens: nothing from there on ran (fuzzer#106).
         stop = min(_opened_behind_password(self.commands), default=len(self.commands))

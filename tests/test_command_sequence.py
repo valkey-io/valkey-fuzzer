@@ -1502,6 +1502,20 @@ def test_a_subscribed_connections_commands_may_reply_by_protocol(builds):
     assert result.status.value == "FAIL" and result.diagnostics["variant"] == "protocol"
 
 
+@pytest.mark.parametrize("first", [["CLIENT", "TRACKING", "ON"], ["DEBUG", "PROTOCOL", "attrib"]])
+def test_a_connection_sent_pushes_is_left_out_of_the_protocol_variant(builds, first):
+    # In RESP3, a tracking connection is sent an invalidation push after its own write, and DEBUG PROTOCOL attrib
+    # replies in two parts: each later reply is read one off. RESP2 is sent neither.
+    for build in BUILDS.values():
+        build.replies = {("GET", "k"): ByResp({2: b"v", 3: b"w"})}
+    commands = [{"command": first, "connection": "t"}, {"command": ["GET", "k"], "connection": "t"}]
+    result, _ = run(builds, commands, checks={"variants": True})
+    assert result.status.value == "PASS", result.summary
+    # Another connection's replies are still compared.
+    result, _ = run(builds, [*commands, {"command": ["GET", "k"]}], checks={"variants": True})
+    assert result.status.value == "FAIL" and result.diagnostics["variant"] == "protocol"
+
+
 def test_a_connection_opened_behind_a_password_is_left_out_of_the_protocol_variant(builds):
     # As in the walk's test of valkey-io/valkey#2936 (fuzzer#92): a RESP3 client opens a connection with HELLO 3,
     # which Valkey refuses before AUTH once a password is required, so the connection never opens.
