@@ -67,7 +67,10 @@ _ENCODINGS = {
 # the encoding holds together, SLOWLOG, LATENCY and TIME report times, CLUSTER INFO reports gossip counters and
 # a save timestamp that differ between two independently formed clusters, and CLUSTER GETSLOTMIGRATIONS reports when
 # each job was created, updated and acknowledged (fuzzer#100), and PSYNC's full resynchronization names the
-# server's random replication ID (fuzzer#104).
+# server's random replication ID (fuzzer#104). CLUSTER SLOT-STATS counts the bytes of replies, which the protocol
+# sizes otherwise, and CPU time. The random commands draw by the process's seed, and an absolute expire time,
+# LASTSAVE, COMMANDLOG and ACL LOG name times the variant, run later, need not share; the compared run's two builds
+# may agree on them by chance (see _Checks.differing).
 _VARIES = (
     "DEBUG",
     "OBJECT",
@@ -84,6 +87,20 @@ _VARIES = (
     "SLOWLOG",
     "LATENCY",
     "TIME",
+    "CLUSTER SLOT-STATS",
+    "SRANDMEMBER",
+    "SPOP",
+    "HRANDFIELD",
+    "ZRANDMEMBER",
+    "RANDOMKEY",
+    "ACL GENPASS",
+    "ACL LOG",
+    "COMMANDLOG",
+    "EXPIRETIME",
+    "PEXPIRETIME",
+    "HEXPIRETIME",
+    "HPEXPIRETIME",
+    "LASTSAVE",
 )
 # A script's call of a command (redis.call, server.pcall) in its upper-cased words: the command's name and, when the
 # next argument is a literal word too, that (CLIENT, INFO).
@@ -120,18 +137,23 @@ def run_checks(
     parent_binary: str,
     server_config: Mapping[str, Any],
     files: Mapping[str, bytes],
+    differing: Sequence[int] = (),
 ) -> tuple[dict[str, dict[str, Any]], list[str]]:
     """The enabled checks' outcomes by name, after the compared sequence whose candidate side is ``candidate``,
     and the files they kept (their servers' logs, the parent's RDB), for the evidence's artifacts.
 
     An outcome is ``{outcome: pass | skipped | error | fail}``, ``reason`` for skipped and error, and ``summary``,
     ``diagnostics``, and ``crash`` for fail; a check of two parts also has each part's outcome by name.
+    ``differing``: the commands whose replies differed between the builds with no change to explain it.
     """
 
     enabled = [name for name in _ORDER if config["checks"][name]]
     if candidate.exited is not None or any(record.get("unanswered") for record in candidate.replies):
         return {name: _skipped("the sequence did not complete on the candidate") for name in enabled}, []
-    checks = {name: _Checks(context, spec, config, candidate, parent_binary, server_config, files) for name in enabled}
+    checks = {
+        name: _Checks(context, spec, config, candidate, parent_binary, server_config, files, differing)
+        for name in enabled
+    }
     # Each check runs in a copy of this call's context, so the runner's cancellation of the call reaches it; every
     # check returns, its servers stopped, before the outcomes are read, in _ORDER whichever finished first.
     with ThreadPoolExecutor(max_workers=max(len(enabled), 1)) as pool:
@@ -511,8 +533,11 @@ class _Checks:
         parent_binary: str,
         server_config: Mapping[str, Any],
         files: Mapping[str, bytes],
+        differing: Sequence[int] = (),
     ):
         self.context, self.spec, self.config = context, spec, config
+        # Replies that differ between the compared run's two builds unexplained: they vary between runs.
+        self.differing = set(differing)
         self.commands = config["commands"]
         # The compared run's candidate side, finished: the replies variants compare with.
         self.base = base
@@ -633,6 +658,7 @@ class _Checks:
             for index, item in enumerate(self.commands)
             if item["command"] is not None
             and item["compare"] != "skip"
+            and index not in self.differing
             and not _varies(_words(item), self.commands)
             and not _transaction_varies(index, self.commands)
             # A command waited on until its reply met a predicate replies with whatever met it first, as far as

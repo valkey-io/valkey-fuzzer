@@ -1346,6 +1346,12 @@ def test_a_reply_that_changes_with_the_encoding_is_a_variant_mismatch(builds):
         ["CLUSTER", "GETSLOTMIGRATIONS"],
         # As in the walk's test of valkey-io/valkey#2886 (fuzzer#104): FULLRESYNC and the server's replication ID.
         ["PSYNC", "0000000000000000000000000000000000000000", "-1"],
+        # Bytes the protocol sizes otherwise, a random draw, and times a later run need not share.
+        ["CLUSTER", "SLOT-STATS", "SLOTSRANGE", "0", "16383"],
+        ["SRANDMEMBER", "s"],
+        ["HEXPIRETIME", "h", "FIELDS", "1", "f"],
+        ["LASTSAVE"],
+        ["COMMANDLOG", "GET", "-1", "slow"],
     ],
 )
 def test_variants_leave_internals_and_configuration_alone(builds, command):
@@ -1471,6 +1477,17 @@ def test_a_modules_command_may_reply_by_protocol_and_valkeys_may_not(builds):
         build.replies[("GET", "k")] = ByResp({2: b"v", 3: b"w"})
     result, _ = run(builds, [{"command": ["GET", "k"]}], checks={"variants": True})
     assert result.status.value == "FAIL" and result.diagnostics["variant"] == "protocol"
+
+
+def test_variants_leave_alone_a_reply_that_differs_between_the_builds_unexplained(builds):
+    # As an EXPIRETIME, an SRANDMEMBER or a COMMANDLOG GET replies: by the clock or the process, on every run
+    # otherwise. The compared run reports the difference; the variants check does not file it as its own.
+    for build in BUILDS.values():
+        build.replies = {("GET", "k"): lambda server: server.id.encode()}
+    result, value = run(builds, [{"command": ["GET", "k"]}], checks={"variants": True})
+
+    assert result.status.value == "ERROR" and result.diagnostics["reason"] == "unexplained-difference"
+    assert _check(value, "variants")["outcome"] == "pass"
 
 
 def test_a_subscribed_connections_commands_may_reply_by_protocol(builds):

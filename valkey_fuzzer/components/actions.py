@@ -1254,6 +1254,9 @@ class CommandsAction:
                 server.finish(context, spec, commands)
 
         reached, unexplained, unreached, uncompared = _compare(commands, candidate, parent)
+        # Replies that differ between the two builds with no change to explain it vary between runs: the variants
+        # check leaves them alone, whether or not the replies are judged.
+        differing = list(unexplained)
         if not config["judge_replies"]:
             unexplained, unreached = [], []
         record = _record(
@@ -1276,7 +1279,9 @@ class CommandsAction:
             # checks.py builds on this module, so it is imported where it is used.
             from .checks import run_checks
 
-            checks, check_logs = run_checks(context, spec, config, candidate, parent_binary, server_config, files)
+            checks, check_logs = run_checks(
+                context, spec, config, candidate, parent_binary, server_config, files, differing
+            )
             record["checks"] = checks
         failed = next((outcome for outcome in checks.values() if outcome["outcome"] == "fail"), None)
         evidence = (
