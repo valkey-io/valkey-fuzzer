@@ -133,6 +133,7 @@ a retry succeeded makes the fault, and the run, `ERROR`.
 | [`valkey.oracle.cluster-election-safety`](#valkeyoraclecluster-election-safety) | oracle | cluster | the election model's invariants hold |
 | [`valkey.oracle.binary-check`](#valkeyoraclebinary-check) | oracle | any | each instance runs its assigned binary |
 | [`valkey.oracle.dataset-digest`](#valkeyoracledataset-digest) | oracle | any | records a digest of the dataset |
+| [`valkey.oracle.search-results`](#valkeyoraclesearch-results) | oracle | standalone | valkey-search answers queries as the hashes it indexes say |
 | [`valkey.oracle.evidence`](#valkeyoracleevidence) | oracle | any | requires or forbids evidence |
 
 ## Events, evidence, and state changes
@@ -185,6 +186,7 @@ schemas.
 | `valkey.oracle.liveness` | none | `valkey.liveness.verified` | none |
 | `valkey.oracle.rdb-snapshot` | none | `valkey.rdb.reload-verified` | `process.private-server` |
 | `valkey.oracle.repl-compression` | none | `valkey.repl.compression-verified` | none |
+| `valkey.oracle.search-results` | none | `valkey.search.results-verified` | none |
 | `valkey.workload.command-table` | none | `valkey.workload.command-table` | none |
 | `valkey.workload.key-value` | `<id>.drained`<br>`<id>.seeded` | `valkey.workload.ledger` | none |
 <!-- END declarations -->
@@ -1631,6 +1633,44 @@ across processes"), never a `FAIL` across replicas.
 
 Evidence: `valkey.dataset.digest` (`digest`, key count, per-instance digests,
 and `module_types`, the module types it digested and probed).
+
+### `valkey.oracle.search-results`
+
+Judges valkey-search's query results against the hashes it indexes. On every
+instance not stopped on purpose, it reads the hashes under the index's key
+prefix and answers the same random queries, drawn from the run's seed, twice:
+by `FT.SEARCH ... NOCONTENT` on that instance, and by evaluating each query
+over the hashes in the client. The queries combine tag matchers (exact and
+prefix, several values) and numeric ranges (open, closed, infinite) with AND,
+OR, and negation, which also selects the keys without the field. A share of
+them are KNN queries of a `FLAT` vector field, whose search is exact, with a
+filter or over every key, and with each `HYBRID_POLICY`. A filter query must
+return exactly the matching keys and their total. A KNN query must return
+`min(K, candidates)` distinct candidates, none farther than the Kth nearest,
+so ties may go either way.
+
+The index is built in the background, so each instance is retried within
+`converge_timeout_s` until it agrees; one that still differs is `FAIL`, with
+each differing query, its missing and unexpected keys, and the servers'
+errors for any query it rejected. A hash the oracle cannot evaluate as
+valkey-search would (a numeric field that is not a number, a vector of the
+wrong size) makes it `ERROR`. Tags are split on `,` and compared without case,
+as a `TAG` field without `SEPARATOR` or `CASESENSITIVE` does.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `index` | string | required | The index queried. |
+| `prefix` | string | required | The index's key prefix. |
+| `tag_fields` | list of strings | `[]` | Its `TAG` fields. |
+| `numeric_fields` | list of strings | `[]` | Its `NUMERIC` fields. |
+| `vector_field` | string or null | `null` | A `FLAT`, `FLOAT32`, `L2` vector field. |
+| `dim` | integer, 0 to 4,096 | 0 | The vector field's dimensions. |
+| `queries` | integer, 1 to 10,000 | 200 | Queries per instance. |
+| `knn_share` | number, 0 to 1 | 0.3 | The share of KNN queries, with a vector field. |
+| `converge_timeout_s` | number, 0 to 600 | 60 | |
+
+Evidence: `valkey.search.results-verified` (`index`, the query count, and
+each instance's key count).
 
 ### `valkey.oracle.evidence`
 

@@ -22,9 +22,10 @@ def cmd(*words, expect=None):
     return item
 
 
-def faults_and_oracles(module_command, load, during, verify):
+def faults_and_oracles(module_command, load, during, verify, oracles):
     """The shared shape: probe, load, a replica fault and an optional primary stall at load.completed, writes
-    during the fault, a settle, reads on every instance, and the digest of every replica."""
+    during the fault, a settle, reads on every instance, the digest of every replica, and the module's own
+    ``oracles`` once the replicas are linked."""
     return [
         {
             "use": "valkey.capability.build-probe",
@@ -94,10 +95,12 @@ def faults_and_oracles(module_command, load, during, verify):
         },
         # The ledger may lose what a SIGKILLed instance acknowledged within its fsync window.
         {"use": "valkey.oracle.ledger", "id": "data", "config": {"workload": "writes", "loss_window_s": 2.5}},
+        # They judge on their own, so a fixed read that fails does not hide what they find.
+        *({**oracle, "depends_on": ["links-up"]} for oracle in oracles),
     ]
 
 
-def experiment(name, module, module_command, load, during, verify):
+def experiment(name, module, module_command, load, during, verify, oracles=()):
     doc = {
         "extends": ["valkey.base"],
         "id": f"proposed.{name}-chaos",
@@ -127,7 +130,7 @@ def experiment(name, module, module_command, load, during, verify):
                 "primary_pause_s": {"type": "number", "minimum": 0, "maximum": 60, "default": 0},
             }
         },
-        "components": faults_and_oracles(module_command, load, during, verify),
+        "components": faults_and_oracles(module_command, load, during, verify, oracles),
         "required_events": ["loaded.completed"],
         "required_evidence": [{"evidence_id": "valkey.fault.injected", "source": "hit-replica"}],
     }
@@ -229,13 +232,36 @@ schema = [
     "4",
     "DISTANCE_METRIC",
     "COSINE",
+    "g",
+    "VECTOR",
+    "FLAT",
+    "6",
+    "TYPE",
+    "FLOAT32",
+    "DIM",
+    "4",
+    "DISTANCE_METRIC",
+    "L2",
     "tag",
     "TAG",
+    "c",
+    "TAG",
     "n",
+    "NUMERIC",
+    "p",
     "NUMERIC",
     "title",
     "TEXT",
 ]
+
+
+def fields(i):
+    """The fields the search-results oracle judges: a FLAT L2 vector, tags of mixed case with several to a
+    hash, and a numeric field of fractions and negatives. No rewrite below changes only a tag's case:
+    valkey-search drops such a key from the tag (valkey-io/valkey-search#1599, open)."""
+    return ["g", vec(i * 7 % 50), "c", f"c{i % 4},D{i % 6}", "p", str((i % 37) * 0.25 - 4)]
+
+
 load = [
     cmd("FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", *schema, expect={"equals": "OK"}),
     cmd(
@@ -269,6 +295,7 @@ load += [
             str(i),
             "title",
             f"hello word{i % 9}",
+            *fields(i),
         ]
     }
     for i in range(400)
@@ -278,9 +305,29 @@ load += [cmd("FT.SEARCH", "idx", "*", "LIMIT", "0", "0", expect={"equals": [400]
 during = [{"command": ["HSET", f"d:{i}", "v", vec(i * 3), "n", str(i * 2)]} for i in range(0, 400, 2)]
 during += [cmd("DEL", f"d:{i}") for i in range(0, 400, 10)]
 during += [
-    {"command": ["HSET", f"d:{i}", "v", vec(i), "f", vec(i), "tag", "late", "n", str(i), "title", "late doc"]}
+    {
+        "command": [
+            "HSET",
+            f"d:{i}",
+            "v",
+            vec(i),
+            "f",
+            vec(i),
+            "tag",
+            "late",
+            "n",
+            str(i),
+            "title",
+            "late doc",
+            *fields(i),
+        ]
+    }
     for i in range(400, 500)
 ]
+# Tags rewritten, a numeric field removed, and vectors moved, on keys the DELs left: the index must follow each.
+during += [cmd("HSET", f"d:{i}", "c", f"moved,c{i % 3}") for i in range(1, 400, 3) if i % 10]
+during += [cmd("HDEL", f"d:{i}", "p") for i in range(3, 400, 7) if i % 10]
+during += [{"command": ["HSET", f"d:{i}", "g", vec(i % 11)]} for i in range(5, 500, 4)]
 during += [
     cmd("FT.DROPINDEX", "idx2", expect={"equals": "OK"}),
     cmd(
@@ -311,5 +358,19 @@ verify = [
         "expect": {"exists": True},
     },
 ]
-experiment("search", "valkey-search", "FT.CREATE", load, during, verify)
+results = {
+    "use": "valkey.oracle.search-results",
+    "id": "results",
+    "config": {
+        "index": "idx",
+        "prefix": "d:",
+        "tag_fields": ["tag", "c"],
+        "numeric_fields": ["n", "p"],
+        "vector_field": "g",
+        "dim": 4,
+        "queries": 200,
+        "converge_timeout_s": 60,
+    },
+}
+experiment("search", "valkey-search", "FT.CREATE", load, during, verify, [results])
 print("written", sorted(p.name for p in OUT.iterdir()))
