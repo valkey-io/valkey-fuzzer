@@ -2073,6 +2073,26 @@ def test_a_sequence_that_writes_without_replicating_runs_no_replica(builds):
     assert result.status.value != "FAIL", result.summary
 
 
+def test_a_sequence_that_reverts_a_setting_runs_no_replica(builds):
+    # fuzzer#114: the checks make the sequence's settings on the replica once, up front, where only the last value
+    # holds: a RESTORE taken under rdb-version-check relaxed, later set back to strict, reached a strict replica,
+    # which refused it and diverged.
+    commands = [
+        {"command": ["CONFIG", "SET", "rdb-version-check", "relaxed"]},
+        {"command": ["SET", "k", "v"]},
+        {"command": ["CONFIG", "SET", "rdb-version-check", "strict"]},
+    ]
+    result, value = run(builds, commands, checks={"replica": True, "concurrency": 2, "faults": True})
+
+    assert _check(value, "replica") == {
+        "outcome": "skipped",
+        "reason": "the sequence sets a setting to several values, which the replica can hold only one of",
+    }
+    assert _check(value, "concurrency") == {"outcome": "pass"}
+    assert not any(sent[0] == "REPLICAOF" for server in _nodes(BUILDS[builds["candidate"]]) for sent in server.sent)
+    assert result.status.value != "FAIL", result.summary
+
+
 _CATEGORIES = {"SET": [b"@write", b"@string", b"@slow"], "GET": [b"@read", b"@string", b"@fast"], "PING": [b"@fast"]}
 _ACL_SEQUENCE = [{"command": ["SET", "k", "v"]}, {"command": ["GET", "k"]}, {"command": ["PING"]}]
 

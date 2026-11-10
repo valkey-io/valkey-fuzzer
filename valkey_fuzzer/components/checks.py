@@ -395,6 +395,24 @@ def _debug_settings(commands: Sequence[Mapping[str, Any]]) -> bool:
     )
 
 
+def _reverts_settings(commands: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether the sequence sets a setting (CONFIG SET, or DEBUG SET-*) to more than one value: the checks make
+    the sequence's settings on their replica once, up front (:func:`_set_on_replica`), where only the last value
+    holds, so the replica applies the stream under a setting the primary no longer ran under (fuzzer#114: a
+    RESTORE taken under rdb-version-check relaxed, set back to strict, reached a strict replica)."""
+
+    settings: dict[str, set[str]] = {}
+    for item in commands:
+        words = [str(word) for word in _words(item)]
+        upper = [word.upper() for word in words[:2]]
+        if upper == ["CONFIG", "SET"]:
+            for index in range(2, len(words) - 1, 2):
+                settings.setdefault(words[index].lower(), set()).add(words[index + 1])
+        elif len(upper) == 2 and upper[0] == "DEBUG" and upper[1].startswith("SET-"):
+            settings.setdefault(upper[1], set()).add(" ".join(words[2:]))
+    return any(len(values) > 1 for values in settings.values())
+
+
 def _set_on_replica(side: Any, commands: Sequence[Mapping[str, Any]]) -> None:
     """Make on node 1 the settings the sequence makes on node 0. They are not replicated, and some change how
     a replica applies the stream: DEBUG SET-SKIP-CHECKSUM-VALIDATION lets in a RESTORE the replica would
@@ -800,6 +818,8 @@ class _Checks:
             return _skipped(
                 "the sequence writes keys its node does not replicate (DEBUG POPULATE, or a script's set_repl)"
             )
+        if _reverts_settings(self.commands):
+            return _skipped("the sequence sets a setting to several values, which the replica can hold only one of")
         # Node 1 is the replica; the sequence names node 0 only.
         side, failed = self.start("candidate.replica", nodes=2, options=_QUICK_SYNC)
         synced, state = False, {}
@@ -936,6 +956,7 @@ class _Checks:
             and not self.config["cluster"]
             and not _sets_replication(self.commands)
             and not _writes_unreplicated(self.commands)
+            and not _reverts_settings(self.commands)
         )
         side, failed = self.start("candidate.concurrency", **({"nodes": 2, "options": _QUICK_SYNC} if replica else {}))
         workers: list[_Worker] = []
@@ -1011,7 +1032,12 @@ class _Checks:
         nodes = self.config["nodes"]
         # A single standalone node gets a replica, the side's last node; several nodes or a cluster keep the
         # topology the sequence sets up.
-        single = nodes == 1 and not self.config["cluster"] and not _writes_unreplicated(self.commands)
+        single = (
+            nodes == 1
+            and not self.config["cluster"]
+            and not _writes_unreplicated(self.commands)
+            and not _reverts_settings(self.commands)
+        )
         replica = nodes if single else None
         rng = self.context.rng(self.spec.id, "faults")
         # Each fault comes before a command, or after the last one (before == len(commands)).
