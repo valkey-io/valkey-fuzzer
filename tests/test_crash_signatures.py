@@ -105,6 +105,27 @@ def test_a_fatal_exit_cause_is_the_last_fatal_line_of_the_last_life(tmp_path, li
     assert _liveness("valkey-1", str(path)).diagnostics.get("crashes", {}).get("valkey-1") == cause
 
 
+def _asan_report(function):
+    return (
+        "==16108==ERROR: AddressSanitizer: heap-use-after-free on address 0x7a36431e8790 at pc 0x603d49ee9311\n"
+        "READ of size 4 at 0x7a36431e8790 thread T0\n"
+        f"    #0 0x603d49ee9310 in {function} /src/file.c:511:15\n"
+        f"SUMMARY: AddressSanitizer: heap-use-after-free /src/file.c:511:15 in {function}\n"
+    )
+
+
+def test_two_sanitizer_findings_in_different_functions_are_two_causes(tmp_path):
+    # "AddressSanitizer: heap-use-after-free" alone made valkey-search's FT.HYBRID use-after-free and the
+    # script debugger's one signature, so the walk's second bug landed on the first's issue (fuzzer #61).
+    causes = {}
+    for node, function in (("valkey-0", "connBlock"), ("valkey-1", "FindRecord")):
+        path = tmp_path / f"{node}.log"
+        path.write_text(_asan_report(function))
+        causes[function] = _liveness(node, str(path)).diagnostics["crashes"][node]
+    assert causes["connBlock"] == "AddressSanitizer: heap-use-after-free in connBlock"
+    assert causes["FindRecord"] == "AddressSanitizer: heap-use-after-free in FindRecord"
+
+
 def _signature(experiment, liveness, failing=None):
     """The failure signature of a run of ``experiment`` with this ``liveness`` result and ``failing`` components."""
 

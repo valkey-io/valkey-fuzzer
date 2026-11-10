@@ -33,6 +33,8 @@ CRASH_PATTERNS = (
     r"ERROR: LeakSanitizer",
     r"WARNING: ThreadSanitizer",
     r"runtime error: ",
+    # The report's one line that names where (":cause: in function"), so the cause can carry it.
+    r"SUMMARY: \w*Sanitizer:",
 )
 
 
@@ -93,10 +95,15 @@ _CRASH_CAUSES = tuple(
 # [0x5f6c528877e6]".
 _FRAME_FUNCTION = re.compile(r"\(([A-Za-z_]\w*)\+0x[0-9a-fA-F]+\) \[0x[0-9a-fA-F]+\]")
 
+# The function the sanitizer's SUMMARY line names ("SUMMARY: AddressSanitizer: heap-use-after-free
+# src/socket.c:511:15 in connBlock"), never a leak's allocation count ("leaked in 11 allocation(s)").
+_SANITIZER_FUNCTION = re.compile(r"SUMMARY: \w*Sanitizer: .* in ([A-Za-z_]\w*)")
+
 
 def crash_cause(lines: Sequence[str]) -> str:
-    """What caused the crash whose report ``lines`` hold (see ``_CRASH_CAUSES``), a signal with the function it
-    hit in, when the stack trace names it; its first line otherwise."""
+    """What caused the crash whose report ``lines`` hold (see ``_CRASH_CAUSES``), a signal or a sanitizer's
+    finding with the function it hit in, when the stack trace or SUMMARY line names it; its first line
+    otherwise."""
 
     for pattern in _CRASH_CAUSES:
         for line in lines:
@@ -106,6 +113,12 @@ def crash_cause(lines: Sequence[str]) -> str:
                     frame = next(filter(None, map(_FRAME_FUNCTION.search, lines)), None)
                     if frame is not None:
                         return f"{match.group(1)} in {frame.group(1)}"
+                if "Sanitizer: " in match.group(1):
+                    # Without the function, every use-after-free is one cause, so two different bugs share
+                    # a failure signature and a walk's issue.
+                    summary = next(filter(None, map(_SANITIZER_FUNCTION.search, lines)), None)
+                    if summary is not None:
+                        return f"{match.group(1)} in {summary.group(1)}"
                 return match.group(1)
     match = LOG_LINE.match(lines[0])
     return (match["message"] if match else lines[0]).strip()
