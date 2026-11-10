@@ -191,15 +191,16 @@ def _is_phrase(query: tuple) -> bool:
     return query[0] == "text" and query[1] == "phrase"
 
 
-def _phrase_last(children: list) -> list:
-    """An AND's children with at most one exact phrase, the last: valkey-search adds what follows a phrase to the
-    phrase itself (sarthakaggarwal97/valkey-fuzzer#116, open), so a further phrase becomes a term of its first word."""
+def _phrase_last(children: list, keep: int = 1) -> list:
+    """An AND's children with at most ``keep`` exact phrase, the last: valkey-search adds what follows a phrase to
+    the phrase itself (sarthakaggarwal97/valkey-fuzzer#116, open), so a further phrase becomes a term of its first
+    word."""
 
     phrases = [child for child in children if _is_phrase(child)]
     rest = [child for child in children if not _is_phrase(child)]
-    for _, _, field, wanted, *spelled in phrases[1:]:
+    for _, _, field, wanted, *spelled in phrases[keep:]:
         rest.append(("text", "term", field, wanted[0], *(part[0] for part in spelled)))
-    return rest + phrases[:1]
+    return rest + phrases[:keep]
 
 
 def render(query: tuple) -> str:
@@ -260,16 +261,19 @@ class QueryGenerator:
         self.vocabulary.append("absentword")
         self.suffix_fields = [field for field in documents.suffix_fields if field in self.texts]
 
-    def filter(self, depth: int = 3) -> tuple:
+    def filter(self, depth: int = 3, under_or: bool = False) -> tuple:
         rng = self.rng
         if depth == 0 or rng.random() < 0.4:
             return self._matcher()
         kind = rng.choice(("and", "or", "not"))
         if kind == "not":
-            return ("not", self.filter(depth - 1))
-        children = [self.filter(depth - 1) for _ in range(rng.randint(2, 3))]
+            return ("not", self.filter(depth - 1, under_or))
+        children = [self.filter(depth - 1, under_or or kind == "or") for _ in range(rng.randint(2, 3))]
         if kind == "and":
-            children = _phrase_last(children)
+            # An AND of a phrase and a tag or numeric matcher, in an OR, aborts valkey-search when an AND holds the OR
+            # (sarthakaggarwal97/valkey-fuzzer#118, open): there it holds no phrase.
+            plain = under_or and any(child[0] in ("tag", "numeric") for child in children)
+            children = _phrase_last(children, keep=0 if plain else 1)
         return (kind, tuple(children))
 
     def _matcher(self) -> tuple:

@@ -409,3 +409,31 @@ def test_an_and_holds_at_most_one_exact_phrase_and_holds_it_last():
     for node in with_phrase:
         phrases = [index for index, child in enumerate(node[1]) if child[1:2] == ("phrase",)]
         assert phrases == [len(node[1]) - 1], render(node)
+
+
+def test_in_an_or_an_and_of_a_tag_or_numeric_matcher_holds_no_phrase():
+    # valkey-search aborts on an AND around an OR of such branches (fuzzer#118).
+    documents = _documents(
+        {f"k{i}": {"tag": f"t{i % 3}", "n": str(i), "t": f"alpha beta w{i % 4} gamma"} for i in range(20)}
+    )
+    generator = QueryGenerator(random.Random(13), documents)
+
+    def offending(query, under_or=False):
+        kind = query[0]
+        if kind == "not":
+            return offending(query[1], under_or)
+        if kind not in ("and", "or"):
+            return False
+        children = query[1]
+        if (
+            kind == "and"
+            and under_or
+            and any(child[0] in ("tag", "numeric") for child in children)
+            and any(child[1:2] == ("phrase",) for child in children)
+        ):
+            return True
+        return any(offending(child, under_or or kind == "or") for child in children)
+
+    queries = [generator.filter() for _ in range(600)]
+    assert not [render(query) for query in queries if offending(query)]
+    assert any('"' in render(query) and " | " in render(query) for query in queries), "phrases still meet ORs"
