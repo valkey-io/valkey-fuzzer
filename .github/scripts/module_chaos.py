@@ -5,6 +5,7 @@ restarted, then read back on every instance, and every replica's module values d
 
 import base64
 import json
+import random
 import struct
 import sys
 from pathlib import Path
@@ -252,14 +253,39 @@ schema = [
     "NUMERIC",
     "title",
     "TEXT",
+    "w",
+    "TEXT",
+    "NOSTEM",
+    "WITHSUFFIXTRIE",
 ]
+
+# Words that share prefixes and suffixes and lie a few edits apart, so every text matcher has near misses; stop
+# words, which take no position, and every case and separator the tokenizer folds or splits at.
+VOCABULARY = [
+    "alpha", "alpine", "alp", "alps", "beta", "bet", "better", "bitter", "gamma", "gama", "magma",
+    "delta", "deltas", "melt", "echo", "eco", "cheo", "zulu", "zulus", "lulu", "kilo", "kiloo",
+    "milo", "oak", "oaks", "soak", "x1", "x12", "x123",
+]  # fmt: skip
+SEPARATORS = [" ", "  ", ",", ", ", ".", "-", "/", "\t", ";", "!?", "(", ")"]
+
+
+def text(i, salt=0):
+    """A few words, seeded by the key, in mixed case with stop words between them."""
+
+    rng = random.Random(i * 1000 + salt)
+    picked = [
+        rng.choice(VOCABULARY) if rng.random() < 0.8 else rng.choice(["a", "of", "And", "THE"])
+        for _ in range(rng.randint(2, 7))
+    ]
+    cased = [rng.choice([word, word.upper(), word.capitalize()]) for word in picked]
+    return "".join(word + rng.choice(SEPARATORS) for word in cased).rstrip()
 
 
 def fields(i):
     """The fields the search-results oracle judges: a FLAT L2 vector, tags of mixed case with several to a
-    hash, and a numeric field of fractions and negatives. No rewrite below changes only a tag's case:
+    hash, a numeric field of fractions and negatives, and text. No rewrite below changes only a tag's case:
     valkey-search drops such a key from the tag (valkey-io/valkey-search#1599, open)."""
-    return ["g", vec(i * 7 % 50), "c", f"c{i % 4},D{i % 6}", "p", str((i % 37) * 0.25 - 4)]
+    return ["g", vec(i * 7 % 50), "c", f"c{i % 4},D{i % 6}", "p", str((i % 37) * 0.25 - 4), "w", text(i)]
 
 
 load = [
@@ -328,6 +354,10 @@ during += [
 during += [cmd("HSET", f"d:{i}", "c", f"moved,c{i % 3}") for i in range(1, 400, 3) if i % 10]
 during += [cmd("HDEL", f"d:{i}", "p") for i in range(3, 400, 7) if i % 10]
 during += [{"command": ["HSET", f"d:{i}", "g", vec(i % 11)]} for i in range(5, 500, 4)]
+# Text rewritten with other words, rewritten in another case only, and removed.
+during += [cmd("HSET", f"d:{i}", "w", text(i, salt=1)) for i in range(2, 500, 5) if i % 10]
+during += [cmd("HSET", f"d:{i}", "w", text(i).swapcase()) for i in range(4, 500, 9) if i % 10 and i % 5 != 2]
+during += [cmd("HDEL", f"d:{i}", "w") for i in range(6, 500, 11) if i % 10]
 during += [
     cmd("FT.DROPINDEX", "idx2", expect={"equals": "OK"}),
     cmd(
@@ -366,6 +396,8 @@ results = {
         "prefix": "d:",
         "tag_fields": ["tag", "c"],
         "numeric_fields": ["n", "p"],
+        "text_fields": ["title", "w"],
+        "suffix_fields": ["w"],
         "vector_field": "g",
         "dim": 4,
         "queries": 200,

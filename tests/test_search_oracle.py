@@ -13,17 +13,27 @@ from tests.test_valkey_components import FakeHandle, _spec
 from tests.valkey_experiments_support import fake_context
 from valkey_fuzzer.components import polling
 from valkey_fuzzer.components.search import (
+    STOP_WORDS,
     Documents,
     QueryGenerator,
     SearchResultsOracle,
+    edit_distance,
     judge_filter,
     judge_knn,
     knn_text,
     render,
+    text_words,
 )
 from valkey_fuzzer.results import ComponentStatus
 
-CONFIG = {"tag_fields": ["tag"], "numeric_fields": ["n"], "vector_field": "v", "dim": 2}
+CONFIG = {
+    "tag_fields": ["tag"],
+    "numeric_fields": ["n"],
+    "text_fields": ["t", "u"],
+    "suffix_fields": ["t"],
+    "vector_field": "v",
+    "dim": 2,
+}
 
 
 def _vector(*values):
@@ -81,8 +91,53 @@ def test_a_combination_inside_another_is_parenthesized_and_bounds_render_as_the_
     assert knn_text({**knn, "filter": None, "policy": None}, "v") == "*=>[KNN 3 @v $q]"
 
 
+def test_text_splits_at_whitespace_and_punctuation_folds_case_and_drops_stop_words_from_the_positions():
+    assert text_words("Hello,World  alpha-beta\tGAMMA/x1;the") == ("hello", "world", "alpha", "beta", "gamma", "x1")
+    assert text_words("Alpha of a beta AND The gamma") == ("alpha", "beta", "gamma"), "the is a stop word too"
+    assert text_words("...") == ()
+
+
+def test_the_edit_distance_counts_a_swap_of_adjacent_characters_once_but_never_edits_a_substring_twice():
+    assert edit_distance("alpha", "alpha") == 0
+    assert edit_distance("alpha", "lapha") == 1
+    assert edit_distance("alpha", "alp") == 2
+    assert edit_distance("ca", "abc") == 3, "optimal string alignment, not unrestricted Damerau-Levenshtein (2)"
+
+
+def test_text_matchers_find_words_in_one_field_or_in_every_one_and_a_phrase_only_within_a_field():
+    documents = _documents(
+        {
+            "a": {"t": "alpha beta gamma", "u": "delta"},
+            "b": {"t": "beta of alpha", "u": "gamma"},
+            "c": {"t": "alphabet", "u": "alpha"},
+            "d": {"tag": "x"},
+        }
+    )
+
+    assert documents.matches(("text", "term", "t", "alpha")) == {"a", "b"}
+    assert documents.matches(("text", "term", None, "alpha")) == {"a", "b", "c"}
+    assert documents.matches(("text", "prefix", "t", "alph")) == {"a", "b", "c"}
+    assert documents.matches(("text", "suffix", None, "ta")) == {"a", "b"}
+    assert documents.matches(("text", "suffix", None, "pha")) == {"a", "b"}, "u has no suffix trie"
+    assert documents.matches(("text", "suffix", "u", "pha")) == {"c"}
+    assert documents.matches(("text", "fuzzy", "t", ("alpah", 1))) == {"a", "b"}
+    assert documents.matches(("text", "fuzzy", "t", ("alpah", 3))) == {"a", "b"}, "alphabet is 4 edits away"
+    assert documents.matches(("text", "fuzzy", None, ("alpah", 1))) == {"a", "b", "c"}
+    assert documents.matches(("text", "phrase", None, ("beta", "alpha"))) == {"b"}, "the stop word takes no position"
+    assert documents.matches(("text", "phrase", None, ("delta", "gamma"))) == set(), "not across fields"
+    assert documents.matches(("not", ("text", "term", "u", "alpha"))) == {"a", "b", "d"}
+
+
+def test_a_text_matcher_renders_in_its_own_spelling_with_one_percent_sign_per_edit():
+    assert render(("text", "term", "t", "alpha", "Alpha")) == "@t:Alpha"
+    assert render(("text", "prefix", None, "al", "AL")) == "AL*"
+    assert render(("text", "suffix", "u", "ha", "ha")) == "@u:*ha"
+    assert render(("text", "fuzzy", "t", ("alpah", 2), "alpah")) == "@t:%%alpah%%"
+    assert render(("text", "phrase", None, ("a1", "b2"), ("A1", "b2"))) == '"A1 b2"'
+
+
 def test_a_hash_the_oracle_cannot_evaluate_as_valkey_search_would_is_not_judged():
-    for fields in ({"n": "many"}, {"n": "nan"}, {"v": b"\x00" * 3}):
+    for fields in ({"n": "many"}, {"n": "nan"}, {"v": b"\x00" * 3}, {"t": "caf\u00e9"}, {"t": "a\\,b"}):
         try:
             _documents({"a": fields})
         except Exception as exc:
@@ -137,6 +192,32 @@ def test_generated_queries_use_the_values_the_hashes_hold_and_render_in_the_quer
         documents.matches(query)
     knns = [generator.knn() for _ in range(50)]
     assert {query["policy"] for query in knns} == {None, "ADHOC_BF", "BATCHES"}
+
+
+def test_generated_text_matchers_draw_every_operator_from_the_words_the_hashes_hold():
+    vocabulary = ["alpha", "alpine", "beta", "gamma", "x12"]
+    documents = _documents(
+        {f"k{i}": {"t": " ".join(vocabulary[(i + j) % 5] for j in range(4)), "u": vocabulary[i % 5]} for i in range(10)}
+    )
+    generator = QueryGenerator(random.Random(3), documents)
+
+    matchers = [generator._text() for _ in range(400)]
+
+    assert {matcher[1] for matcher in matchers} == {"term", "prefix", "suffix", "fuzzy", "phrase"}
+    assert {matcher[2] for matcher in matchers} == {"t", "u", None}
+    assert {matcher[2] for matcher in matchers if matcher[1] == "suffix"} == {"t", None}, "u has no suffix trie"
+    texts = [render(matcher) for matcher in matchers]
+    assert any(text != text.lower() for text in texts), "some words are spelled in another case"
+    for matcher, text in zip(matchers, texts):
+        if matcher[1] == "fuzzy":
+            assert 1 <= matcher[3][1] <= 3 and matcher[3][0]
+            assert re.fullmatch(r"(@\w+:)?(%+)[^%]+\2", text), text
+        elif matcher[1] == "phrase":
+            assert text.endswith('"') and len(matcher[3]) in (2, 3)
+        elif matcher[1] == "term":
+            assert matcher[3] not in STOP_WORDS
+    phrases = [matcher for matcher in matchers if matcher[1] == "phrase"]
+    assert any(documents.matches(matcher) for matcher in phrases), "phrases are drawn from the words held"
 
 
 class SearchClient:
@@ -259,6 +340,25 @@ def test_an_index_still_catching_up_passes_once_it_answers_as_the_hashes_say(mon
     assert result.status == ComponentStatus.PASS, result.summary
 
 
+def test_with_text_fields_every_query_is_verbatim_so_a_term_matches_only_the_word_itself(monkeypatch):
+    _tag_only(monkeypatch)
+    handle = FakeHandle(instances=("valkey-0",))
+    sent = []
+
+    class Recording(SearchClient):
+        def execute_command(self, *args):
+            sent.append(args)
+            return super().execute_command(*args)
+
+    handle.clients = {"valkey-0": Recording(HASHES)}
+
+    assert _oracle(handle, text_fields=["t"]).status == ComponentStatus.PASS
+    assert sent and all(args[-1] == "VERBATIM" for args in sent)
+    sent.clear()
+    assert _oracle(handle).status == ComponentStatus.PASS
+    assert sent and all("VERBATIM" not in args for args in sent)
+
+
 def test_a_rejected_query_is_a_mismatch_with_the_servers_error(monkeypatch):
     _tag_only(monkeypatch)
     handle = FakeHandle(instances=("valkey-0",))
@@ -273,3 +373,39 @@ def test_a_rejected_query_is_a_mismatch_with_the_servers_error(monkeypatch):
 
     assert result.status == ComponentStatus.FAIL
     assert result.diagnostics["instances"]["valkey-0"]["mismatches"][0]["rejected"] == "Invalid filter expression"
+
+
+def test_a_batches_knn_query_filters_on_no_text_while_its_inline_filter_skips_text_in_an_and():
+    documents = _documents(
+        {f"k{i}": {"tag": f"t{i % 3}", "t": f"alpha w{i % 4}", "v": _vector(i, -i)} for i in range(20)}
+    )
+    generator = QueryGenerator(random.Random(5), documents)
+
+    knns = [query for query in (generator.knn() for _ in range(300)) if query["filter"] is not None]
+
+    assert all("'text'" not in repr(q["filter"]) for q in knns if q["policy"] == "BATCHES"), (
+        "valkey-io/valkey-search#1424"
+    )
+    assert any("'text'" in repr(q["filter"]) for q in knns if q["policy"] != "BATCHES")
+
+
+def test_an_and_holds_at_most_one_exact_phrase_and_holds_it_last():
+    # valkey-search adds what an AND puts after a phrase to the phrase itself (fuzzer#116).
+    documents = _documents({f"k{i}": {"tag": f"t{i % 3}", "t": f"alpha beta w{i % 4} gamma"} for i in range(20)})
+    generator = QueryGenerator(random.Random(11), documents)
+
+    def ands(query):
+        if query[0] in ("and", "or"):
+            if query[0] == "and":
+                yield query
+            for child in query[1]:
+                yield from ands(child)
+        elif query[0] == "not":
+            yield from ands(query[1])
+
+    found = [node for _ in range(400) for node in ands(generator.filter())]
+    with_phrase = [node for node in found if any(child[1:2] == ("phrase",) for child in node[1])]
+    assert with_phrase, "phrases are drawn into ANDs"
+    for node in with_phrase:
+        phrases = [index for index, child in enumerate(node[1]) if child[1:2] == ("phrase",)]
+        assert phrases == [len(node[1]) - 1], render(node)

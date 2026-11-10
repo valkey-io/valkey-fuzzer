@@ -2,10 +2,15 @@
 
 Each instance's hashes under the index's key prefix are read back, and random queries, drawn from the run's seed,
 are answered twice: by ``FT.SEARCH`` on that instance, and by evaluating the query over the hashes in the
-client. The queries combine tag and numeric matchers with AND, OR and negation, and some are KNN queries of a
-``FLAT`` vector field, whose search is exact, with each hybrid policy. An instance passes when every answer is
-the client's; its index is built in the background, so the comparison is retried until it agrees or the time
+client. The queries combine tag, numeric and text matchers with AND, OR and negation, and some are KNN queries
+of a ``FLAT`` vector field, whose search is exact, with each hybrid policy. An instance passes when every answer
+is the client's; its index is built in the background, so the comparison is retried until it agrees or the time
 runs out. The query language is valkey-search's ``docs/topics/search-query.md``.
+
+Text is judged as an index with the default English stop words and punctuation tokenizes it
+(``docs/topics/search-data-formats.md``), and every query is ``VERBATIM``, so a term matches the word itself and
+not its stems. The text matchers are terms, prefixes, suffixes, fuzzy words (by the optimal string alignment
+distance valkey-search's ``fuzzy.h`` computes) and exact phrases, in one text field or in all of them.
 """
 
 import math
@@ -30,20 +35,81 @@ from .schemas import INTEGER, MAPPING, TEXT, declared, mapping_of
 _PAGE = 100_000
 # How much a FLAT distance computed in float32 by the module may differ from the client's in float64.
 _DISTANCE_TOLERANCE = 1e-4
+# The default English stop words and punctuation; ASCII whitespace and control characters always break words.
+# The stop words are valkey-search's src/indexes/text/languages/english.h: its documentation leaves out "the".
+STOP_WORDS = frozenset((
+    "a", "an", "and", "the", "are", "as", "at", "be", "but", "by", "for", "if", "in", "into", "is", "it", "no",
+    "not", "of", "on", "or", "such", "that", "their", "then", "there", "these", "they", "this", "to", "was", "will", "with",
+))  # fmt: skip
+_PUNCTUATION = frozenset(",.<>{}[]\"':;!@#$%^&*()-+=~/\\|?")
+# The most edits a fuzzy matcher draws: search.fuzzy-max-distance defaults to 3.
+_FUZZY_MAX = 3
 
 
 class _UnmodeledError(Exception):
     """A hash whose field the oracle cannot evaluate as valkey-search would, so no answer can be judged."""
 
 
+def text_words(text: str) -> tuple[str, ...]:
+    """The words valkey-search indexes for ``text``: split at whitespace, control characters and punctuation,
+    lowercased, stop words dropped (they take no position). Text the oracle does not model raises."""
+
+    if any(ord(ch) > 0x7E for ch in text) or "\\" in text:
+        raise _UnmodeledError(f"text with a backslash escape or non-ASCII character: {text[:60]!r}")
+    found, word = [], []
+    for ch in text + " ":
+        if ch in _PUNCTUATION or ord(ch) <= 0x20:
+            if word:
+                found.append("".join(word).lower())
+                word = []
+        else:
+            word.append(ch)
+    return tuple(word for word in found if word not in STOP_WORDS)
+
+
+def edit_distance(a: str, b: str) -> int:
+    """The optimal string alignment distance: insertions, deletions, substitutions and swaps of adjacent
+    characters, no substring edited twice."""
+
+    rows = [list(range(len(b) + 1))]
+    for i in range(1, len(a) + 1):
+        row = [i] + [0] * len(b)
+        for j in range(1, len(b) + 1):
+            row[j] = min(rows[-1][j] + 1, row[j - 1] + 1, rows[-1][j - 1] + (a[i - 1] != b[j - 1]))
+            if i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]:
+                row[j] = min(row[j], rows[-2][j - 2] + 1)
+        rows.append(row)
+    return rows[-1][-1]
+
+
+def _phrase_in(phrase: tuple[str, ...], held: tuple[str, ...]) -> bool:
+    return any(held[start : start + len(phrase)] == phrase for start in range(len(held) - len(phrase) + 1))
+
+
+def _text_hit(op: str, wanted: Any, held: tuple[str, ...]) -> bool:
+    if op == "term":
+        return wanted in held
+    if op == "prefix":
+        return any(word.startswith(wanted) for word in held)
+    if op == "suffix":
+        return any(word.endswith(wanted) for word in held)
+    if op == "fuzzy":
+        word, distance = wanted
+        return any(edit_distance(word, candidate) <= distance for candidate in held)
+    return _phrase_in(wanted, held)
+
+
 class Documents:
     """The hashes under an index's prefix, as the oracle evaluates queries over them: each key's tags by tag
-    field (lowercased, as tags compare without CASESENSITIVE), numbers by numeric field, and vector."""
+    field (lowercased, as tags compare without CASESENSITIVE), numbers by numeric field, words by text field,
+    and vector."""
 
     def __init__(self, hashes: dict[str, dict[bytes, bytes]], config: dict):
         self.keys = frozenset(hashes)
         self.tags: dict[str, dict[str, frozenset]] = {field: {} for field in config["tag_fields"]}
         self.numbers: dict[str, dict[str, float]] = {field: {} for field in config["numeric_fields"]}
+        self.text: dict[str, dict[str, tuple[str, ...]]] = {field: {} for field in config["text_fields"]}
+        self.suffix_fields = list(config["suffix_fields"])
         self.vectors: dict[str, tuple[float, ...]] = {}
         vector_field, dim = config["vector_field"], config["dim"]
         for key, fields in hashes.items():
@@ -62,6 +128,14 @@ class Documents:
                     if math.isnan(number):
                         raise _UnmodeledError(f"{key!r} field {field!r} is NaN")
                     self.numbers[field][key] = number
+            for field in self.text:
+                value = fields.get(field.encode())
+                if value is not None:
+                    try:
+                        decoded = value.decode("utf-8")
+                    except UnicodeDecodeError:
+                        raise _UnmodeledError(f"{key!r} field {field!r} is not UTF-8") from None
+                    self.text[field][key] = text_words(decoded)
             if vector_field is not None:
                 value = fields.get(vector_field.encode())
                 if value is not None:
@@ -84,6 +158,12 @@ class Documents:
         if kind == "numeric":
             _, field, low, high = query
             return frozenset(key for key, number in self.numbers[field].items() if _within(number, low, high))
+        if kind == "text":
+            _, op, field, wanted = query[:4]
+            fields = [field] if field else self.suffix_fields if op == "suffix" else list(self.text)
+            return frozenset(
+                key for name in fields for key, held in self.text[name].items() if _text_hit(op, wanted, held)
+            )
         if kind == "and":
             return frozenset.intersection(*(self.matches(part) for part in query[1]))
         if kind == "or":
@@ -107,6 +187,21 @@ def _within(number: float, low: tuple[bool, float], high: tuple[bool, float]) ->
     return above and below
 
 
+def _is_phrase(query: tuple) -> bool:
+    return query[0] == "text" and query[1] == "phrase"
+
+
+def _phrase_last(children: list) -> list:
+    """An AND's children with at most one exact phrase, the last: valkey-search adds what follows a phrase to the
+    phrase itself (sarthakaggarwal97/valkey-fuzzer#116, open), so a further phrase becomes a term of its first word."""
+
+    phrases = [child for child in children if _is_phrase(child)]
+    rest = [child for child in children if not _is_phrase(child)]
+    for _, _, field, wanted, *spelled in phrases[1:]:
+        rest.append(("text", "term", field, wanted[0], *(part[0] for part in spelled)))
+    return rest + phrases[:1]
+
+
 def render(query: tuple) -> str:
     """``query`` in valkey-search's query language; a combination inside another is parenthesized."""
 
@@ -120,6 +215,18 @@ def render(query: tuple) -> str:
     if kind == "numeric":
         (low_open, low), (high_open, high) = query[2], query[3]
         return f"@{query[1]}:[{'(' if low_open else ''}{_number(low)} {'(' if high_open else ''}{_number(high)}]"
+    if kind == "text":
+        _, op, field, wanted = query[:4]
+        # The query's own spelling, whose case valkey-search folds, when the generator gave one.
+        spelled = query[4] if len(query) > 4 else wanted
+        body = {
+            "term": lambda: spelled,
+            "prefix": lambda: f"{spelled}*",
+            "suffix": lambda: f"*{spelled}",
+            "fuzzy": lambda: "%" * wanted[1] + spelled + "%" * wanted[1],
+            "phrase": lambda: '"' + " ".join(spelled) + '"',
+        }[op]()
+        return f"@{field}:{body}" if field else body
     if kind == "and":
         return " ".join(part(inner) for inner in query[1])
     if kind == "or":
@@ -143,6 +250,15 @@ class QueryGenerator:
         }
         self.numbers = {field: sorted(set(held.values())) for field, held in documents.numbers.items()}
         self.vectors = [documents.vectors[key] for key in sorted(documents.vectors)]
+        # Every text field that holds words, its word sequences, and the words they hold with one none does.
+        self.texts = {
+            field: sequences
+            for field, held in documents.text.items()
+            if (sequences := [held[key] for key in sorted(held) if held[key]])
+        }
+        self.vocabulary = sorted({word for held in documents.text.values() for seq in held.values() for word in seq})
+        self.vocabulary.append("absentword")
+        self.suffix_fields = [field for field in documents.suffix_fields if field in self.texts]
 
     def filter(self, depth: int = 3) -> tuple:
         rng = self.rng
@@ -151,12 +267,20 @@ class QueryGenerator:
         kind = rng.choice(("and", "or", "not"))
         if kind == "not":
             return ("not", self.filter(depth - 1))
-        return (kind, tuple(self.filter(depth - 1) for _ in range(rng.randint(2, 3))))
+        children = [self.filter(depth - 1) for _ in range(rng.randint(2, 3))]
+        if kind == "and":
+            children = _phrase_last(children)
+        return (kind, tuple(children))
 
     def _matcher(self) -> tuple:
         rng = self.rng
-        kinds = [kind for kind, fields in (("tag", self.words), ("numeric", self.numbers)) if fields]
-        if rng.choice(kinds) == "tag":
+        kinds = [
+            kind for kind, fields in (("tag", self.words), ("numeric", self.numbers), ("text", self.texts)) if fields
+        ]
+        kind = rng.choice(kinds)
+        if kind == "text":
+            return self._text()
+        if kind == "tag":
             field = rng.choice(sorted(self.words))
             # A value no hash holds, beside the ones they do, and now and then a prefix of one: of at least two
             # characters, as valkey-search's search.tag-min-prefix-length defaults to.
@@ -182,6 +306,66 @@ class QueryGenerator:
             low, high = (False, low[1]), (False, high[1])
         return ("numeric", field, low, high)
 
+    def _text(self) -> tuple:
+        """A text matcher of one text field or, now and then, of all of them; its words spelled in random case."""
+
+        rng = self.rng
+        op = rng.choice(
+            ("term", "term", "prefix", "suffix", "fuzzy", "phrase")
+            if self.suffix_fields
+            else ("term", "term", "prefix", "fuzzy", "phrase")
+        )
+        # Only a field with a suffix trie answers a suffix matcher, which without a field searches only those.
+        fields = self.suffix_fields if op == "suffix" else sorted(self.texts)
+        field = rng.choice(fields) if fields and rng.random() < 0.7 else None
+        word = rng.choice(self.vocabulary)
+        if op == "prefix":
+            wanted = word[: rng.randint(1, len(word))]
+        elif op == "suffix":
+            wanted = word[-rng.randint(1, len(word)) :]
+        elif op == "fuzzy":
+            distance = rng.randint(1, _FUZZY_MAX)
+            wanted = (self._edited(word, rng.randint(0, distance)), distance)
+        elif op == "phrase":
+            # Mostly a run of words a hash holds, so phrases match; else words that may never stand together.
+            sequences = self.texts[field] if field else [seq for held in self.texts.values() for seq in held]
+            held = rng.choice(sequences) if sequences else ()
+            length = rng.randint(2, 3)
+            if len(held) >= length and rng.random() < 0.7:
+                start = rng.randrange(len(held) - length + 1)
+                wanted = tuple(held[start : start + length])
+            else:
+                wanted = tuple(rng.choice(self.vocabulary) for _ in range(length))
+        else:
+            wanted = word
+        if op == "fuzzy":
+            spelled = self._cased(wanted[0])
+        elif op == "phrase":
+            spelled = tuple(self._cased(part) for part in wanted)
+        else:
+            spelled = self._cased(wanted)
+        return ("text", op, field, wanted, spelled)
+
+    def _cased(self, word: str) -> str:
+        return word.upper() if self.rng.random() < 0.15 else word.capitalize() if self.rng.random() < 0.15 else word
+
+    def _edited(self, word: str, edits: int) -> str:
+        """``word`` with up to ``edits`` random insertions, deletions, substitutions and swaps, never empty."""
+
+        rng, alphabet = self.rng, "abcdefghijklmnopqrstuvwxyz0123456789"
+        for _ in range(edits):
+            at = rng.randrange(len(word) + 1)
+            edit = rng.choice(("insert", "delete", "substitute", "swap"))
+            if edit == "insert":
+                word = word[:at] + rng.choice(alphabet) + word[at:]
+            elif edit == "delete" and len(word) > 1 and at < len(word):
+                word = word[:at] + word[at + 1 :]
+            elif edit == "substitute" and at < len(word):
+                word = word[:at] + rng.choice(alphabet) + word[at + 1 :]
+            elif edit == "swap" and at + 1 < len(word):
+                word = word[:at] + word[at + 1] + word[at] + word[at + 2 :]
+        return word
+
     def knn(self) -> Optional[dict]:
         """A KNN query of the vector field, filtered or over every key, or None without vectors."""
 
@@ -192,8 +376,16 @@ class QueryGenerator:
         vector = tuple(struct.unpack("<f", struct.pack("<f", x + rng.uniform(-2, 2)))[0] for x in base)
         query = {"k": rng.randint(1, 20), "vector": vector, "filter": None, "policy": None}
         if rng.random() < 0.7:
-            query["filter"] = self.filter(2)
             query["policy"] = rng.choice((None, "ADHOC_BF", "BATCHES"))
+            # BATCHES filters inline, which skips the text in an AND (valkey-io/valkey-search#1424, open; fix #1680),
+            # so its filters hold no text while that stands.
+            texts = self.texts
+            if query["policy"] == "BATCHES" and (self.words or self.numbers):
+                self.texts = {}
+            try:
+                query["filter"] = self.filter(2)
+            finally:
+                self.texts = texts
         return query
 
 
@@ -255,6 +447,11 @@ _SEARCH_FIELDS = {
     "prefix": TEXT,
     "tag_fields": ConfigField(list, default=list, items=TEXT),
     "numeric_fields": ConfigField(list, default=list, items=TEXT),
+    # Every TEXT field of the index, for a text matcher of no field searches them all. With any, queries are
+    # VERBATIM.
+    "text_fields": ConfigField(list, default=list, items=TEXT),
+    # Those of them declared WITHSUFFIXTRIE (NOSUFFIXTRIE is the default), the only ones a suffix matcher searches.
+    "suffix_fields": ConfigField(list, default=list, items=TEXT),
     # A FLAT, FLOAT32, L2 vector field of ``dim`` dimensions, whose KNN search is exact.
     "vector_field": ConfigField(str, allow_none=True, default=None),
     "dim": ConfigField(int, default=0, minimum=0, maximum=4096),
@@ -365,6 +562,7 @@ class SearchResultsOracle:
                         str(_PAGE),
                         "DIALECT",
                         "2",
+                        *(("VERBATIM",) if config["text_fields"] else ()),
                     )
                 except valkey.exceptions.ResponseError as exc:
                     found.append({"query": text, "rejected": str(exc)})

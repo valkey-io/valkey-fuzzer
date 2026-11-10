@@ -1641,8 +1641,10 @@ instance not stopped on purpose, it reads the hashes under the index's key
 prefix and answers the same random queries, drawn from the run's seed, twice:
 by `FT.SEARCH ... NOCONTENT` on that instance, and by evaluating each query
 over the hashes in the client. The queries combine tag matchers (exact and
-prefix, several values) and numeric ranges (open, closed, infinite) with AND,
-OR, and negation, which also selects the keys without the field. A share of
+prefix, several values), numeric ranges (open, closed, infinite) and text
+matchers (term, prefix, suffix, fuzzy, exact phrase; in one text field or in
+all of them) with AND, OR, and negation, which also selects the keys without
+the field. A share of
 them are KNN queries of a `FLAT` vector field, whose search is exact, with a
 filter or over every key, and with each `HYBRID_POLICY`. A filter query must
 return exactly the matching keys and their total. A KNN query must return
@@ -1654,8 +1656,15 @@ The index is built in the background, so each instance is retried within
 each differing query, its missing and unexpected keys, and the servers'
 errors for any query it rejected. A hash the oracle cannot evaluate as
 valkey-search would (a numeric field that is not a number, a vector of the
-wrong size) makes it `ERROR`. Tags are split on `,` and compared without case,
-as a `TAG` field without `SEPARATOR` or `CASESENSITIVE` does.
+wrong size, text with a backslash escape or a non-ASCII character) makes it
+`ERROR`. Tags are split on `,` and compared without case, as a `TAG` field
+without `SEPARATOR` or `CASESENSITIVE` does. Text is split at whitespace,
+control characters and the default English punctuation, lowercased, and
+stripped of the default English stop words (those of valkey-search's
+`english.h`, whose documentation leaves out "the"), which take no position; a
+suffix matcher searches only the fields declared `WITHSUFFIXTRIE`; with any
+text field every query is `VERBATIM`, so a term matches only the word itself,
+and fuzzy words are within the optimal string alignment distance.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -1663,6 +1672,8 @@ as a `TAG` field without `SEPARATOR` or `CASESENSITIVE` does.
 | `prefix` | string | required | The index's key prefix. |
 | `tag_fields` | list of strings | `[]` | Its `TAG` fields. |
 | `numeric_fields` | list of strings | `[]` | Its `NUMERIC` fields. |
+| `text_fields` | list of strings | `[]` | All its `TEXT` fields, as a text matcher of no field searches them all. |
+| `suffix_fields` | list of strings | `[]` | Those declared `WITHSUFFIXTRIE` (not the default), which suffix matchers search. |
 | `vector_field` | string or null | `null` | A `FLAT`, `FLOAT32`, `L2` vector field. |
 | `dim` | integer, 0 to 4,096 | 0 | The vector field's dimensions. |
 | `queries` | integer, 1 to 10,000 | 200 | Queries per instance. |
