@@ -2496,8 +2496,8 @@ def test_the_parents_data_loads_and_replicates_into_the_candidate(builds, monkey
     rdb = next(path for path in result.evidence[0].artifacts if os.path.basename(path) == "parent.compat.rdb")
     # The candidate that loads it loads it again as a replica, which keeps keys expired since the parent saved.
     (loaded,) = [server for server in _nodes(BUILDS[builds["candidate"]]) if server.files.get("dump.rdb")]
-    assert [sent[0] for sent in loaded.sent] == ["REPLICAOF", "DEBUG", "DEBUG"]
-    assert loaded.sent[1] == ("DEBUG", "RELOAD", "NOSAVE")
+    assert [sent[0] for sent in loaded.sent] == ["INFO", "REPLICAOF", "DEBUG", "DEBUG"]
+    assert loaded.sent[2] == ("DEBUG", "RELOAD", "NOSAVE")
     if reason is None:
         assert result.status.value == "PASS", result.summary
         return
@@ -2511,6 +2511,30 @@ def test_the_parents_data_loads_and_replicates_into_the_candidate(builds, monkey
             "parent": {"reply": "d1"},
             "candidate": {"reply": "empty"},
         }
+
+
+def test_the_candidate_is_asked_nothing_until_it_loaded_the_parents_rdb(builds, monkeypatch):
+    # The walk's test of valkey#1317 replayed (fuzzer#117): under the sequence's key-load-delay the candidate
+    # still loaded the parent's RDB, and DEBUG DIGEST answered LOADING.
+    persistence = ("INFO", "persistence")
+
+    def loading(server):
+        return server.files.get("dump.rdb") == b"RDB" and server.sent.count(persistence) < 3
+
+    def digest(server):
+        if loading(server):
+            return Error("LOADING Valkey is loading the dataset in memory")
+        if server.build is BUILDS[builds["parent"]] or server.files.get("dump.rdb") == b"RDB":
+            return b"d1"
+        return b"d1" if ("SET", "k", "v") in server.sent else b"empty"
+
+    _replicating(digest)
+    _saving(BUILDS[builds["parent"]])
+    for build in BUILDS.values():
+        build.replies[persistence] = lambda server: f"loading:{int(loading(server))}\r\n".encode()
+    result, value = run(builds, [{"command": ["SET", "k", "v"]}], checks={"compat": True})
+
+    assert _check(value, "compat")["load"]["outcome"] == "pass", result.summary
 
 
 @pytest.mark.parametrize(("categories", "outcome"), [([b"@write", b"@string"], "skipped"), ([b"@read"], "fail")])

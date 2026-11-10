@@ -1282,7 +1282,10 @@ class _Checks:
         side, failed = self.start("candidate.compat-load", files=files, options={"appendonly": "no"})
         mine: dict[str, Any] = {}
         try:
-            if not failed:
+            if not failed and not self.loaded(side, 0):
+                # A key-load-delay the sequence sets slows the load at startup (the walk's test of valkey#1317).
+                mine = {"error": f"it still loaded the parent's RDB after {_SYNC_TIMEOUT_S:g}s", "unanswered": True}
+            elif not failed:
                 # It loaded the RDB as a primary at startup, which drops the keys that expired since the parent saved;
                 # loaded again as a replica (of no server that answers), it keeps them, as the parent's digest does.
                 mine = _ask(side, 0, "REPLICAOF", "127.0.0.1", self.free_ports(1)[0])
