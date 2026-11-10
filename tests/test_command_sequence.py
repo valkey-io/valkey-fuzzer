@@ -61,6 +61,8 @@ class Build:
         self.starts: list[list[str]] = []
         self.sent: list[tuple] = []
         self.connections = 0
+        # The connections (numbered from 1, across its servers) it closes in the handshake, as it opens them.
+        self.closes_at_connect: set[int] = set()
 
 
 BUILDS: dict[str, Build] = {}
@@ -217,7 +219,10 @@ class FakeWire:
 
 def fake_open_raw_connection(resp, timeout_s, *, path=None, host=None, port=None):
     server = SERVERS[path] if path is not None else SERVERS[f"{host}:{port}"]
-    return actions.RawConnection(FakeWire(server, resp))
+    wire = FakeWire(server, resp)
+    if server.build.connections in server.build.closes_at_connect:
+        raise ValkeyConnectionError("Connection closed by server.")
+    return actions.RawConnection(wire)
 
 
 @pytest.fixture
@@ -253,9 +258,10 @@ def run(builds, commands, seed=1, **config):
     return result, (to_plain_data(result.evidence[0].value) if result.evidence else None)
 
 
-def _serve(replies):
+def _serve(replies, received=None):
     """A loopback server that answers each request of one connection with the next of ``replies`` (raw RESP),
-    and the HELLO and CLIENT SETINFO valkey-py sends as it connects; its port."""
+    and the HELLO and CLIENT SETINFO valkey-py sends as it connects, appending the others' arguments to
+    ``received``; its port."""
 
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
@@ -278,11 +284,15 @@ def _serve(replies):
                     count = int(lines[0][1:])
                     words = lines[2 : 2 + 2 * count : 2]
                     data = b"\r\n".join(lines[1 + 2 * count :])
-                    name = words[0].upper()
+                    name = words[0].upper() if words else b""
                     if name == b"HELLO":
                         connection.sendall(b"%1\r\n$5\r\nproto\r\n:3\r\n")
+                    elif name == b"CLIENT":
+                        connection.sendall(b"+OK\r\n")
                     else:
-                        connection.sendall(b"+OK\r\n" if name == b"CLIENT" else pending.pop(0))
+                        if received is not None:
+                            received.append(tuple(words))
+                        connection.sendall(pending.pop(0))
 
     threading.Thread(target=serve, daemon=True).start()
     return listener.getsockname()[1]
@@ -306,6 +316,20 @@ def test_every_error_reply_is_recorded_as_the_server_sent_it(resp):
         assert [connection.send(["PING"]) for _ in errors] == [{"error": error.decode()} for error in errors]
     finally:
         connection.close()
+
+
+def test_every_argument_reaches_the_server_as_written_even_a_first_one_valkey_py_would_split():
+    # valkey-py splits a first argument at whitespace: "" became an empty request, which the server never answers.
+    received = []
+    port = _serve([b"-ERR unknown command ''\r\n", b"-ERR unknown command 'CONFIG GET'\r\n", b"+PONG\r\n"], received)
+    connection = actions.open_raw_connection(2, 5, host="127.0.0.1", port=port)
+    try:
+        assert connection.send([""]) == {"error": "ERR unknown command ''"}
+        assert connection.send(["CONFIG GET", 1.5]) == {"error": "ERR unknown command 'CONFIG GET'"}
+        assert connection.send(["PING"]) == {"reply": "PONG"}
+    finally:
+        connection.close()
+    assert received == [(b"",), (b"CONFIG GET", b"1.5"), (b"PING",)]
 
 
 def _replies(side):
@@ -831,6 +855,22 @@ def test_raw_bytes_go_out_as_they_are_and_one_reply_or_none_is_recorded(builds):
         {"error": "ERR Protocol error: embedded NUL byte in inline request"},
     ]
     assert _replies(value["parent"])[2] == {"no_reply": True}
+
+
+def test_a_connection_a_live_server_closes_as_it_opens_is_its_answer_too(builds):
+    # An unauthenticated client over its output buffer limit is closed in valkey-py's handshake (HELLO): that
+    # was an ERROR, "cannot connect", though the sequence expects the close.
+    for build in BUILDS.values():
+        build.closes_at_connect = {2}
+    commands = [
+        {"command": ["PING"]},
+        {"command": ["PING"], "connection": "probe", "expect": {"exists": False}},
+        {"command": ["PING"], "connection": "probe"},
+    ]
+    result, value = run(builds, commands)
+
+    assert result.status.value == "PASS", result.summary
+    assert _replies(value["candidate"]) == [{"reply": "OK"}, {"closed": True}, {"reply": "OK"}]
 
 
 def test_raw_bytes_no_reply_answers_violate_the_candidates_expect(builds):
@@ -1878,6 +1918,22 @@ def test_a_sequence_that_writes_unreplicated_keys_persists_them_by_rdb(builds, m
         persistences.add(str(_check(value, "faults")["persistence"]))
     for seed in range(1, 9):
         _, value = run(builds, commands, seed=seed, checks={"faults": True})
+        persistences.add(str(_check(value, "faults")["persistence"]))
+    assert persistences == {str({"save": "3600 1"})}
+
+
+def test_a_sequence_that_puts_an_aof_in_place_persists_by_rdb_so_no_node_loads_that_aof(builds, monkeypatch):
+    # The walk's test of valkey#1614 replayed: it hands a malformed AOF to DEBUG LOADAOF, and a node the faults
+    # check started with appendonly loaded that AOF and refused to start, half the time.
+    monkeypatch.setattr(checks, "_PERSISTENCE", ({"save": "3600 1"}, {"appendonly": "yes"}))
+    _replicating()
+    files = {
+        "appendonlydir/appendonly.aof.manifest": "file appendonly.aof.1.incr.aof seq 1 type i\n",
+        "appendonlydir/appendonly.aof.1.incr.aof": "*1\r\n$4\r\nINCR\r\n",
+    }
+    persistences = set()
+    for seed in range(1, 9):
+        _, value = run(builds, _WRITES, seed=seed, files=files, checks={"faults": True})
         persistences.add(str(_check(value, "faults")["persistence"]))
     assert persistences == {str({"save": "3600 1"})}
 

@@ -407,6 +407,13 @@ def _limits_memory(commands: Sequence[Mapping[str, Any]], server_config: Mapping
     return any(name == "maxmemory" and str(value).strip().lower() not in ("0", "0b", "") for name, value in settings)
 
 
+def _plants_aof(files: Mapping[str, bytes]) -> bool:
+    """Whether the sequence puts an AOF in place, which a node started with appendonly loads though the sequence
+    may only hand it to DEBUG LOADAOF: a malformed one, as a test of the loader writes, stops the server."""
+
+    return any(path.split("/")[0] == "appendonlydir" or path.endswith(".aof") for path in files)
+
+
 def _debug_settings(commands: Sequence[Mapping[str, Any]]) -> bool:
     """Whether the sequence changes a DEBUG SET-* setting, which holds until the server restarts."""
 
@@ -1074,6 +1081,9 @@ class _Checks:
             # DEBUG POPULATE's keys reach no AOF (fuzzer#86), and an AOF replays its commands without the DEBUG
             # SET-* settings they ran under, which a restart drops (a RESTORE of a payload whose checksum was not
             # checked is refused): only an RDB saved at shutdown keeps the data as it was.
+            persistence = _PERSISTENCE[0]
+        if _plants_aof(self.files):
+            # Nor may the node load an AOF the sequence put in place (the walk's test of valkey#1614 replayed).
             persistence = _PERSISTENCE[0]
         side, failed = self.start(
             "candidate.faults", nodes=nodes + (replica is not None), options={**_QUICK_SYNC, **persistence}

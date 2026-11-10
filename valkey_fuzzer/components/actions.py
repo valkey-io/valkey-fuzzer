@@ -24,6 +24,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from typing import Any, ClassVar, Optional
 
 import valkey
+from valkey._parsers.base import SERVER_CLOSED_CONNECTION_ERROR
 
 from valkey_fuzzer._data import canonical_json, jsonable
 from valkey_fuzzer.declarations import Declarations
@@ -421,6 +422,16 @@ def _argument(item: Any) -> Any:
     return base64.b64decode(item[BASE64_KEY]) if _is_binary(item) else item
 
 
+def _packed(arguments: Sequence[Any]) -> bytes:
+    """``arguments`` as one RESP request, each as valkey-py's encoder writes it (a float by repr)."""
+
+    parts = [
+        item if isinstance(item, bytes) else (repr(item) if isinstance(item, float) else str(item)).encode()
+        for item in arguments
+    ]
+    return b"*%d\r\n" % len(parts) + b"".join(b"$%d\r\n%s\r\n" % (len(part), part) for part in parts)
+
+
 def _text(value: bytes) -> Any:
     """A bulk string as the evidence records it: the string when it is valid UTF-8, else ``{"$base64": ...}``."""
 
@@ -469,10 +480,22 @@ class RawConnection:
         ``{"protocol_error": ...}``, or a lost connection or a reply that timed out as ``{"error": ...,
         "unanswered": True}``."""
 
-        record = self._exchange(lambda: self.connection.send_command(*[_argument(item) for item in command]))
+        record = self._exchange(lambda: self._write(command))
         if str(command[0]).upper() == "SELECT" and record.get("reply") == "OK":
             self.db = command[1]
         return record
+
+    def _write(self, command: Sequence[Any]) -> None:
+        """Send ``command`` with every argument as the sequence wrote it. valkey-py splits a first argument at
+        whitespace (``"CONFIG GET"`` into two, ``""`` into none, which the server never answers), so one it would
+        split goes packed here."""
+
+        arguments = [_argument(item) for item in command]
+        first = arguments[0] if arguments else b""
+        if isinstance(first, (str, bytes)) and first.split() != [first]:
+            self.connection.send_packed_command([_packed(arguments)])
+        else:
+            self.connection.send_command(*arguments)
 
     def send_raw(self, data: bytes) -> dict[str, Any]:
         """Send ``data`` as it is and read one reply, as :meth:`send`; ``{"no_reply": True}`` when none began
@@ -518,7 +541,7 @@ class RawConnection:
         if isinstance(request, bytes):
             self.connection.send_packed_command([request])
         else:
-            self.connection.send_command(*[_argument(item) for item in request])
+            self._write(request)
         sock = self.connection._sock
         sock.settimeout(_NO_REPLY_S)
         received = b""
@@ -606,7 +629,12 @@ def _run_step(target: Any, item: Mapping[str, Any], context: Any) -> dict[str, A
     try:
         connection = target.connection(item["node"], item["connection"])
     except (valkey.exceptions.ValkeyError, OSError) as exc:
-        return {"error": f"cannot connect: {type(exc).__name__}: {exc}", "unanswered": True}
+        record = {"error": f"cannot connect: {type(exc).__name__}: {exc}", "unanswered": True}
+        # A server that accepts a connection and closes it in the handshake (an unauthenticated client over its
+        # output buffer limit) answers as one that closes it after a command.
+        if isinstance(exc, valkey.exceptions.ConnectionError) and str(exc) == SERVER_CLOSED_CONNECTION_ERROR:
+            record["closed"] = True
+        return record
     if item["read"]:
         return target.mask(connection.read_waiting())
     if item["raw"] is not None:
@@ -770,7 +798,10 @@ class _Instance:
         return False
 
     def forget(self, node: int, name: str) -> None:
-        self.connections.pop(name).close()
+        # A connection closed as it opened was never kept.
+        connection = self.connections.pop(name, None)
+        if connection is not None:
+            connection.close()
 
     def close(self) -> None:
         for connection in self.connections.values():
@@ -969,7 +1000,10 @@ class _Side:
         return False
 
     def forget(self, index: int, name: str) -> None:
-        self.nodes[index].connections.pop(name).close()
+        # A connection closed as it opened was never kept.
+        connection = self.nodes[index].connections.pop(name, None)
+        if connection is not None:
+            connection.close()
 
     def substitute(self, argument: Any) -> Any:
         """``argument`` with every placeholder in it replaced by this side's value."""
