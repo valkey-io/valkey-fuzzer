@@ -1504,6 +1504,27 @@ def test_a_subscribed_connections_commands_may_reply_by_protocol(builds):
     assert result.status.value == "FAIL" and result.diagnostics["variant"] == "protocol"
 
 
+def test_what_follows_a_subscribed_connections_disallowed_command_is_left_out_of_the_protocol_variant(builds):
+    # A subscribed RESP2 client may not run an ACL LOAD or a CONFIG SET that a RESP3 one may: every later
+    # command, on any connection, may see its effects (fuzzer#115).
+    for build in BUILDS.values():
+        build.replies = {("SUBSCRIBE", "c"): b"OK", ("GET", "k"): ByResp({2: b"v", 3: b"w"})}
+    commands = [
+        {"command": ["SUBSCRIBE", "c"], "connection": "sub"},
+        {"command": ["ACL", "LOAD"], "connection": "sub"},
+        {"command": ["GET", "k"]},
+    ]
+    result, _ = run(builds, commands, checks={"variants": True})
+    assert result.status.value == "PASS", result.summary
+    # Before the disallowed command, or with only the allowed ones sent while subscribed, replies still compare.
+    for compared in (
+        [{"command": ["GET", "k"]}, *commands],
+        [commands[0], {"command": ["PING"], "connection": "sub"}, {"command": ["GET", "k"]}],
+    ):
+        result, _ = run(builds, compared, checks={"variants": True})
+        assert result.status.value == "FAIL" and result.diagnostics["variant"] == "protocol"
+
+
 def test_a_variant_that_stopped_early_compares_only_what_ran_before(builds):
     # As ACL SETUSER default with a password leaves a later connection unopened in RESP3 (HELLO 3 gets NOAUTH):
     # the variant ran nothing after its stop, which is no mismatch.

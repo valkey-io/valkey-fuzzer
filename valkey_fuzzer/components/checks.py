@@ -272,6 +272,27 @@ def _subscribed(commands: Sequence[Mapping[str, Any]]) -> set[int]:
     return found
 
 
+def _subscribed_effects(commands: Sequence[Mapping[str, Any]]) -> int:
+    """The index of the first command a subscribed connection runs beyond the Pub/Sub commands, PING, QUIT and
+    RESET, or ``len(commands)``: RESP2 refuses it in the subscribed context, RESP3 runs it, so its effects (an
+    ACL LOAD, a CONFIG SET) reach every later command on any connection (fuzzer#115)."""
+
+    allowed = ("PING", "QUIT", "RESET", *actions._SUBSCRIBE, *actions._UNSUBSCRIBE)
+    connections: set[Any] = set()
+    for index, item in enumerate(commands):
+        words = _words(item)
+        if not words:
+            continue
+        name = words[0].upper()
+        if item["connection"] in connections and name not in allowed:
+            return index
+        if name in actions._SUBSCRIBE:
+            connections.add(item["connection"])
+        elif name == "RESET":
+            connections.discard(item["connection"])
+    return len(commands)
+
+
 def _sets_replication(commands: Sequence[Mapping[str, Any]]) -> bool:
     """Whether the sequence makes its node a replica (or a primary) itself: a replica whose own link is down
     refuses replicas of its own (NOMASTERLINK), so no replica of it can catch up. A FAILOVER does it too, with the
@@ -758,8 +779,9 @@ class _Checks:
         # A RESP2 client that subscribed may run only the Pub/Sub commands, PING, QUIT and RESET; a RESP3 one, any.
         subscribed = _subscribed(self.commands) | _pushed(self.commands)
         # The RESP3 sequence stops at the first command on a connection opened behind a password, which never
-        # opens: nothing from there on ran (fuzzer#106).
-        stop = min(_opened_behind_password(self.commands), default=len(self.commands))
+        # opens: nothing from there on ran (fuzzer#106). A subscribed connection's command beyond those allowed
+        # ran in RESP3 alone, so every later command may see its effects (fuzzer#115).
+        stop = min((*_opened_behind_password(self.commands), _subscribed_effects(self.commands)))
         own = [index for index in own if index not in subscribed and index < stop]
         return _combine(encodings=encodings, protocol=self.variant("protocol", own, {"resp": resp}, resp=resp))
 
