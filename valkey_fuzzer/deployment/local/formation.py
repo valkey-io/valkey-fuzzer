@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # How long a formed deployment may take to look healthy. Under a soak's load a slow peer is marked down
 # (cluster-node-timeout 1000) and a node reports cluster_state fail well past 30 s although every slot is
-# assigned; the health wait outlasts that window, as the slot and instance-start waits do, and a healthy
+# assigned; the health wait outlasts that window, as the meet, slot and instance-start waits do, and a healthy
 # deployment is no slower for the margin.
 SETTLE_TIMEOUT_S = 60.0
 
@@ -39,7 +39,7 @@ class Formation:
             )
         return self.connections[instance.instance_id]
 
-    def cluster_meet(self, nodes: list[InstanceInfo], timeout: int = 30) -> None:
+    def cluster_meet(self, nodes: list[InstanceInfo], timeout: float = SETTLE_TIMEOUT_S) -> None:
         """Connect cluster nodes and wait for convergence"""
         if len(nodes) < 2:
             return

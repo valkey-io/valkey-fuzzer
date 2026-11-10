@@ -557,6 +557,38 @@ def test_the_health_wait_outlasts_a_fail_state_window_a_loaded_host_stretches(mo
         formed(cleared_at=float("inf"))
 
 
+def test_cluster_meet_outlasts_a_convergence_window_a_loaded_host_stretches(monkeypatch):
+    """valkey @3eb8314be6af under a soak's load: 6 nodes had not all learned of each other within the old 30 s
+    meet wait (the cluster bus gossips slowly on a loaded host), so provisioning failed a cluster that
+    converged seconds later."""
+
+    clock = VirtualClock().install(monkeypatch, queries)
+    nodes = [instance(f"valkey-{n}", port=7000 + n, cluster_node_id=f"n{n}") for n in range(2)]
+
+    def client(cleared_at):
+        def execute(*args):
+            if args[:2] == ("CLUSTER", "MEET"):
+                return "OK"
+            known = len(nodes) if clock.elapsed >= cleared_at else 1
+            return f"cluster_state:ok\r\ncluster_known_nodes:{known}\r\n"
+
+        return Mock(execute_command=Mock(side_effect=execute))
+
+    def met(cleared_at):
+        clock.elapsed = 0.0
+        formation = Formation()
+        converging = client(cleared_at)
+        formation.get_client = lambda node: converging
+        formation.cluster_meet(nodes)
+
+    met(cleared_at=45.0)  # past the old 30 s wait, within SETTLE_TIMEOUT_S
+    assert 45.0 <= clock.elapsed <= SETTLE_TIMEOUT_S, "waited out the convergence window instead of erroring at 30 s"
+
+    # Nodes that never learn of each other still fail provisioning.
+    with pytest.raises(LocalDeploymentError, match=r"did not all learn of each other within 60.00s"):
+        met(cleared_at=float("inf"))
+
+
 def test_each_replica_link_seen_up_counts_although_another_replicas_info_times_out(monkeypatch):
     """84 instances at load 400: every link was up 6 s in, yet one slow INFO failed each round of the old
     all-replicas poll, so provisioning never passed."""
