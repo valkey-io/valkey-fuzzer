@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import time
 from pathlib import Path
 from unittest.mock import Mock
@@ -606,8 +607,10 @@ def test_a_tool_run_has_no_hidden_time_limit_and_the_commands_default_to_one_hou
 def test_a_tool_run_past_its_time_is_killed_with_its_process_group(tmp_path, monkeypatch):
     # A stand-in for java that, like TLC, leaves a child process running.
     java = tmp_path / "java"
-    java.write_text('#!/bin/sh\nsleep 60 &\necho $! > "$CHILD_PID_FILE"\nwait\n')
+    java.write_text('#!/bin/sh\n[ "$1" = warm ] && exit 0\nsleep 60 &\necho $! > "$CHILD_PID_FILE"\nwait\n')
     java.chmod(0o755)
+    # macOS scans a new executable at its first run, which can take longer than the run's 1s.
+    subprocess.run([str(java), "warm"], check=True)
     monkeypatch.setenv("CHILD_PID_FILE", str(tmp_path / "child.pid"))
     tools = TlaTools(jar="unused", java=str(java)).within(1.0)
     run = tla._run(tools, ["tlc2.TLC", "model.tla"], {})
