@@ -27,10 +27,14 @@ value). Enums and booleans an experiment declares are drawn uniformly.
 A pool maps server config keys to value lists; its optional ``scope:
 [deployment, role]`` draws whether every instance shares one value
 (``deployment.server_config``) or the primary and the replicas each draw their
-own (``deployment.instance_configs``). A key one of the experiment's startup
-overlays sets is never drawn, since the overlay would override it; when the
-overlay sets it from an input (``{$ref: inputs.<name>}``), an exclusion of a
-``server_config.<key>`` value also excludes it from that input's draws.
+own (``deployment.instance_configs``). A pool with ``default: true`` is drawn
+by every experiment without being listed, after the pools the experiment
+lists. A key one of the experiment's startup overlays sets is never drawn,
+since the overlay would override it, and neither is a key an earlier pool of
+the block already drew, so an experiment's listed pools win over the default
+ones; when the overlay sets it from an input (``{$ref: inputs.<name>}``), an
+exclusion of a ``server_config.<key>`` value also excludes it from that
+input's draws.
 
 Hooks are the catalog's generator registrations
 (:class:`~valkey_fuzzer.registrations.GeneratorRegistration`), each a
@@ -95,6 +99,8 @@ _BLOCK_FIELDS = ("hook", "deployment", "inputs", "server_config", "reject", "poo
 # field, or a server config key a planned instance starts with.
 _PATH_NAMESPACES = ("experiment", "inputs", "deployment", "server_config")
 _SCOPES = ("deployment", "role")
+# Pool keys that configure the pool instead of naming a server config.
+_POOL_RESERVED = ("scope", "default")
 
 
 class GeneratorError(ValueError):
@@ -314,13 +320,19 @@ def generator_document(spec: ExperimentSpec) -> Optional[Mapping[str, Any]]:
 
 def _pool(pool_id: str, document: Any) -> dict[str, Any]:
     where = f"pool {pool_id!r}"
-    if not isinstance(document, Mapping) or not document:
+    if not isinstance(document, Mapping):
         raise GeneratorError(f"{where} must map server config keys to value lists")
     for key, values in document.items():
+        if key == "default":
+            if not isinstance(values, bool):
+                raise GeneratorError(f"{where}.default must be true or false")
+            continue
         if not isinstance(values, (list, tuple)) or not values:
             raise GeneratorError(f"{where}.{key} must be a non-empty list")
         if key == "scope" and not set(values) <= set(_SCOPES):
             raise GeneratorError(f"{where}.scope must list {list(_SCOPES)}, got {values!r}")
+    if not set(document) - set(_POOL_RESERVED):
+        raise GeneratorError(f"{where} must map server config keys to value lists")
     return dict(document)
 
 
@@ -543,6 +555,9 @@ class GeneratorBlock:
         missing = [pool_id for pool_id in selected if pool_id not in experiment_pools]
         if missing:
             raise GeneratorError(f"{where}.server_config names unknown pools {missing}")
+        selected = list(selected) + sorted(
+            pool_id for pool_id, pool in experiment_pools.items() if pool.get("default") and pool_id not in selected
+        )
 
         reject = document.get("reject") or []
         if not isinstance(reject, (list, tuple)) or not all(isinstance(rule, Mapping) and rule for rule in reject):
@@ -675,9 +690,11 @@ class GeneratorBlock:
 
     def _draw_pools(self, deployment: dict[str, Any], draw: Callable[[_Rule, str], Any]) -> None:
         roles = ["primary"] + (["replica"] if deployment.get("replicas_per_primary", 0) else [])
+        drawn: set[str] = set()
         for pool_id, pool in self.pools:
             scope = draw(_Rule.uniform(pool.get("scope", ["deployment"])), f"pools.{pool_id}.scope")
-            for key in sorted(set(pool) - {"scope"} - self.overlay_keys):
+            for key in sorted(set(pool) - set(_POOL_RESERVED) - self.overlay_keys - drawn):
+                drawn.add(key)
                 rule = _Rule.uniform(pool[key])
                 if scope == "deployment":
                     targets = [(deployment.setdefault("server_config", {}), f"server_config.{key}")]

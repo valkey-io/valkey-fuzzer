@@ -1,6 +1,7 @@
 """Shared validation and argv conversion for Valkey server configuration, and the provider's defaults."""
 
 import functools
+import logging
 import os
 import re
 import shutil
@@ -8,6 +9,8 @@ import subprocess
 from collections.abc import Iterable, Mapping, Sequence
 from enum import Enum
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 _SERVER_OPTION_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
 
@@ -175,19 +178,50 @@ _RENAMED_NAMES = {name for old, (new, _) in RENAMED_CONFIGS.items() for name in 
 
 
 def knows_config(binary: str, name: str, value: str) -> bool:
-    """Whether ``binary`` knows config ``name`` (``value`` being one of its values), without starting a server:
-    Valkey stops at the first directive it rejects, so with a known ``name`` it is the bad port after it."""
+    """Whether ``binary`` knows config ``name`` (``value`` being one of its values), without starting a server."""
+
+    return "Bad directive" not in _config_probe(binary, name, value)
+
+
+def accepts_config(binary: str, name: str, value: str) -> bool:
+    """Whether ``binary`` starts with config ``name`` set to ``value``, without starting a server."""
+
+    return ">>> 'port" in _config_probe(binary, name, value)
+
+
+def _config_probe(binary: str, name: str, value: str) -> str:
+    """What ``binary`` prints given ``--<name> <value> --port -1``: Valkey stops at the first directive it rejects
+    and names it, so the bad port after a config it takes is the one named."""
 
     path = shutil.which(binary) or binary
     stat = os.stat(path)
-    return _knows_config(os.path.realpath(path), stat.st_mtime_ns, stat.st_size, name, value)
+    return _probe_output(os.path.realpath(path), stat.st_mtime_ns, stat.st_size, name, value)
 
 
 @functools.cache
-def _knows_config(path: str, mtime_ns: int, size: int, name: str, value: str) -> bool:
+def _probe_output(path: str, mtime_ns: int, size: int, name: str, value: str) -> str:
     command = [path, f"--{name}", value, "--port", "-1"]
-    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=30)
-    return "Bad directive" not in result.stdout
+    return subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=30).stdout
+
+
+# Configs that change how a server runs, never what it stores or replies, and that a build may lack or refuse:
+# the value a build that refuses the drawn one starts with instead, or None to start it without the config. A
+# scenario that draws one (the default pools of valkey.random) then runs on every build, where a server that
+# refused it would not start; the plan records the value drawn. Active defragmentation needs jemalloc's defrag
+# hints, so a build without them (MALLOC=libc, as the sanitizer builds are) exits on activedefrag yes. The
+# IO-thread configs are hidden ones that only some releases know: io-threads-always-active and the copy-avoiding
+# replies are 9.1's, events-per-io-thread 8.0's to 9.0's (9.1 accepts and ignores it), prefetch-batch-max-size
+# 8.0's and later, and io-threads-do-reads 7.2's and 8.0's (8.1 and later accept and ignore it).
+UNOBSERVABLE_CONFIGS = {
+    "activedefrag": "no",
+    "events-per-io-thread": None,
+    "io-threads-always-active": None,
+    "io-threads-do-reads": None,
+    "min-io-threads-avoid-copy-reply": None,
+    "min-string-size-avoid-copy-reply": None,
+    "min-string-size-avoid-copy-reply-threaded": None,
+    "prefetch-batch-max-size": None,
+}
 
 
 def config_for_build(binary: str, name: str, value: Any) -> tuple[str, Any]:
@@ -203,11 +237,22 @@ def config_for_build(binary: str, name: str, value: Any) -> tuple[str, Any]:
 
 
 def arguments_for_build(binary: str, arguments: Sequence[str]) -> list[str]:
-    """valkey-server ``arguments`` (``--option value`` pairs) with each renamed config as ``binary`` knows it."""
+    """valkey-server ``arguments`` (``--option value`` pairs) with each renamed config as ``binary`` knows it, and
+    each unobservable config it refuses (:data:`UNOBSERVABLE_CONFIGS`) replaced or left out."""
 
-    translated = list(arguments)
-    for index in range(0, len(translated) - 1, 2):
-        if translated[index][2:] in _RENAMED_NAMES:
-            name, value = config_for_build(binary, translated[index][2:], translated[index + 1])
-            translated[index : index + 2] = [f"--{name}", value]
+    translated: list[str] = []
+    for index in range(0, len(arguments) - 1, 2):
+        option, value = arguments[index][2:], arguments[index + 1]
+        if option in _RENAMED_NAMES:
+            option, value = config_for_build(binary, option, value)
+        elif option in UNOBSERVABLE_CONFIGS and value != UNOBSERVABLE_CONFIGS[option]:
+            if not accepts_config(binary, option, value):
+                instead = UNOBSERVABLE_CONFIGS[option]
+                logger.info("%s refuses %s %s: it starts with %s", binary, option, value, instead or "its default")
+                if instead is None:
+                    continue
+                value = instead
+        translated += [f"--{option}", value]
+    if len(arguments) % 2:
+        translated.append(arguments[-1])
     return translated

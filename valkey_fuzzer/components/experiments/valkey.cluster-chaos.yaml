@@ -20,6 +20,14 @@ metadata:
     inputs:
       waves: {hook: valkey.generator.waves}
       keys_per_slot: fixed
+    # At most one IO thread a node, not the default pool's three: always-active
+    # IO threads spin through every event, and the cluster bus of up to 96 nodes
+    # keeps them busy.
+    server_config: [valkey.pool.cluster-io-threads]
+    pools:
+      valkey.pool.cluster-io-threads:
+        io-threads: ["1", "2"]
+        scope: [deployment, role]
 inputs:
   type: object
   additionalProperties: false

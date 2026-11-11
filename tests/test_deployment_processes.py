@@ -31,7 +31,7 @@ from valkey_fuzzer.deployment.local.planner import plan_deployment
 from valkey_fuzzer.deployment.local.ports import PortUnavailableError
 from valkey_fuzzer.deployment.local.processes import VALKEY_SOURCE_REF, InstanceIdentityError, installed_valkey_binary
 from valkey_fuzzer.deployment.local.queries import WaitInterruptedError, valkey_client
-from valkey_fuzzer.deployment.local.server_config import DEFAULT_MAXMEMORY
+from valkey_fuzzer.deployment.local.server_config import DEFAULT_MAXMEMORY, arguments_for_build
 
 
 def _running(pid):
@@ -82,6 +82,31 @@ def test_a_build_starts_with_the_save_method_config_by_the_name_it_knows(tmp_pat
         assert f"--{knows} {_SAVE_METHOD[knows][method]}" in private.start()
     finally:
         private.stop()
+
+
+def test_a_build_starts_without_an_unobservable_config_it_lacks_and_with_another_value_for_one_it_refuses(tmp_path):
+    # A build that lacks io-threads-always-active and has no jemalloc defrag hints, answering the config probe as
+    # Valkey does: it names the first directive it rejects, else the bad port after the probed one.
+    binary = tmp_path / "valkey-server"
+    binary.write_text(
+        r"""#!/bin/sh
+case "$1 $2" in
+  "--io-threads-always-active "*) echo ">>> 'io-threads-always-active \"$2\"'"; echo "Bad directive";;
+  "--activedefrag yes") echo ">>> 'activedefrag \"yes\"'"; echo "-DISABLED Active defragmentation";;
+  *) echo ">>> 'port \"-1\"'";;
+esac
+exit 1
+"""
+    )
+    binary.chmod(0o755)
+    config = {"io-threads-always-active": "yes", "activedefrag": "yes", "io-threads": "4", "lfu-log-factor": "20"}
+    command = process_manager(valkey_binary=str(binary)).build_instance_command(7000, "/d", "/l", config)
+    # A config that is not unobservable stays as written, so a build that refuses it does not start.
+    assert command[-6:] == ["--activedefrag", "no", "--io-threads", "4", "--lfu-log-factor", "20"]
+    assert "--io-threads-always-active" not in command
+    # A build that takes the value starts with it.
+    taken = ["--activedefrag", "no", "--prefetch-batch-max-size", "0"]
+    assert arguments_for_build(str(binary), taken) == taken
 
 
 @pytest.mark.parametrize(

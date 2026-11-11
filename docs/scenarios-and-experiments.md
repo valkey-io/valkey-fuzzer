@@ -626,6 +626,39 @@ writes into `<key>`. Every experiment that can draw a codec probes its builds
 with `deployment_config` naming both codec settings, so `zstd` on a build
 without it is `SKIP_UNSUPPORTED`.
 
+A pool with `default: true` is drawn by every experiment without being
+listed, after the pools it lists; a key a listed pool or a startup overlay
+already sets is not drawn again. The default pools change how the server runs,
+never what it stores or replies, so every oracle stays valid under them; all
+three are scoped:
+
+| Pool | Keys |
+| --- | --- |
+| `valkey.pool.io-threads` | `io-threads` (1, 2, 4), `io-threads-always-active` and `events-per-io-thread 0` (which keep the threads busy at fuzzing load: on 9.1 and later they otherwise start only once the main thread is 30% busy), `io-threads-do-reads`, the copy-avoiding replies (`min-io-threads-avoid-copy-reply`, `min-string-size-avoid-copy-reply`, `-threaded`), `prefetch-batch-max-size` |
+| `valkey.pool.memory` | every `maxmemory-policy`, each `lazyfree-lazy-*` and `replica-lazy-flush`, `activedefrag` with thresholds low enough that it runs on a small dataset |
+| `valkey.pool.encodings` | the `hash`, `set`, `zset`, `list` and `stream` encoding thresholds and `list-compress-depth`: a value that never or soon leaves the compact encoding (converted as the workload writes), and Valkey's default |
+
+The eviction policies run under the deployment's `maxmemory` (the local
+provider's 500mb), which no experiment's dataset reaches, so they change what
+each access records (an LRU clock or an LFU counter) and what an RDB holds per
+key (`IDLE` or `FREQ`), but evict nothing. No experiment draws a `maxmemory` it
+reaches: eviction deletes keys that `valkey.oracle.ledger`, the snapshot
+oracles, and the data-consistency keys of `valkey.oracle.deployment-state`
+expect to find. A build that lacks one of the hidden IO-thread configs, or
+refuses `activedefrag yes` (no jemalloc defrag hints, as a `MALLOC=libc` build),
+starts without it, or with `activedefrag no`
+(`UNOBSERVABLE_CONFIGS` in `valkey_fuzzer/deployment/local/server_config.py`);
+the plan records the value drawn.
+
+Always-active IO threads spin through every event: on unstable, a primary and
+two replicas under 100 writes a second take 1.2 cores with `io-threads 2`, 3.7
+with 4 and 7.3 with 8, and six idle cluster nodes 1.9 cores with 2 and 10.7
+with 8, since the cluster bus keeps waking them (0.15 with 8 without
+always-active). So the pool draws at most four, and `valkey.cluster-chaos`,
+whose clusters reach 96 nodes, lists `valkey.pool.cluster-io-threads`
+(`io-threads` 1 or 2), which wins over the default pool's key. A batch with
+the default pools needs fewer workers per core than one without them.
+
 The `valkey.writes` fragment bounds the workload inputs of every experiment
 that opts in: `stable_keys` 0-2000, `mutable_keys` 1-1000, `mutation_rate`
 1-1000, `value_size` 1, 64, 1024, or 16384. An experiment overrides a range

@@ -181,6 +181,37 @@ def test_excluded_and_rejected_values_never_appear(tmp_path):
             Exclusion.parse(text)
 
 
+def test_a_default_pool_is_drawn_without_being_listed_and_yields_to_listed_pools_and_overlays(tmp_path):
+    pools = {"tests.pool.default": {"default": True, "repl-diskless-sync": ["never"], "hz": ["11", "12"], "lfu-log-factor": ["20"]}}  # fmt: skip
+    overlay = {"overlay_id": "lfu", "server_config": {"lfu-log-factor": "30"}}
+    listed = _runtime(tmp_path / "listed", {"server_config": ["valkey.pool.replication"], "pools": pools}, startup_overlays=[overlay])  # fmt: skip
+    unlisted = _runtime(tmp_path / "unlisted", {"pools": pools})
+    hz = set()
+    for seed in range(20):
+        config = _generate(listed, seed).scenario["deployment"]["server_config"]
+        # The listed pool draws repl-diskless-sync, and the overlay sets lfu-log-factor: neither is drawn again.
+        assert config["repl-diskless-sync"] in ("yes", "no") and "lfu-log-factor" not in config
+        hz.add(config["hz"])
+        assert _generate(unlisted, seed).scenario["deployment"]["server_config"]["repl-diskless-sync"] == "never"
+    assert hz == {"11", "12"}
+
+
+def test_every_shipped_experiment_draws_every_key_of_the_default_pools_its_overlays_leave():
+    service = generator_service()
+    defaults = {pool_id: pool for pool_id, pool in installed_pools(service.catalog).items() if pool.get("default")}
+    assert set(defaults) == {"valkey.pool.io-threads", "valkey.pool.memory", "valkey.pool.encodings"}
+    keys = {key for pool in defaults.values() for key in pool} - {"default", "scope"}
+    for experiment in EXPERIMENTS:
+        spec = service.catalog.experiments.resolve(experiment)
+        overlaid = {key for overlay in spec.startup_overlays for key in overlay.server_config}
+        drawn = set()
+        for seed in range(5):
+            deployment = service.generate(seed, experiment=experiment, excludes=NO_ZSTD).scenario["deployment"]
+            for config in (deployment.get("server_config") or {}, *(deployment.get("instance_configs") or {}).values()):
+                drawn |= set(config) & keys
+        assert drawn == keys - overlaid, experiment
+
+
 @pytest.mark.parametrize(
     ("generator", "message"),
     [
@@ -196,6 +227,8 @@ def test_excluded_and_rejected_values_never_appear(tmp_path):
         ({"server_config": ["valkey.pool.nope"]}, r"unknown pools \['valkey.pool.nope'\]"),
         ({"reject": [{"elsewhere.x": 1}]}, r"must be 'experiment' or start with"),
         ({"pools": {"tests.pool": {"scope": ["everywhere"]}}}, r"scope must list"),
+        ({"pools": {"tests.pool": {"default": "yes", "hz": ["11"]}}}, r"default must be true or false"),
+        ({"pools": {"tests.pool": {"default": True, "scope": ["role"]}}}, r"must map server config keys"),
     ],
 )
 def test_malformed_blocks_are_rejected(tmp_path, generator, message):
@@ -212,18 +245,20 @@ def test_every_shipped_experiment_draws_the_same_valid_bounded_scenario_from_one
         assert service.generate(seed, experiment=experiment, excludes=NO_ZSTD).scenario == generated.scenario
         first_try += generated.attempt == 0
         plan = generated.plan
+        configs = [
+            plan.deployment.get("server_config") or {},
+            *(plan.deployment.get("instance_configs") or {}).values(),
+        ]
         if experiment == CLUSTER_EXPERIMENT:
             assert 3 <= plan.deployment["primaries"] <= 16 and 7000 <= plan.deployment["base_port"] <= 8000
+            # Its clusters of up to 96 nodes keep at most two IO threads a node busy.
+            assert all(config.get("io-threads", "1") in ("1", "2") for config in configs)
         else:
             # One host runs every instance; cluster chaos draws clusters of up to 16 shards.
             shards = plan.deployment.get("primaries", 1) if plan.deployment_mode == "cluster" else 1
             assert shards * (1 + plan.deployment["replicas_per_primary"]) <= 15
         # A codec the build lacks (zstd without BUILD_ZSTD) is then SKIP_UNSUPPORTED, never a failed start: the
         # probe names every drawn codec setting as one the build may lack.
-        configs = [
-            plan.deployment.get("server_config") or {},
-            *(plan.deployment.get("instance_configs") or {}).values(),
-        ]
         drawn = {key for config in configs for key in ("rdbcompression", "repl-compression") if key in config}
         if drawn:
             probes = [item for item in plan.components if item.use == "valkey.capability.build-probe"]
