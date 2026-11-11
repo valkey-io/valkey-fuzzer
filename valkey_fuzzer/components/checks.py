@@ -1184,8 +1184,12 @@ class _Checks:
         # valkey#2533 replayed) holds its primary's data, which a full resync replaces meanwhile.
         cluster = self.config["cluster"]
         judged = not _volatile(side, node) and not (cluster and _is_replica(side, node))
-        before = self.settled_digest(side, node) if judged else None
+        # The slots are read on both sides of the digest: a slot migration whose handoff lands between the two reads
+        # (the walk's test of valkey#2533 replayed) changes the data while a digest of keys still importing holds still.
         slots = _owned_slots(side, node) if cluster else None
+        before = self.settled_digest(side, node) if judged else None
+        if cluster and before is not None and _owned_slots(side, node) != slots:
+            before = None
         if fault["fault"] == "reload":
             reloaded = _ask(side, node, "DEBUG", "RELOAD")
             if str(reloaded.get("error", "")).startswith("BUSY"):

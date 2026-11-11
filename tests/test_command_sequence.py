@@ -2039,6 +2039,27 @@ def test_a_cluster_nodes_data_is_judged_only_while_it_owns_the_same_slots(builds
         assert result.status.value == "FAIL" and result.diagnostics["reason"] == "lost-data"
 
 
+def test_a_cluster_nodes_data_is_not_judged_when_its_slots_move_while_its_digest_is_taken(builds, monkeypatch):
+    # The walk's test of valkey#2533 replayed: a slot migration handed node 1 its first slots right after the check
+    # read its digest, before it read the slots it owns, so the restart seemed to keep its slots and change its data.
+    monkeypatch.setattr(checks, "_FAULTS", ("restart",))
+    digest = ("DEBUG", "DIGEST")
+    _replicating(lambda server: b"d2" if server.shut_downs else b"d1")
+
+    def nodes(server):
+        slots = " 0-8000" if server.sent.count(digest) >= 2 else ""
+        return f"{server.id} 127.0.0.1:1@2 myself,master - 0 0 1 connected{slots}\n".encode()
+
+    for build in BUILDS.values():
+        build.replies[("INFO", "keyspace")] = _PERSISTENT
+        build.replies[("CLUSTER", "NODES")] = nodes
+        build.replies[("CLUSTER", "INFO")] = b"cluster_state:ok\r\ncluster_known_nodes:2\r\n"
+    result, value = run(builds, _WRITES, cluster=True, nodes=2, checks={"faults": True})
+
+    assert result.status.value == "PASS", result.summary
+    assert _check(value, "faults")["outcome"] == "pass"
+
+
 def test_a_cluster_node_that_became_a_replica_is_not_judged_across_a_fault(builds, monkeypatch):
     # The walk's test of valkey#2533 replayed: node 0's last slot migrated to node 1, which made node 0 its
     # replica, and the check's DEBUG RELOAD came during node 0's full resync, which replaced its data.
