@@ -81,15 +81,34 @@ jobs:
             printf 'deployment: {}\n' > /tmp/valkey-builds/base.yaml
           fi
 
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: porcupine/go.mod
+          cache: false
+
+      - name: Build the porcupine checker
+        run: |
+          go -C porcupine build -o "${RUNNER_TEMP}/bin/porcupine"
+          echo "${RUNNER_TEMP}/bin" >> "${GITHUB_PATH}"
+
       - name: Run the batch
         env:
           SEEDS: ${{ inputs.seeds || '3' }}
         run: |
-          # At most one always-active IO thread a server: three (io-threads 4) take more than a runner's four cores.
-          # The experiments that need a second, older build report SKIP_UNSUPPORTED here.
-          valkey-fuzzer batch --random all --seeds "${SEEDS}" --workers 3 \
-            --exclude server_config.io-threads=4 --base /tmp/valkey-builds/base.yaml \
-            --profile nightly-soak --serial-reruns 2 --prune-pass --timeout 1800 --allow-unsupported \
+          # The single-build experiments that run against one binary on a non-root runner: the ones that need a
+          # second, older build (mixed-version, rolling-upgrade, repl-compression-*) or root (cluster-partition,
+          # bgsave-disk-full: a tmpfs mount, iptables) are left out, since this build is the point, not coverage of
+          # every experiment. At most one always-active IO thread a server (io-threads 4 needs more than four cores).
+          # A sanitizer build runs about twice as slow, so the per-run timeout is generous.
+          valkey-fuzzer batch --seeds "${SEEDS}" --workers 3 \
+            --random valkey.aof-durability --random valkey.cluster-chaos \
+            --random valkey.cluster-election-durability --random valkey.replication-chaos \
+            --random valkey.replication-full-resync --random valkey.replication-partial-resync \
+            --random valkey.rdb-compression --random valkey.snapshot-equivalence \
+            --exclude server_config.io-threads=4 --exclude inputs.bgsave_method=forkless \
+            --base /tmp/valkey-builds/base.yaml \
+            --profile nightly-soak --serial-reruns 2 --prune-pass --timeout 2700 --allow-unsupported \
             --valkey-binary /tmp/valkey/src/valkey-server --artifact-dir /tmp/valkey-builds/artifacts --out "${BATCH_DIR}"
 
       - name: Summarize the batch
