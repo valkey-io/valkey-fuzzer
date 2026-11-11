@@ -122,7 +122,8 @@ required_evidence:
 How the pieces fit:
 
 - `extends: [valkey.base]` adds the `writes` workload, the `data` ledger
-  oracle, the `deployment-state` oracle, and the `liveness` oracle. The
+  oracle, the `deployment-state` oracle, and the oracles of
+  `valkey.liveness` (`liveness`, `error-counters`, `quiet-end`). The
   actions depend on `writes`, so writes continue through the restart.
 - `deployment.replicas_per_primary: {minimum: 1}` rejects a scenario without
   a replica at compile time.
@@ -161,9 +162,10 @@ valkey-fuzzer run replica_restart.yaml --experiment-dir experiments --verbose
 
 `validate --verbose` lists every component of the execution plan, which
 shows what the fragments added. An experiment loaded from a directory gets
-the `liveness` oracle only through its fragments; extend `valkey.liveness`
-directly if you extend nothing else. Without it, a `valkey.observer.log`
-`forbidden` match is recorded but fails nothing.
+the `liveness`, `error-counters`, and `quiet-end` oracles only through its
+fragments; extend `valkey.liveness` directly if you extend nothing else.
+Without it, a `valkey.observer.log` `forbidden` match is recorded but fails
+nothing.
 
 Faults that must fire at an exact moment can trigger on a log line: a
 `valkey.observer.log-trigger` observer publishes an event for every matching

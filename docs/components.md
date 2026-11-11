@@ -1,6 +1,6 @@
 # Valkey component reference
 
-The Valkey components in `valkey_fuzzer.components` are the 35 components,
+The Valkey components in `valkey_fuzzer.components` are the 40 components,
 9 generator hooks, and 3 providers on this page. Experiments configure them; how is in
 [Scenarios and experiments](scenarios-and-experiments.md#components).
 `valkey-fuzzer list components` and `valkey-fuzzer list generators` print what
@@ -125,6 +125,8 @@ a retry succeeded makes the fault, and the run, `ERROR`.
 | [`valkey.observer.log-trigger`](#valkeyobserverlog-trigger) | observer | any | turns log lines into events |
 | [`valkey.observer.cluster-trace`](#valkeyobservercluster-trace) | observer | cluster | records events and epochs as JSONL |
 | [`valkey.oracle.liveness`](#valkeyoracleliveness) | oracle | any | instances alive, no crash reports or forbidden log lines |
+| [`valkey.oracle.error-counters`](#valkeyoracleerror-counters) | oracle | any | no error counter in INFO rose without a cause in the scenario |
+| [`valkey.oracle.quiet-end`](#valkeyoraclequiet-end) | oracle | any | every instance comes to rest: no blocked client or child process, links up, not spinning |
 | [`valkey.oracle.ledger`](#valkeyoracleledger) | oracle | any | data matches the workload ledger |
 | [`valkey.oracle.history`](#valkeyoraclehistory) | oracle | any | the workload's history is linearizable (Porcupine) |
 | [`valkey.oracle.rdb-snapshot`](#valkeyoraclerdb-snapshot) | oracle | any | captured RDBs reload with plausible data, in the expected codec |
@@ -181,10 +183,12 @@ schemas.
 | `valkey.oracle.cluster-election-safety` | none | `valkey.cluster.election-safety.verified`<br>`valkey.cluster.vote.unsaved-at-crash` | none |
 | `valkey.oracle.dataset-digest` | none | `valkey.dataset.digest` | `process.private-server` |
 | `valkey.oracle.deployment-state` | none | `valkey.deployment.validated` | none |
+| `valkey.oracle.error-counters` | none | `valkey.error-counters.verified` | none |
 | `valkey.oracle.evidence` | none | none | none |
 | `valkey.oracle.history` | none | `valkey.data.linearizable` | none |
 | `valkey.oracle.ledger` | none | `valkey.data.ledger-verified` | none |
 | `valkey.oracle.liveness` | none | `valkey.liveness.verified` | none |
+| `valkey.oracle.quiet-end` | none | `valkey.quiet-end.verified` | none |
 | `valkey.oracle.rdb-snapshot` | none | `valkey.rdb.reload-verified` | `process.private-server` |
 | `valkey.oracle.repl-compression` | none | `valkey.repl.compression-verified` | none |
 | `valkey.oracle.reply-schema` | none | none | none |
@@ -1372,6 +1376,100 @@ that logged it, and the observer; that alone is no crash.
 | `extra_crash_patterns` | list | `[]` | More regular expressions that count as crash reports. |
 
 Evidence: `valkey.liveness.verified`.
+
+### `valkey.oracle.error-counters`
+
+No error counter in INFO rose during the run without something in the
+scenario that explains the rise. The oracle needs no model of the feature
+under test: [`valkey.liveness`](scenarios-and-experiments.md#fragments) adds
+it to every experiment. It has no config.
+
+It reads `INFO everything` of every running instance at the end of the run. A
+process starts with every counter at zero, and the deployment started every
+process during the run, so a counter above zero rose during the run, within
+that process's lifetime. What an instance counted before a restart is gone
+with the process, and an instance that is not running is not read.
+
+It watches the counters whose names say something went wrong: a name with the
+word `err`, `error`, `fail`, `failed`, `failure`, `corrupt`, `lost`,
+`dropped`, `rejected`, `unexpected`, or `denied` (a module's too), the
+`errorstat_<code>` entries, the fields ending in `_status` that read `err`,
+and `client_query_buffer_limit_disconnections` and
+`client_output_buffer_limit_disconnections`. `total_error_replies` is the sum
+of the `errorstat` entries, which are judged one by one. `expired_*`,
+`evicted_*`, and the like are not errors.
+
+A rise is explained by a cause, which the oracle derives from what the
+scenario did:
+
+| Cause | The scenario |
+| --- | --- |
+| `links` | broke replication or cluster links: a component stopped, paused, or partitioned an instance (an [undo obligation](contracts.md#fault-ownership) of kind `process.stopped`, `process.paused`, or `network.partition`), killed one for good or moved a role (`valkey.instances.expected-down` naming an instance, `valkey.chaos.schedule`, `valkey.failover.result`, or `valkey.replication.replicaof` evidence), or is configured with a command that does (`REPLICAOF`, `SLAVEOF`, `FAILOVER`, or any `CLIENT`, `CLUSTER`, or `DEBUG` command of a [`valkey.action.command`](#valkeyactioncommand) or [`valkey.fault.command`](#valkeyfaultcommand)) |
+| `storage` | made writes to disk fail: an undo obligation of kind `disk.filled` or `directory.read-only` |
+| `commands` | sent a command that Valkey answered with an error reply: the [`valkey.workload.command-table`](#valkeyworkloadcommand-table) workload counted one, or a configured command's recorded reply is one |
+| `memory` | set a `maxmemory` itself, in the deployment's server config, a startup overlay, or a configured `CONFIG SET`; the deployment provider's default is one no experiment's dataset reaches |
+
+Which causes explain which counter:
+
+| Counter | Explained by |
+| --- | --- |
+| `unexpected_error_replies` (an error reply on a replication link or while loading the AOF) | nothing |
+| `client_query_buffer_limit_disconnections`, `rejected_connections`, `rejected_priority_connections` | nothing: no component sends a query near the limit or opens connections near `maxclients` |
+| `rdb_last_bgsave_status`, `aof_last_bgrewrite_status`, `aof_last_write_status`, and any other `*_status` that reads `err`; `aof_rewrites_consecutive_failures` | `storage` (a cancelled save and a killed server leave the status `ok`) |
+| `sync_partial_err` | `links`; and, on any instance, as many refusals as its shard has replicas: a node made a replica when the deployment forms asks to continue its own history, which its primary refuses once |
+| `client_output_buffer_limit_disconnections` | `links` |
+| `cluster_*` (FAIL messages, failed nodes and slots) | `links` |
+| `acl_access_denied_*` | `commands` |
+| `errorstat_OOM` | `memory`, `links`, `storage`, `commands` |
+| every other `errorstat_<code>`, and any other watched counter (a module's, a newer build's) | `links`, `storage`, `commands`: once the scenario disturbed the deployment, clients meet `READONLY`, `LOADING`, `CLUSTERDOWN`, `MISCONF`, and the like |
+
+`FAIL` names each unexplained rise, as `valkey-0: unexpected_error_replies
+rose to 2`. A running instance whose INFO cannot be read within 30 seconds
+makes the oracle `ERROR`, unless another instance's rise is a finding.
+Evidence: `valkey.error-counters.verified`, with every risen counter of every
+instance read (`value`, `explained_by`) and the scenario's causes, each with
+what brought it (`scenario`); a `FAIL` has the same record in its
+diagnostics.
+
+### `valkey.oracle.quiet-end`
+
+Once the workload and the faults are over, every running instance comes to
+rest within `timeout_s`. [`valkey.liveness`](scenarios-and-experiments.md#fragments)
+adds it to every experiment. An instance is at rest when:
+
+- it has no blocked client (`blocked_clients` is 0);
+- no child process or load is in progress: every INFO field ending in
+  `_in_progress` (`rdb_bgsave_in_progress`, `aof_rewrite_in_progress`,
+  `module_fork_in_progress`, `slot_migration_fork_in_progress`), `loading`,
+  and `async_loading` is 0;
+- a replica's replication link is up, unless its primary is not running;
+- in cluster mode its `CLUSTER NODES` shows every other running node
+  `connected` and none failed (`fail`, `fail?`);
+- its main thread used at most `max_cpu` of one core over the last
+  `cpu_window_s` of wall-clock time: a server that keeps a core busy with
+  nothing to do is spinning. The CPU time is `used_cpu_user_main_thread` plus
+  `used_cpu_sys_main_thread` where INFO reports them (Linux), else
+  `used_cpu_user` plus `used_cpu_sys`, the whole process's, divided by
+  `io-threads` when the instance's planned config sets
+  `io-threads-always-active yes`: those IO threads spin whenever the main
+  thread handles an event, by design.
+
+The oracle reads every instance once per window until all are at rest in the
+same round, so work that ends within the bound (a rewrite finishing, a
+replica catching up) is no finding. What is left when the time is up is a
+`FAIL` that names it, as `valkey-1: used 0.98 of a core over 1.0s`. An
+instance that is not running is not read
+([`valkey.oracle.liveness`](#valkeyoracleliveness) judges it); one that did
+not answer in the last round, or whose CPU use had no full window, makes the
+oracle `ERROR`, unless another instance is a finding.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `timeout_s` | number, 1 to 600 | 30 | How long the deployment has to come to rest. |
+| `cpu_window_s` | number, 0.1 to 60 | 1 | The window CPU use is measured over; the oracle takes at least this long. |
+| `max_cpu` | number, 0.01 to 64 | 0.5 | The share of one core an instance at rest may use. An idle server uses about 0.01 (its cron at `hz`, replication keepalives, the cluster bus); active defragmentation and expiry may each use up to a quarter. |
+
+Evidence: `valkey.quiet-end.verified`, each instance's last `cpu` share.
 
 ### `valkey.oracle.ledger`
 

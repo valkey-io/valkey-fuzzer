@@ -460,7 +460,7 @@ The Valkey components ship thirteen fragments:
 
 | Fragment | Adds |
 | --- | --- |
-| `valkey.liveness` | the `liveness` oracle ([`valkey.oracle.liveness`](components.md#valkeyoracleliveness)) |
+| `valkey.liveness` | the oracles that need no model of the feature under test: `liveness` ([`valkey.oracle.liveness`](components.md#valkeyoracleliveness)), `error-counters` ([`valkey.oracle.error-counters`](components.md#valkeyoracleerror-counters)), and `quiet-end` ([`valkey.oracle.quiet-end`](components.md#valkeyoraclequiet-end)) |
 | `valkey.writes` | `valkey.liveness`; the `writes` workload ([`valkey.workload.key-value`](components.md#valkeyworkloadkey-value)); the `data` oracle ([`valkey.oracle.ledger`](components.md#valkeyoracleledger)) with required evidence `valkey.data.ledger-verified`; the inputs `stable_keys` (default 1000), `mutable_keys` (200), `mutation_rate` (200 per second), and `value_size` (64 bytes), with the ranges [random scenarios](#declaring-what-may-be-randomized) draw them from |
 | `valkey.base` | `valkey.writes` and the `deployment-state` oracle ([`valkey.oracle.deployment-state`](components.md#valkeyoracledeployment-state)) |
 | `valkey.history` | the `history` oracle ([`valkey.oracle.history`](components.md#valkeyoraclehistory)) on the `data` oracle's ledger and loss policy; extend it after `valkey.writes` or `valkey.base`. The chaos experiments extend it: `aof-durability`, `cluster-partition`, `forkless-save-crash`, `mixed-version-cluster`, `repl-compression-mixed-version`, `replication-chaos`, `replication-full-resync`, and `rolling-upgrade` |
@@ -488,7 +488,11 @@ answer `PING`, except instances a chaos action killed on purpose and left
 down, and no instance log or captured stdout and stderr may contain
 a crash report, an assertion, or a sanitizer report. An instance that exited
 unexpectedly fails the run, and so does a log line that one of the
-experiment's `valkey.observer.log` observers forbids.
+experiment's `valkey.observer.log` observers forbids. Every one also runs
+`valkey.oracle.error-counters` (no error counter in INFO rose without
+something in the scenario that explains it) and `valkey.oracle.quiet-end`
+(every instance comes to rest: no blocked client or child process, links up,
+no spinning). All three come from the `valkey.liveness` fragment.
 
 A host or build that lacks a feature an experiment names reports
 `SKIP_UNSUPPORTED` before anything starts; a run missing an input the

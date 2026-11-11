@@ -5,8 +5,9 @@ package lists. Its experiments are the data-only YAML documents under
 ``experiments/``; they extend the fragments under ``fragments/``
 (``valkey.writes``, ``valkey.base``, the procedures they share, such as
 ``valkey.psync``), and every experiment extends ``valkey.liveness``, which adds
-the ``valkey.oracle.liveness`` oracle. Data-only experiments elsewhere can
-``extends`` the same fragments.
+the oracles that need no model of the feature under test (``valkey.oracle.liveness``,
+``valkey.oracle.error-counters``, ``valkey.oracle.quiet-end``). Data-only
+experiments elsewhere can ``extends`` the same fragments.
 """
 
 from collections.abc import Mapping
@@ -34,6 +35,7 @@ from . import (
     oracles,
     replication_chaos,
     search,
+    server_stats,
     snapshots,
     storage,
     tools,
@@ -57,6 +59,7 @@ _MODULES = (
     network,
     observers,
     oracles,
+    server_stats,
     ledger,
     history,
     snapshots,
