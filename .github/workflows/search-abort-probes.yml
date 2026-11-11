@@ -52,7 +52,9 @@ jobs:
 
       - name: Run the probes
         run: |
-          set -u
+          # pipefail so the probe script's exit 3 (a probe aborted the server) is seen through the `tee`, not
+          # masked by tee's own exit 0.
+          set -uo pipefail
           /tmp/valkey/src/valkey-server --port 6399 --daemonize no \
             --loadmodule /tmp/valkey-search/.build-release/libsearch.so \
             --enable-debug-command yes --save '' --logfile /tmp/server.log &
@@ -81,9 +83,18 @@ jobs:
               /tmp/valkey/src/valkey-cli -p 6399 ping 2>/dev/null | grep -q PONG && break; sleep 1
             done
           done
+          # The two orprox_control_* probes reduce the already-filed #118 abort (proximity.cc), so they are
+          # expected to abort on an unpatched valkey-search and only confirm the harness reproduces it. The job
+          # fails only on an abort that is NOT one of them: a new reachable CHECK, such as the OR-proximity twin.
           echo "aborted probes:${aborted:- none}"
-          if [ -n "$aborted" ]; then
-            echo "::error::these probes aborted the server:${aborted}"
+          expected=" orprox_control_and_or_nontext_phrase orprox_control_outer_text "
+          unexpected=""
+          for name in $aborted; do
+            case "$expected" in *" $name "*) ;; *) unexpected="$unexpected $name" ;; esac
+          done
+          [ -n "$aborted" ] && echo "::warning::probes that aborted the server:${aborted} (expected:${expected})"
+          if [ -n "$unexpected" ]; then
+            echo "::error::these probes aborted the server and were not the known #118 controls:${unexpected}"
             exit 1
           fi
 
