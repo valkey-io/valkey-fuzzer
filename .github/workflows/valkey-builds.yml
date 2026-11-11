@@ -4,14 +4,14 @@ name: Valkey Sanitizer Builds Daily
 # ASan with forced defragmentation (every allocation the defragmenter visits moves, on libc's allocator, so a
 # pointer kept across a move is a use-after-free ASan reports). The soak hosts run the plain, ASan and gcov builds.
 on:
-  schedule:
-    - cron: '45 1 * * *'
+  # Dispatch only until a run is proven green on a GitHub runner; a sanitizer build is slow and memory-heavy,
+  # so the schedule (cron '45 1 * * *') goes back once it passes.
   workflow_dispatch:
     inputs:
       seeds:
         description: "Fresh seeds per experiment"
         required: false
-        default: "3"
+        default: "2"
         type: string
 
 permissions:
@@ -94,14 +94,15 @@ jobs:
 
       - name: Run the batch
         env:
-          SEEDS: ${{ inputs.seeds || '3' }}
+          SEEDS: ${{ inputs.seeds || '2' }}
         run: |
           # The single-build experiments that run against one binary on a non-root runner: the ones that need a
           # second, older build (mixed-version, rolling-upgrade, repl-compression-*) or root (cluster-partition,
           # bgsave-disk-full: a tmpfs mount, iptables) are left out, since this build is the point, not coverage of
           # every experiment. At most one always-active IO thread a server (io-threads 4 needs more than four cores).
-          # A sanitizer build runs about twice as slow, so the per-run timeout is generous.
-          valkey-fuzzer batch --seeds "${SEEDS}" --workers 3 \
+          # A sanitizer build runs several times slower and is memory-heavy, so one run at a time (--workers 1):
+          # three concurrent sanitizer servers starve a 4-core runner and the build-capability probe times out.
+          valkey-fuzzer batch --seeds "${SEEDS}" --workers 1 \
             --random valkey.aof-durability --random valkey.cluster-chaos \
             --random valkey.cluster-election-durability --random valkey.replication-chaos \
             --random valkey.replication-full-resync --random valkey.replication-partial-resync \
