@@ -9,6 +9,11 @@
 # lists `- id: commands` before its faults and actions: a fragment's other
 # components start after the experiment's own, so the workload would start
 # once they are done.
+#
+# The `command-metadata` oracle (valkey.oracle.command-metadata) then sends
+# the workload's first commands again to private servers of the build, and
+# holds each to what the build declares about it: its keys, arity, and
+# readonly and write flags.
 metadata:
   generator:
     inputs:
@@ -28,4 +33,7 @@ components:
       rate: {$ref: inputs.command_rate}
   - use: valkey.oracle.reply-schema
     id: reply-schemas
+    config: {workload: commands}
+  - use: valkey.oracle.command-metadata
+    id: command-metadata
     config: {workload: commands}

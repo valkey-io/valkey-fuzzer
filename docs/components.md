@@ -135,6 +135,7 @@ a retry succeeded makes the fault, and the run, `ERROR`.
 | [`valkey.oracle.cluster-election-safety`](#valkeyoraclecluster-election-safety) | oracle | cluster | the election model's invariants hold |
 | [`valkey.oracle.binary-check`](#valkeyoraclebinary-check) | oracle | any | each instance runs its assigned binary |
 | [`valkey.oracle.dataset-digest`](#valkeyoracledataset-digest) | oracle | any | records a digest of the dataset |
+| [`valkey.oracle.command-metadata`](#valkeyoraclecommand-metadata) | oracle | any | the command-table workload's commands do what the build's command metadata says |
 | [`valkey.oracle.search-results`](#valkeyoraclesearch-results) | oracle | standalone | valkey-search answers queries as the hashes it indexes say |
 | [`valkey.oracle.reply-schema`](#valkeyoraclereply-schema) | oracle | any | the command-table workload's replies match Valkey's reply schemas |
 | [`valkey.oracle.evidence`](#valkeyoracleevidence) | oracle | any | requires or forbids evidence |
@@ -181,6 +182,7 @@ schemas.
 | `valkey.observer.log-trigger` | `{config.rules[].publish}` | `{config.rules[].evidence_id}` | none |
 | `valkey.oracle.binary-check` | none | `valkey.binary.verified` | none |
 | `valkey.oracle.cluster-election-safety` | none | `valkey.cluster.election-safety.verified`<br>`valkey.cluster.vote.unsaved-at-crash` | none |
+| `valkey.oracle.command-metadata` | none | `valkey.command.metadata` | `process.private-server` |
 | `valkey.oracle.dataset-digest` | none | `valkey.dataset.digest` | `process.private-server` |
 | `valkey.oracle.deployment-state` | none | `valkey.deployment.validated` | none |
 | `valkey.oracle.error-counters` | none | `valkey.error-counters.verified` | none |
@@ -352,8 +354,10 @@ seed (`unix-time` arguments are the current time plus up to a minute).
 Error replies are expected and only counted; no reply (a lost connection or
 a timeout) drops the connection, and in standalone mode the workload sends
 to the current primary. It judges nothing: the liveness and crash oracles
-judge what the commands do to the server, and the evidence records any reply
-the client could not parse.
+judge what the commands do to the server, the evidence records any reply
+the client could not parse, and
+[`valkey.oracle.command-metadata`](#valkeyoraclecommand-metadata) sends the
+same commands again to private servers and holds each to its metadata.
 
 Every other reply is held to the reply schema of its command, and the
 evidence records each command and protocol with a reply that does not match,
@@ -1778,6 +1782,85 @@ across processes"), never a `FAIL` across replicas.
 
 Evidence: `valkey.dataset.digest` (`digest`, key count, per-instance digests,
 and `module_types`, the module types it digested and probed).
+
+### `valkey.oracle.command-metadata`
+
+Holds the commands of a
+[`valkey.workload.command-table`](#valkeyworkloadcommand-table) workload to
+what the build declares about them. `COMMAND` lists every command's arity,
+flags, and key specs (a module's commands too), and `COMMAND GETKEYS` names
+the keys of one command. Clients, proxies, ACL rules, and the cluster's
+routing act on what they say, so a command that does otherwise is a bug in
+Valkey: valkey-io/valkey#4936 is one, an `MSETEX` that has keys by its key
+specs and none where the cluster routes it.
+
+Where the workload sends commands (its `rate` is above 0), the oracle starts
+two private servers of the deployment's build, with its `loadmodule`,
+`enable-debug-command yes`, and an AOF: node 0 with node 1 as its read-only
+replica, or on a cluster deployment node 0 owning every slot and node 1
+owning none. It draws the workload's first `commands` commands again from
+the run's seed, with the workload's `prefix` and `keys`, so they are the
+same commands in the same order, and sends each to node 0, and to node 1 as
+the checks below say. Nothing else writes to these servers, so whatever
+changes there, a command changed.
+
+| Check | Deployment | What must hold | Finding |
+| --- | --- | --- | --- |
+| `keys` | any | `COMMAND GETKEYS` names the keys the command's key specs find (`begin_search` and `find_keys`), and a command without the `movablekeys` flag has them where `first`, `last`, and `step` say. | `keys-mismatch` |
+| `arity` | any | A command with a number of arguments its arity excludes replies `wrong number of arguments`. | `arity-accepted` |
+| `readonly` | any | A command with the `readonly` flag leaves node 0's `DEBUG DIGEST` as it was and propagates nothing: its `master_repl_offset` and the bytes fed to its AOF stay the same. | `readonly-wrote` |
+| `replica` | standalone | The replica refuses a command with the `write` flag with `READONLY`, and does not refuse one with the `readonly` flag. | `replica-wrote`, `replica-refused` |
+| `routing` | cluster | Node 1, which owns no slot, answers a command `MOVED` to the slot of the keys and shard channels it declares (`CROSSSLOT` when they are of several slots), and serves a command that declares none. | `misrouted` |
+
+What is left unjudged, each for what Valkey itself says or does by design:
+
+- `keys`, and `routing` with them: a command whose key specs do not say
+  where its keys are (an `incomplete` or `unknown` spec, as `SORT`'s), and
+  arguments `COMMAND GETKEYS` refuses (their count, a `numkeys` beyond
+  them). `keys` alone: a module command that finds its keys by a callback
+  (`getkeys-api`: the `movablekeys` flag and no key spec), which is routed
+  by the keys `COMMAND GETKEYS` names.
+- `readonly`: a command whose own key specs declare a key written
+  (`PFCOUNT`'s says it may change its key and propagate); a script
+  (`EVAL_RO`, `FCALL_RO`), which runs other commands; a command during
+  which a key or a hash field expired, by `expired_keys` and
+  `expired_fields` (a key found expired is deleted, and the deletion
+  propagated); and a digest that changed with nothing propagated while a
+  hash holds fields that expire, since `DEBUG DIGEST` leaves a field out
+  from its expire time on. A transaction is judged as a whole, when every
+  command in it has the flag.
+- `replica`: an error Valkey replies before it reads a command's flags
+  (its arity).
+- `routing`: an error node 0, which owns the slot, replies too. Valkey
+  refuses a wrong number of arguments before it routes, and looks for no
+  keys in arguments it cannot parse (an `XREAD` with more streams than
+  IDs), letting the command say so. A command queued in a transaction has
+  no reply of its own from node 0, so any error of its own is left alone.
+  So is `CLUSTERDOWN`, from a node 1 that got no ping from node 0 in time.
+- A command with the `pubsub` flag confirms each channel with a reply of
+  its own, so the next command takes a new connection.
+
+`FAIL` names each command that broke its metadata once, in the same words
+whatever its arguments (`MSETEX was not routed by the keys it declares on a
+node that owns no slot`), so a batch groups runs by the commands at fault;
+`diagnostics.findings` holds the first occurrence of each: its `reason`,
+`name`, `index` (the command's line in the sequence), `command`, what the
+build `declared`, what the oracle `observed`, and `count`. A server that
+exits is a `FAIL` and a crash; a command that got no reply, or servers that
+did not start, is `ERROR`.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `workload` | string | | The `valkey.workload.command-table` component whose commands it sends again. |
+| `commands` | integer, 1 to 1,000,000 | 1000 | How many of them, from the first. |
+| `timeout_s` | number, 0.1 to 3600 | 10 | Client timeout per command, and how long the private cluster may take to form. |
+
+The `valkey.command-table` fragment adds it as `command-metadata`.
+
+Evidence: `valkey.command.metadata`, with `commands` (how many it sent),
+`judged` (how many each check judged), `findings`, and `sequence`, the path
+of `commands.jsonl`: every command sent to node 0, one JSON array per line,
+to send again by hand. The artifacts also hold both servers' logs.
 
 ### `valkey.oracle.search-results`
 

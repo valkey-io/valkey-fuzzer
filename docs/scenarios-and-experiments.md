@@ -263,6 +263,10 @@ What the fuzzer does with a module:
   never does) leaves replicas without its writes, which `include_replicas`
   reports as replicas that do not hold their primary's data; write such values
   with `RESTORE` of their payload, which replicates.
+- **Its commands' metadata.** With the command-table workload on,
+  [`valkey.oracle.command-metadata`](components.md#valkeyoraclecommand-metadata)
+  loads the deployment's modules into its private servers, and holds the
+  module's commands to their arity, flags, and key specs like Valkey's own.
 - **Its commands, across builds.** [`valkey.action.commands`](components.md#valkeyactioncommands)
   starts two private servers that load `modules` and `modules_parent`, on one
   Valkey build (or, with `compare_with`, each on its own), and compares their
@@ -471,7 +475,7 @@ The Valkey components ship thirteen fragments:
 | `valkey.forkless` | the `forkless-enabled` startup overlay on every instance; the `build` probe ([`valkey.capability.build-probe`](components.md#valkeycapabilitybuild-probe)) that the binary supports forkless saves; the input `key_save_delay_us` (default 500); random scenarios draw `value_size` up to 1024 and the compression pool |
 | `valkey.compression` | the input `rdbcompression` (`no`, `yes`, `lzf`, `lz4`, `zstd`; default `yes`, which every build accepts) as the `rdb-compression` startup overlay on every instance; the `build` probe with `deployment_config: [rdbcompression, repl-compression]`, so a codec the build lacks is `SKIP_UNSUPPORTED` |
 | `valkey.repl-compression` | `valkey.compression`; the inputs `primary_repl_compression` and `replica_repl_compression` (`no`, `yes`, `lz4`, `zstd`; default `lz4`) as overlays on the primaries and the replicas; `compressible` (default `true`) on the `writes` workload; the `compression` oracle ([`valkey.oracle.repl-compression`](components.md#valkeyoraclerepl-compression)) with required evidence `valkey.repl.compression-verified`; random scenarios draw 100 to 1000 `mutable_keys`, so every shard takes writes, and 1 to 3 replicas (standalone) or 1 to 2 (cluster) |
-| `valkey.command-table` | the `commands` workload ([`valkey.workload.command-table`](components.md#valkeyworkloadcommand-table)) at the input `command_rate` (default 0, which sends none), and the `reply-schemas` oracle ([`valkey.oracle.reply-schema`](components.md#valkeyoraclereply-schema)), which holds its replies to Valkey's reply schemas; random scenarios keep the default, so a batch turns it on for an experiment with a base (`experiment: {inputs: {command_rate: 200}}`). `valkey.cluster-chaos`, `valkey.replication-chaos`, and `valkey.cluster-partition` extend it |
+| `valkey.command-table` | the `commands` workload ([`valkey.workload.command-table`](components.md#valkeyworkloadcommand-table)) at the input `command_rate` (default 0, which sends none); the `reply-schemas` oracle ([`valkey.oracle.reply-schema`](components.md#valkeyoraclereply-schema)), which holds its replies to Valkey's reply schemas; and the `command-metadata` oracle ([`valkey.oracle.command-metadata`](components.md#valkeyoraclecommand-metadata)), which holds the workload's first 1000 commands to the build's command metadata on private servers; random scenarios keep the default, so a batch turns them on for an experiment with a base (`experiment: {inputs: {command_rate: 200}}`). `valkey.cluster-chaos`, `valkey.replication-chaos`, and `valkey.cluster-partition` extend it |
 | `valkey.random` | only the server config pools of [random scenarios](#declaring-what-may-be-randomized) |
 | `valkey.profiles` | only the [search profiles](#legal-space-and-search-profiles); no experiment extends it |
 

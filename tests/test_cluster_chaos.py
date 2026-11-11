@@ -544,6 +544,7 @@ def test_the_cluster_chaos_experiment_passes_or_fails_with_its_waves_and_always_
         "chaos": "FAIL" if wave_fails else "PASS", "cluster": "PASS", "liveness": "PASS", "commands": "PASS",
         "reply-schemas": "PASS",
         "error-counters": "PASS", "quiet-end": "PASS",
+        "command-metadata": "PASS",
     }  # fmt: skip
     assert outcome.status.value == ("FAIL" if wave_fails else "PASS"), outcome.summary
     assert "stopped on purpose" in results["liveness"].summary
