@@ -4,8 +4,8 @@ name: Valkey Sanitizer Builds Daily
 # ASan with forced defragmentation (every allocation the defragmenter visits moves, on libc's allocator, so a
 # pointer kept across a move is a use-after-free ASan reports). The soak hosts run the plain, ASan and gcov builds.
 on:
-  # Dispatch only until a run is proven green on a GitHub runner; a sanitizer build is slow and memory-heavy,
-  # so the schedule (cron '45 1 * * *') goes back once it passes.
+  schedule:
+    - cron: '45 1 * * *'
   workflow_dispatch:
     inputs:
       seeds:
@@ -24,9 +24,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # TSan is left out until Valkey's data races have a suppression file: with -fno-sanitize-recover it
-        # aborts on the first race at startup, so no run completes. UBSan, 32-bit, and forced-defrag ASan run here.
-        build: [ubsan, 32bit, defrag]
+        # UBSan and forced-defrag ASan run here. TSan is left out until Valkey's data races have a suppression
+        # file (with -fno-sanitize-recover it aborts on the first race at startup). 32-bit is left out until its
+        # build is sorted: `make 32bit` stops on a missing 32-bit googletest, which the fuzzer does not use.
+        build: [ubsan, defrag]
     env:
       BATCH_DIR: /tmp/valkey-builds/batch
       # allocator_may_return_null is Valkey's own test harness's setting: a command that expects an allocation to
@@ -54,9 +55,6 @@ jobs:
             ubsan)
               sudo apt-get install -y -q clang libzstd-dev
               make -C /tmp/valkey -j"$(nproc)" BUILD_ZSTD=yes CC=clang OPT=-O1 SANITIZER=undefined ;;
-            32bit)
-              sudo apt-get install -y -q libc6-dev-i386 g++-multilib
-              make -C /tmp/valkey -j"$(nproc)" 32bit ;;
             defrag)
               sudo apt-get install -y -q clang libzstd-dev
               make -C /tmp/valkey -j"$(nproc)" BUILD_ZSTD=yes CC=clang OPT=-O1 SANITIZER=address \
