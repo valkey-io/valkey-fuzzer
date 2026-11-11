@@ -134,6 +134,7 @@ a retry succeeded makes the fault, and the run, `ERROR`.
 | [`valkey.oracle.binary-check`](#valkeyoraclebinary-check) | oracle | any | each instance runs its assigned binary |
 | [`valkey.oracle.dataset-digest`](#valkeyoracledataset-digest) | oracle | any | records a digest of the dataset |
 | [`valkey.oracle.search-results`](#valkeyoraclesearch-results) | oracle | standalone | valkey-search answers queries as the hashes it indexes say |
+| [`valkey.oracle.reply-schema`](#valkeyoraclereply-schema) | oracle | any | the command-table workload's replies match Valkey's reply schemas |
 | [`valkey.oracle.evidence`](#valkeyoracleevidence) | oracle | any | requires or forbids evidence |
 
 ## Events, evidence, and state changes
@@ -186,6 +187,7 @@ schemas.
 | `valkey.oracle.liveness` | none | `valkey.liveness.verified` | none |
 | `valkey.oracle.rdb-snapshot` | none | `valkey.rdb.reload-verified` | `process.private-server` |
 | `valkey.oracle.repl-compression` | none | `valkey.repl.compression-verified` | none |
+| `valkey.oracle.reply-schema` | none | none | none |
 | `valkey.oracle.search-results` | none | `valkey.search.results-verified` | none |
 | `valkey.workload.command-table` | none | `valkey.workload.command-table` | none |
 | `valkey.workload.key-value` | `<id>.drained`<br>`<id>.seeded` | `valkey.workload.ledger` | none |
@@ -339,14 +341,46 @@ optional argument half the time, one to three of a repeated one, as many keys
 as its `numkeys`, and values from small domains (`member:<n>`, `field:<n>`)
 so commands meet the data others wrote. A blocking command waits at most
 0.1 s. `MULTI` runs as a transaction: `MULTI`, one to three commands, `EXEC`.
-Commands and arguments come from the run's seed (`unix-time` arguments are
-the current time plus up to a minute).
+Each command, or transaction, goes over RESP2 or RESP3, on a connection of
+each to its instance. Commands, arguments, and protocols come from the run's
+seed (`unix-time` arguments are the current time plus up to a minute).
 
 Error replies are expected and only counted; no reply (a lost connection or
 a timeout) drops the connection, and in standalone mode the workload sends
 to the current primary. It judges nothing: the liveness and crash oracles
 judge what the commands do to the server, and the evidence records any reply
 the client could not parse.
+
+Every other reply is held to the reply schema of its command, and the
+evidence records each command and protocol with a reply that does not match,
+for [`valkey.oracle.reply-schema`](#valkeyoraclereply-schema) to judge. The
+schemas are the `reply_schema` of Valkey's `src/commands/*.json`, which
+Valkey holds its own test suite to (`utils/req-res-log-validator.py`, over
+RESP3). An ordinary build does not report them, so they ship with the
+fuzzer, in `valkey_fuzzer/components/reply_schemas.json`, which names the
+Valkey commit they were read from; `python -m
+valkey_fuzzer.components.reply_schemas <valkey source tree> "<its commit>"`
+writes the file again from a newer tree. A command the file does not have (a
+module's, or one newer than the file) is not held to anything. A build that
+replies in a shape Valkey has since changed does not match the newer schema:
+of the releases since 7.2, `LATENCY LATEST` and `MEMORY STATS` are such.
+
+- An error reply has no schema, and is not judged. Inside a transaction a
+  command is answered `QUEUED`; its reply is its item of the `EXEC`'s reply,
+  which is held to the command's schema unless it is an error.
+- A schema describes the RESP3 reply. A RESP2 reply matches when it is that
+  reply in the form RESP2 has for it: a double as a string, a map as a flat
+  array of its keys and values (or, for `XREAD` and `XREADGROUP`, as an array
+  of `[key, value]` pairs), and an array of pairs as one flat array
+  (`WITHSCORES`, `WITHVALUES`); and it may match more than one alternative
+  of a `oneOf`, where a RESP3 reply must match exactly one.
+- An integer is an integer reply: a RESP3 double does not match `integer`,
+  even one with no fraction.
+- A reply Valkey is known to send against its schema is taken as matching
+  until the schema describes it, so it does not fail every run:
+  `KNOWN_GAPS` in `command_table.py` lists each (`GEOHASH`'s null for a
+  member the key does not hold; `OBJECT FREQ`, `OBJECT IDLETIME`, and
+  `OBJECT REFCOUNT`'s null for a key that does not exist).
 
 Every key is `<prefix>:{<tag>}:<type>:<n>`, with one of 32 hash tags per
 command and `<type>` the command's group (a random one for generic
@@ -378,6 +412,13 @@ Commands it never sends:
   commands.
 - `SCRIPT DEBUG`: `SYNC` blocks the server for the whole debugging session.
 
+After `RESET` (the connection is back in RESP2), `CLIENT TRACKING` (the
+server pushes invalidations between replies), and `UNSUBSCRIBE`,
+`PUNSUBSCRIBE`, and `SUNSUBSCRIBE` (answered once per channel), replies no
+longer pair with commands in the connection's protocol: once one is answered
+the workload closes the connection, and sends nothing more of its
+transaction.
+
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `rate` | number, 0 to 100,000 | 100 | Commands per second; 0 sends none. |
@@ -391,8 +432,13 @@ the input `command_rate` (default 0).
 Evidence: `valkey.workload.command-table`, with `commands` (how many the
 table offered), `skipped` (the names it never sends, as this build lists
 them), `sent`, `distinct_sent`, `outcomes` (`replied`, `error`,
-`unanswered`, `protocol_error`), and `protocol_errors` (up to 10 commands
-whose reply the client could not parse, with the parser's error).
+`unanswered`, `protocol_error`), `protocol_errors` (up to 10 commands
+whose reply the client could not parse, with the parser's error),
+`validated` (how many replies were held to a reply schema), and
+`schema_mismatches`: for each command and protocol with a reply that did not
+match, its `name`, `resp`, the `count` of such replies, and the first of
+them: the `command` as sent, the `reply` (up to 4 KB of its JSON text), the
+`problem` (where in the reply, and why), and the `schema`.
 
 ## Actions
 
@@ -1682,6 +1728,24 @@ and fuzzy words are within the optimal string alignment distance.
 
 Evidence: `valkey.search.results-verified` (`index`, the query count, and
 each instance's key count).
+
+### `valkey.oracle.reply-schema`
+
+`FAIL` when a reply the
+[`valkey.workload.command-table`](#valkeyworkloadcommand-table) workload
+held to its command's reply schema did not match it. That is a finding about
+Valkey either way: the reply is wrong, or the schema Valkey declares for the
+command is. The summary names each such command and protocol (`ZRANGE
+(RESP2) reply does not match its reply schema`), so runs group by them; the
+diagnostics hold the workload's `schema_mismatches`, with the command, the
+reply, what in it does not match, and the schema. `ERROR` when the workload
+recorded no evidence.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `workload` | string | | The `id` of the command-table workload. |
+
+The `valkey.command-table` fragment adds it as `reply-schemas`.
 
 ### `valkey.oracle.evidence`
 

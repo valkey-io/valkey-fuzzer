@@ -2,7 +2,8 @@
 # from the build's whole command table at `command_rate` per second while the
 # experiment's faults run. Its keys stay under their own prefix, apart from the
 # keys the other components write and check; what the commands do to the
-# server is the liveness oracle's to judge. 0, the default, sends none, and
+# server is the liveness oracle's to judge, and the `reply-schemas` oracle
+# holds their replies to Valkey's reply schemas. 0, the default, sends none, and
 # random scenarios keep it: a batch turns it on for an experiment with a base,
 # `experiment: {inputs: {command_rate: 200}}`.
 metadata:
@@ -22,3 +23,6 @@ components:
     id: commands
     config:
       rate: {$ref: inputs.command_rate}
+  - use: valkey.oracle.reply-schema
+    id: reply-schemas
+    config: {workload: commands}

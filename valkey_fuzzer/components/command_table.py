@@ -3,8 +3,10 @@
 The workload reads the command table of the build under test: ``COMMAND`` (each command's flags) and ``COMMAND
 DOCS`` (its arguments), which the server builds from Valkey's ``src/commands/*.json`` specs, module commands
 included. It then sends ``rate`` commands per second from one thread, each drawn uniformly from the table with
-arguments drawn from its documented ones, from the run's seed. Error replies are expected and only counted: the
-liveness and crash oracles judge what the commands do to the server.
+arguments drawn from its documented ones, from the run's seed, over RESP2 or RESP3. Error replies are expected and
+only counted: the liveness and crash oracles judge what the commands do to the server. Every other reply is held to
+the reply schema Valkey declares for its command (:mod:`.reply_schemas`), and ``valkey.oracle.reply-schema`` fails
+the run for one that does not match.
 
 Every key it names is ``<prefix>:{<tag>}:<type>:<n>``: the prefix keeps the keys apart from the other components'
 (the ledger, the chaos test keys, digests restricted to a prefix), and one hash tag per command keeps a command's
@@ -20,24 +22,27 @@ Which commands run:
   ``ACL SETUSER``, ...). Only those in :data:`ADMIN_READS`, which read, run.
 * Any other command runs unless :data:`EXCLUDED` names it, with the reason.
 * ``MULTI`` runs as a transaction: ``MULTI``, one to three commands of the same hash tag, ``EXEC``.
+* After a command of :data:`LEAVES` the workload closes the connection, with the reason.
 """
 
 import random
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from typing import Any, Optional
 
 import valkey
 
+from valkey_fuzzer._data import canonical_json
 from valkey_fuzzer.declarations import Declarations
-from valkey_fuzzer.plan import ComponentSpec
-from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
-from valkey_fuzzer.schema import ConfigField
+from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
+from valkey_fuzzer.results import ComponentStatus, Evidence, evidence_of, make_evidence, make_result
+from valkey_fuzzer.schema import ConfigError, ConfigField, plain_config
 
 from .actions import open_raw_connection
 from .instances import deployment, is_cluster
 from .polling import StoppableThread
 from .registration import component_registration
+from .reply_schemas import mismatch, reply_schemas
 from .schemas import INTEGER, LIST, TEXT, declared, mapping_of
 
 EVIDENCE = "valkey.workload.command-table"
@@ -83,6 +88,30 @@ EXCLUDED = {
     "CLIENT REPLY": "OFF and SKIP leave commands without the replies the workload waits for",
     "SCRIPT DEBUG": "SYNC blocks the server for the whole debugging session",
 }
+
+# Commands that run, but leave their connection where replies no longer pair with commands in the protocol it was
+# opened with: once one is answered the workload closes the connection, and sends nothing more of its transaction.
+LEAVES = {
+    "RESET": "puts the connection back in RESP2",
+    "CLIENT TRACKING": "makes the server push invalidations between replies",
+    "UNSUBSCRIBE": "is answered once per channel",
+    "PUNSUBSCRIBE": "is answered once per pattern",
+    "SUNSUBSCRIBE": "is answered once per channel",
+}
+# Replies Valkey sends that the reply schema of their command leaves out, each by the schema of those replies.
+# They are findings already reported; they are taken as matching, so that they do not fail every run, until
+# Valkey's schema describes them and reply_schemas.json is written again.
+_NULL = {"type": "null"}
+KNOWN_GAPS = {
+    # geohashCommand (geo.c) replies null for a member the key does not hold; the schema's items are strings.
+    "GEOHASH": {"type": "array", "items": {"anyOf": [{"type": "string"}, _NULL]}},
+    # objectCommand (object.c) replies null for a key that does not exist; the three schemas are integers.
+    "OBJECT FREQ": _NULL,
+    "OBJECT IDLETIME": _NULL,
+    "OBJECT REFCOUNT": _NULL,
+}
+# How much of a mismatching reply the evidence records, as JSON text.
+_REPLY_TEXT = 4096
 
 # Hash tags, so slots, the keys spread over.
 _HASH_TAGS = 32
@@ -143,6 +172,31 @@ def read_command_table(info: Sequence[Any], docs: Sequence[Any]) -> tuple[list[t
         doc = documented.get(entry[0], {})
         table.append((name, doc.get("group", "generic"), _arguments(doc)))
     return sorted(table, key=lambda item: item[0]), sorted(skipped)
+
+
+def answered(exchanges: Sequence[tuple[str, Any, Mapping[str, Any]]]) -> Iterator[tuple[str, Any, Any]]:
+    """What each reply of one connection's ``exchanges`` (``(name, command, record)``, in order) answers, as
+    ``(name, command, reply)``, errors left out. Inside a transaction a command is answered ``QUEUED``, which is
+    not its reply: that is its item of the EXEC's reply."""
+
+    queued: Optional[list[tuple[str, Any]]] = None
+    for name, command, record in exchanges:
+        ends = name in ("EXEC", "DISCARD")
+        if "reply" not in record:
+            # An EXEC that fails (EXECABORT) ends its transaction too.
+            queued = None if ends else queued
+            continue
+        reply = record["reply"]
+        if queued is not None and not ends:
+            if reply == "QUEUED":
+                queued.append((name, command))
+            continue
+        yield name, command, reply
+        if name == "EXEC" and isinstance(reply, list) and len(reply) == len(queued or ()):
+            for (queued_name, queued_command), item in zip(queued or (), reply):
+                if not (isinstance(item, dict) and set(item) == {"$error"}):
+                    yield queued_name, queued_command, item
+        queued = [] if name == "MULTI" else None
 
 
 class CommandGenerator:
@@ -239,7 +293,8 @@ class CommandTableWorkload:
         self._handle: Any = None
         self._cluster = False
         self._addresses: dict[tuple[str, int], str] = {}
-        self._connections: dict[str, Any] = {}
+        # (instance, protocol) -> its connection.
+        self._connections: dict[tuple[str, int], Any] = {}
         # Hash tag (0 for every tag outside cluster mode) -> the instance serving it.
         self._routes: dict[int, str] = {}
         self._table: list[tuple[str, str, list]] = []
@@ -247,6 +302,9 @@ class CommandTableWorkload:
         self._outcomes = dict.fromkeys(OUTCOMES, 0)
         self._sent: set[str] = set()
         self._protocol_errors: list[dict[str, Any]] = []
+        self._validated = 0
+        # (command name, protocol) -> the first of its replies that did not match its schema, and how many did not.
+        self._mismatches: dict[tuple[str, int], dict[str, Any]] = {}
 
     def start(self, context: Any, spec: ComponentSpec):
         config = self._config = spec.config
@@ -259,8 +317,8 @@ class CommandTableWorkload:
         try:
             if instance_id is None:
                 raise RuntimeError("no reachable primary")
-            info = self._send(instance_id, ["COMMAND"])
-            docs = self._send(instance_id, ["COMMAND", "DOCS"])
+            info = self._send(instance_id, 2, ["COMMAND"])
+            docs = self._send(instance_id, 2, ["COMMAND", "DOCS"])
             for record in (info, docs):
                 if "reply" not in record:
                     raise RuntimeError(record.get("error") or record.get("protocol_error"))
@@ -269,13 +327,14 @@ class CommandTableWorkload:
             self._close()
             return make_result(spec, ComponentStatus.ERROR, f"could not read the command table: {exc}")
         generator = CommandGenerator(self._table, context.rng(spec.id, "commands"), self._prefix(spec), config["keys"])
+        protocols = context.rng(spec.id, "protocol")
         interval = 1.0 / config["rate"]
 
         def loop(stop_event) -> None:
             next_at = time.monotonic()
             while not stop_event.is_set():
                 tag, commands = generator.next()
-                if not self._run(tag if self._cluster else 0, commands):
+                if not self._run(tag if self._cluster else 0, protocols.choice((2, 3)), commands):
                     stop_event.wait(0.05)
                 next_at += interval
                 delay = next_at - time.monotonic()
@@ -305,33 +364,42 @@ class CommandTableWorkload:
             self._routes[route] = primaries[0]
         return self._routes[route]
 
-    def _send(self, instance_id: str, command: Sequence[str]) -> dict[str, Any]:
-        """``command`` on the workload's connection to ``instance_id``: :meth:`RawConnection.send`'s record."""
+    def _send(self, instance_id: str, resp: int, command: Sequence[str]) -> dict[str, Any]:
+        """``command`` on the workload's RESP ``resp`` connection to ``instance_id``: :meth:`RawConnection.send`'s
+        record."""
 
-        connection = self._connections.get(instance_id)
+        connection = self._connections.get((instance_id, resp))
         if connection is None:
             instance = next(item for item in self._handle.instances if item.instance_id == instance_id)
             try:
                 connection = open_raw_connection(
-                    2, self._config["op_timeout_s"], host=instance.host, port=instance.port
+                    resp, self._config["op_timeout_s"], host=instance.host, port=instance.port
                 )
             except (valkey.exceptions.ValkeyError, OSError) as exc:
                 return {"error": f"cannot connect: {type(exc).__name__}: {exc}", "unanswered": True}
-            self._connections[instance_id] = connection
+            self._connections[instance_id, resp] = connection
         return connection.send(command)
 
-    def _run(self, route: int, commands: Sequence[tuple[str, list[str]]]) -> bool:
-        """Send ``commands`` in order to the instance serving ``route``. False when one got no reply, or a
-        ``READONLY`` error (its instance is not the primary any more): the rest are not sent, the connection is
-        dropped, and the route is looked up again."""
+    def _run(self, route: int, resp: int, commands: Sequence[tuple[str, list[str]]]) -> bool:
+        """Send ``commands`` in order over RESP ``resp`` to the instance serving ``route``, and hold their replies
+        to their reply schemas. False when one got no reply, or a ``READONLY`` error (its instance is not the
+        primary any more): the rest are not sent, the connection is dropped, and the route is looked up again."""
 
+        exchanges: list[tuple[str, list[str], dict[str, Any]]] = []
+        try:
+            return self._exchange(route, resp, commands, exchanges)
+        finally:
+            self._judge(resp, exchanges)
+
+    def _exchange(self, route: int, resp: int, commands: Sequence[tuple[str, list[str]]], exchanges: list) -> bool:
         instance_id = self._instance(route)
         for name, command in commands:
             self._sent.add(name)
             if instance_id is None:
                 record = {"error": "no reachable primary", "unanswered": True}
             else:
-                record = self._send(instance_id, command)
+                record = self._send(instance_id, resp, command)
+            exchanges.append((name, command, record))
             error = str(record.get("error", ""))
             if "protocol_error" in record:
                 outcome = "protocol_error"
@@ -353,18 +421,46 @@ class CommandTableWorkload:
                 # A connection whose state is unknown, or an instance that is not the primary any more.
                 self._routes.pop(route, None)
                 if instance_id is not None:
-                    self._forget(instance_id)
+                    self._forget(instance_id, resp)
                 return False
+            if name in LEAVES and outcome == "replied":
+                self._forget(instance_id, resp)
+                break
         return True
 
-    def _forget(self, instance_id: str) -> None:
-        connection = self._connections.pop(instance_id, None)
+    def _judge(self, resp: int, exchanges: Sequence[tuple[str, list[str], dict[str, Any]]]) -> None:
+        """Hold every reply of ``exchanges`` to the reply schema of its command, when Valkey declares one."""
+
+        for name, command, reply in answered(exchanges):
+            schema = reply_schemas().get(name)
+            if schema is None:
+                continue
+            self._validated += 1
+            problem = mismatch(schema, reply, resp)
+            if problem is None or (name in KNOWN_GAPS and mismatch(KNOWN_GAPS[name], reply, resp) is None):
+                continue
+            found = self._mismatches.setdefault(
+                (name, resp),
+                {
+                    "name": name,
+                    "resp": resp,
+                    "count": 0,
+                    "command": command,
+                    "reply": canonical_json(reply)[:_REPLY_TEXT],
+                    "problem": problem,
+                    "schema": schema,
+                },
+            )
+            found["count"] += 1
+
+    def _forget(self, instance_id: Optional[str], resp: int) -> None:
+        connection = self._connections.pop((instance_id, resp), None)
         if connection is not None:
             connection.close()
 
     def _close(self) -> None:
-        for instance_id in list(self._connections):
-            self._forget(instance_id)
+        for instance_id, resp in list(self._connections):
+            self._forget(instance_id, resp)
 
     def stop(self, context: Any, spec: ComponentSpec):
         problem = None
@@ -382,6 +478,8 @@ class CommandTableWorkload:
             "distinct_sent": len(self._sent),
             "outcomes": dict(self._outcomes),
             "protocol_errors": self._protocol_errors,
+            "validated": self._validated,
+            "schema_mismatches": [self._mismatches[key] for key in sorted(self._mismatches)],
         }
         evidence = (make_evidence(spec, EVIDENCE, "workload.quiesced", summary),)
         if problem is not None:
@@ -390,7 +488,8 @@ class CommandTableWorkload:
             spec,
             ComponentStatus.PASS,
             f"{summary['sent']} commands ({summary['distinct_sent']} distinct): "
-            + ", ".join(f"{count} {outcome}" for outcome, count in self._outcomes.items()),
+            + ", ".join(f"{count} {outcome}" for outcome, count in self._outcomes.items())
+            + f"; {self._validated} replies held to their reply schemas",
             evidence=evidence,
         )
 
@@ -416,12 +515,57 @@ _DECLARES = Declarations(
                     "distinct_sent": INTEGER,
                     "outcomes": mapping_of({outcome: INTEGER for outcome in OUTCOMES}),
                     "protocol_errors": LIST,
+                    "validated": INTEGER,
+                    "schema_mismatches": LIST,
                 }
             )
         )
     },
 )
 
+
+def _validate_oracle(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -> None:
+    uses = {component.id: component.use for component in plan.components}
+    if uses.get(config["workload"]) != "valkey.workload.command-table":
+        raise ConfigError(f"workload {config['workload']!r} is not a valkey.workload.command-table of this plan")
+
+
+class ReplySchemaOracle:
+    """Every reply the ``workload`` held to its command's reply schema matched it.
+
+    One that does not is a finding about Valkey either way: the reply is wrong, or the schema Valkey declares
+    for it is. The summary names each command and protocol, which the failure signature groups runs by; the
+    diagnostics hold, for each, the first such command, its reply, what in it does not match, and the schema.
+    """
+
+    def evaluate(self, context: Any, spec: ComponentSpec, evidence: Sequence[Evidence]):
+        workload = spec.config["workload"]
+        items = evidence_of(evidence, EVIDENCE, workload)
+        if not items:
+            return make_result(spec, ComponentStatus.ERROR, f"no {EVIDENCE} evidence from workload {workload!r}")
+        summary = plain_config(items[-1].value)
+        mismatches = summary["schema_mismatches"]
+        if mismatches:
+            return make_result(
+                spec,
+                ComponentStatus.FAIL,
+                "; ".join(
+                    f"{item['name']} (RESP{item['resp']}) reply does not match its reply schema" for item in mismatches
+                ),
+                diagnostics={"mismatches": mismatches},
+            )
+        return make_result(
+            spec, ComponentStatus.PASS, f"{summary['validated']} replies match their commands' reply schemas"
+        )
+
+
 REGISTRATIONS = (
     component_registration("valkey.workload.command-table", CommandTableWorkload, _FIELDS, declares=_DECLARES),
+    component_registration(
+        "valkey.oracle.reply-schema",
+        ReplySchemaOracle,
+        {"workload": ConfigField(str)},
+        check=_validate_oracle,
+        declares=Declarations(),
+    ),
 )

@@ -72,7 +72,7 @@ version = {attr = "valkey_fuzzer.__version__"}
 [tool.setuptools.package-data]
 valkey_fuzzer = ["py.typed"]
 "valkey_fuzzer.formal" = ["*/*", "*/*/*"]
-"valkey_fuzzer.components" = ["experiments/*.yaml", "fragments/*.yaml"]
+"valkey_fuzzer.components" = ["experiments/*.yaml", "fragments/*.yaml", "reply_schemas.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

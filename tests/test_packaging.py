@@ -20,6 +20,17 @@ def test_pyproject_lists_every_package_and_the_bundles():
     assert listed == sorted([*find_packages(where=str(ROOT), include=["valkey_fuzzer*"]), "valkey_fuzzer.formal"])
 
 
+def test_the_data_files_of_the_components_ship_with_them():
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    shipped = re.search(r'^"valkey_fuzzer\.components" = \[(.*)\]$', text, flags=re.MULTILINE).group(1)
+    patterns = re.findall(r'"([^"]+)"', shipped)
+    components = ROOT / "valkey_fuzzer" / "components"
+    data = [path for path in components.rglob("*") if path.is_file() and path.suffix in (".yaml", ".json")]
+    assert len(data) > 30
+    for path in data:
+        assert any(path.match(pattern) for pattern in patterns), path
+
+
 def test_bundles_are_found_by_directory_or_by_protocol_name_on_the_spec_path(tmp_path, monkeypatch):
     fixtures = ROOT / "tests" / "fixtures" / "spec"
     monkeypatch.delenv("VALKEY_FUZZER_SPEC_PATH", raising=False)
