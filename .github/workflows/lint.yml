@@ -2,9 +2,9 @@ name: Lint
 
 on:
   push:
-    branches: [ main ]
+    branches: [ generic-fuzzer ]
   pull_request:
-    branches: [ main ]
+    branches: [ generic-fuzzer ]
 
 permissions:
   contents: read
