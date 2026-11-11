@@ -1680,6 +1680,8 @@ class _SaveTarget:
         self.error: Optional[str] = None
         self.unanswered = False
         self.busy = False
+        # The BGSAVEs Valkey refused while another child ran: error replies the action asked for.
+        self.refusals = 0
         # The last INFO read's error, None once one succeeded.
         self.read_error: Optional[str] = None
         self.finished = False
@@ -1709,6 +1711,7 @@ class _SaveTarget:
                 return
             except valkey.exceptions.ResponseError as exc:
                 busy = any(text in str(exc) for text in _BGSAVE_BUSY)
+                self.refusals += busy
                 if not busy or time.monotonic() >= deadline or not context.sleep(interval_s):
                     self.error = f"{type(exc).__name__}: {exc}"
                     self.busy, self.finished = busy, True
@@ -1859,6 +1862,7 @@ class BgsaveAction:
             "after": jsonable(target.final),
             "rdb_path": target.rdb_path,
             "error": target.error or target.read_error,
+            "refusals": target.refusals,
             "role": target.role,
             "sent_at": target.sent_at,
             "replied_at": target.replied_at,
@@ -2537,6 +2541,7 @@ _BGSAVE_DECLARES = Declarations(
                     "after": MAPPING,
                     "rdb_path": TEXT,
                     "error": nullable(str),
+                    "refusals": INTEGER,
                     "role": ConfigField(str, allow_none=True, choices=("primary", "replica")),
                     "sent_at": nullable(float),
                     "replied_at": nullable(float),

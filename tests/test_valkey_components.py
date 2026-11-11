@@ -13,7 +13,7 @@ from valkey.exceptions import ConnectionError as ValkeyConnectionError
 from valkey.exceptions import DataError, ResponseError
 
 from tests.support import VirtualClock
-from tests.valkey_experiments_support import fake_context, registration_for, resolved, unit_plan
+from tests.valkey_experiments_support import evidence_values, fake_context, registration_for, resolved, unit_plan
 from valkey_fuzzer.catalog import load_experiment_yaml
 from valkey_fuzzer.compiler import ScenarioCompileError
 from valkey_fuzzer.components import actions, component_registrations, instances, polling, processes
@@ -656,6 +656,9 @@ def test_bgsave_waits_out_a_save_another_child_is_running(clock, tmp_path, busy,
     assert result.summary.startswith(summary)
     # Sent again only while Valkey said another save was running.
     assert len(client.commands) > 2 if busy == 10_000 else len(client.commands) == (busy + 1 if status == "PASS" else 1)
+    # Each refusal is an error reply the action asked for, which its evidence counts (valkey.oracle.error-counters).
+    [record] = evidence_values(result.evidence, "valkey.bgsave.result")
+    assert record["refusals"] == (0 if status == "FAIL" else len(client.commands) - (status == "PASS"))
 
 
 class _FlakyInfoClient(_BusyClient):

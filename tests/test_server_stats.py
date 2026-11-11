@@ -133,6 +133,9 @@ _UNANSWERED_COMMAND = {
     "evidence": [("valkey.command.replies", [{"instance_id": "valkey-0", "error": "Timeout", "unanswered": True}])]
 }
 _REFUSED_FAULT = {"evidence": [("valkey.fault.injected", {"replies": {"valkey-0": {"error": "ERR no save"}}})]}
+_BUSY_BGSAVE = {"evidence": [("valkey.bgsave.result", {"status": "ok", "refusals": 2})]}
+_REJECTED_BGSAVE = {"evidence": [("valkey.bgsave.result", {"status": "rejected", "refusals": 0})]}
+_ACCEPTED_BGSAVE = {"evidence": [("valkey.bgsave.result", {"status": "ok", "refusals": 0})]}
 _KILLED_FOR_GOOD = {"evidence": [("valkey.instances.expected-down", {"instances": ["valkey-9"]})]}
 _NONE_KILLED = {"evidence": [("valkey.instances.expected-down", {"instances": []})]}
 _FAILED_OVER = {"evidence": [("valkey.failover.result", {"force": True})]}
@@ -186,6 +189,9 @@ _SETS_MAXMEMORY = {"commands": [["CONFIG", "SET", "maxmemory", "1mb"]]}
         ("errorstat_ERR", {"count": 4}, _REFUSED_COMMAND, "commands"),
         ("errorstat_ERR", {"count": 4}, _UNANSWERED_COMMAND, None),
         ("errorstat_ERR", {"count": 4}, _REFUSED_FAULT, "commands"),
+        ("errorstat_ERR", {"count": 4}, _BUSY_BGSAVE, "commands"),
+        ("errorstat_ERR", {"count": 4}, _REJECTED_BGSAVE, "commands"),
+        ("errorstat_ERR", {"count": 4}, _ACCEPTED_BGSAVE, None),
         ("errorstat_READONLY", {"count": 1}, _FAILED_OVER, "links"),
         ("errorstat_MISCONF", {"count": 1}, _DISK, "storage"),
         # The provider's default maxmemory is one no dataset reaches; a scenario that sets one may reach it.

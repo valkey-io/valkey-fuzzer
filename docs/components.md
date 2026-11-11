@@ -789,7 +789,8 @@ see what Valkey did, or never got a save started.
 
 Evidence: `valkey.bgsave.result` per instance (status, observed save types,
 persistence fields before and after, the captured RDB, the instance's `role`
-(`primary` or `replica`),
+(`primary` or `replica`), `refusals` (how many `BGSAVE`s Valkey refused while
+another child ran, before the one it accepted),
 and `sent_at`, `replied_at`, and `finished_at`: when `BGSAVE` was sent, when
 its reply arrived, and when the save was seen finished). An `ok` save also
 records `rdb_format`, read from the first bytes of the RDB: `envelope` (`VCS`
@@ -1406,7 +1407,7 @@ scenario did:
 | --- | --- |
 | `links` | broke replication or cluster links: a component stopped, paused, or partitioned an instance (an [undo obligation](contracts.md#fault-ownership) of kind `process.stopped`, `process.paused`, or `network.partition`), killed one for good or moved a role (`valkey.instances.expected-down` naming an instance, `valkey.chaos.schedule`, `valkey.failover.result`, or `valkey.replication.replicaof` evidence), or is configured with a command that does (`REPLICAOF`, `SLAVEOF`, `FAILOVER`, or any `CLIENT`, `CLUSTER`, or `DEBUG` command of a [`valkey.action.command`](#valkeyactioncommand) or [`valkey.fault.command`](#valkeyfaultcommand)) |
 | `storage` | made writes to disk fail: an undo obligation of kind `disk.filled` or `directory.read-only` |
-| `commands` | sent a command that Valkey answered with an error reply: the [`valkey.workload.command-table`](#valkeyworkloadcommand-table) workload counted one, or a configured command's recorded reply is one |
+| `commands` | sent a command that Valkey answered with an error reply: the [`valkey.workload.command-table`](#valkeyworkloadcommand-table) workload counted one, a configured command's recorded reply is one, or a [`valkey.action.bgsave`](#valkeyactionbgsave) was refused (`refusals`, or status `rejected`) |
 | `memory` | set a `maxmemory` itself, in the deployment's server config, a startup overlay, or a configured `CONFIG SET`; the deployment provider's default is one no experiment's dataset reaches |
 
 Which causes explain which counter:
@@ -1420,8 +1421,8 @@ Which causes explain which counter:
 | `client_output_buffer_limit_disconnections` | `links` |
 | `cluster_*` (FAIL messages, failed nodes and slots) | `links` |
 | `acl_access_denied_*` | `commands` |
-| `errorstat_OOM` | `memory`, `links`, `storage`, `commands` |
-| every other `errorstat_<code>`, and any other watched counter (a module's, a newer build's) | `links`, `storage`, `commands`: once the scenario disturbed the deployment, clients meet `READONLY`, `LOADING`, `CLUSTERDOWN`, `MISCONF`, and the like |
+| `errorstat_OOM` | `memory`, `commands`, `links`, `storage` |
+| every other `errorstat_<code>`, and any other watched counter (a module's, a newer build's) | `commands`, `links`, `storage`: once the scenario disturbed the deployment, clients meet `READONLY`, `LOADING`, `CLUSTERDOWN`, `MISCONF`, and the like |
 
 `FAIL` names each unexplained rise, as `valkey-0: unexpected_error_replies
 rose to 2`. A running instance whose INFO cannot be read within 30 seconds

@@ -82,11 +82,11 @@ _RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("cluster_*", (LINKS,)),
     # A client was denied: only a command the scenario sent can be.
     ("acl_access_denied_*", (COMMANDS,)),
-    ("errorstat_OOM", (MEMORY, LINKS, STORAGE, COMMANDS)),
+    ("errorstat_OOM", (MEMORY, COMMANDS, LINKS, STORAGE)),
     # An error reply (errorstat_<code>), or a counter of a module's or a newer build's: it needs a reason. Either
-    # the scenario disturbed the deployment, so clients met READONLY, LOADING, CLUSTERDOWN, MISCONF, and the
-    # like, or Valkey refused one of its own commands.
-    ("*", (LINKS, STORAGE, COMMANDS)),
+    # Valkey refused one of the scenario's own commands, or the scenario disturbed the deployment, so clients
+    # met READONLY, LOADING, CLUSTERDOWN, MISCONF, and the like.
+    ("*", (COMMANDS, LINKS, STORAGE)),
 )
 
 
@@ -145,6 +145,10 @@ def _got_errors(evidence: Sequence[Evidence]) -> list[str]:
     for item in evidence_of(evidence, "valkey.command.replies"):
         if any("error" in record and not record.get("unanswered") for record in item.value):
             sources.append(item.source)
+    # A BGSAVE refused while another child ran (sent again), or for any other reason.
+    for item in evidence_of(evidence, "valkey.bgsave.result"):
+        if item.value.get("refusals") or item.value.get("status") == "rejected":
+            sources.append(item.source)
     for item in evidence_of(evidence, FAULT_INJECTED):
         replies = item.value.get("replies")
         if isinstance(replies, Mapping) and any(
@@ -162,7 +166,7 @@ def scenario_causes(context: Any, evidence: Sequence[Evidence]) -> dict[str, lis
       configured with a command that does (``REPLICAOF``, ``FAILOVER``, ``CLIENT KILL``, ``DEBUG``, ...).
     - ``storage``: it made writes to disk fail: a filled disk or a read-only directory (an undo obligation).
     - ``commands``: Valkey answered one of its own commands with an error reply: the command-table workload's,
-      or a configured command's.
+      a configured command's, or a BGSAVE of ``valkey.action.bgsave``.
     - ``memory``: it set a ``maxmemory`` itself, in its server settings or with ``CONFIG SET``; the deployment
       provider's default is one no experiment's dataset reaches.
     """
