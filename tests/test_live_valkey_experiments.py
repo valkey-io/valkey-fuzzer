@@ -113,8 +113,9 @@ def test_an_experiment_passes_on_a_real_deployment(runtime, build, fields, then)
 
 
 def _rogue_kill(document):
-    # Directory experiments do not get the shipped experiments' default liveness fragment.
-    document["extends"] = ["valkey.liveness"]
+    # Directory experiments do not get the shipped experiments' default liveness fragment; add it beside whatever
+    # the experiment already extends (cluster-chaos extends valkey.command-table, which defines its `commands`).
+    document["extends"] = [*document.get("extends", []), "valkey.liveness"]
     config = {"when_event": "chaos.wave-validated", "instance": "replica", "signal": "SIGKILL", "restart": False}
     document["components"].insert(0, {"use": "valkey.fault.process-signal", "id": "rogue", "config": config})
 
