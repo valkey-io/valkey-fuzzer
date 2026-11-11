@@ -1734,7 +1734,14 @@ def test_the_faults_check_restarts_a_clusters_nodes_without_a_replica(builds, mo
 
 
 @pytest.mark.parametrize(
-    "setting", [["save", ""], ["appendonly", "no"], ["dbfilename", "x.rdb"], ["shutdown-on-sigterm", "nosave"]]
+    "setting",
+    [
+        ["save", ""],
+        ["appendonly", "no"],
+        ["dbfilename", "x.rdb"],
+        ["shutdown-on-sigterm", "nosave"],
+        ["rdb-version-check", "relaxed"],
+    ],
 )
 def test_a_sequence_that_changes_persistence_gets_only_reloads(builds, setting):
     # A restart after CONFIG SET save "" saves nothing at SIGTERM, and the node comes back without its data by
@@ -1746,6 +1753,38 @@ def test_a_sequence_that_changes_persistence_gets_only_reloads(builds, setting):
 
         assert result.status.value == "PASS", result.summary
         assert {item["fault"] for item in _check(value, "faults")["faults"]} == {"reload"}
+
+
+def test_unreplicated_keys_on_a_node_started_with_appendonly_get_only_reloads(builds):
+    # The walk's test of valkey#1568 replayed: DEBUG POPULATE's keys reach no AOF, and a node whose own
+    # server_config says appendonly loads its AOF at a restart, whatever it saved at shutdown.
+    _replicating()
+    commands = [{"command": ["DEBUG", "POPULATE", 10]}, *_WRITES]
+    kinds = set()
+    for seed in range(1, 9):
+        result, value = run(builds, commands, seed=seed, server_config={"appendonly": "yes"}, checks={"faults": True})
+        assert result.status.value == "PASS", result.summary
+        kinds |= {item["fault"] for item in _check(value, "faults")["faults"]}
+    assert kinds == {"reload"}
+    # Without appendonly a restart loads the RDB saved at shutdown, so restarts stay.
+    kinds = set()
+    for seed in range(1, 9):
+        _, value = run(builds, commands, seed=seed, checks={"faults": True})
+        kinds |= {item["fault"] for item in _check(value, "faults")["faults"]}
+    assert kinds == {"reload", "restart"}
+
+
+@pytest.mark.parametrize(
+    ("config", "commands"),
+    [({"maxmemory": "2mb"}, []), ({}, [{"command": ["CONFIG", "SET", "maxmemory", "2mb"]}])],
+)
+def test_no_fault_is_injected_under_a_maxmemory(builds, config, commands):
+    # The walk's test of valkey#4354 replayed: a DEBUG RELOAD under maxmemory 6mb with allkeys-random evicted
+    # other keys than the node held, and the check called it lost data.
+    result, value = run(builds, [*commands, *_WRITES], server_config=config, checks={"faults": True})
+
+    assert result.status.value == "PASS", result.summary
+    assert _check(value, "faults")["outcome"] == "skipped"
 
 
 def test_a_reload_that_fails_in_the_faults_check_fails_the_run(builds, monkeypatch):

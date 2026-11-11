@@ -379,6 +379,9 @@ _PERSISTENCE_SETTINGS = (
     "appenddirname",
     "dir",
     "shutdown-on-sigterm",
+    # What a start replays from the AOF it may refuse without: RESTORE of a payload of a future RDB version (the
+    # walk's test of valkey#1604 replayed).
+    "rdb-version-check",
 )
 
 
@@ -1058,6 +1061,9 @@ class _Checks:
             )
         if _delays_persistence(self.commands, self.server_config):
             return _skipped("the sequence delays each key a save or a load takes, so no restart or reload ends")
+        if _limits_memory(self.commands, self.server_config):
+            # A load under the limit evicts other keys than the node held (the walk's test of valkey#4354 replayed).
+            return _skipped("the sequence sets a maxmemory, so a load evicts by design")
         nodes = self.config["nodes"]
         # A single standalone node gets a replica, the side's last node; several nodes or a cluster keep the
         # topology the sequence sets up.
@@ -1071,19 +1077,21 @@ class _Checks:
         rng = self.context.rng(self.spec.id, "faults")
         # Each fault comes before a command, or after the last one (before == len(commands)).
         gaps = rng.sample(range(1, len(self.commands) + 1), k=min(len(self.commands), rng.randint(1, 3)))
-        kinds = ("reload",) if _changes_persistence(self.commands) else _FAULTS
+        # DEBUG POPULATE's keys reach no AOF (fuzzer#86), and an AOF replays its commands without the DEBUG
+        # SET-* settings they ran under, which a restart drops (a RESTORE of a payload whose checksum was not
+        # checked is refused): only an RDB saved at shutdown keeps the data as it was. Nor may the node load an AOF
+        # the sequence put in place (the walk's test of valkey#1614 replayed).
+        rdb_only = _writes_unreplicated(self.commands) or _debug_settings(self.commands) or _plants_aof(self.files)
+        # A node the sequence's own server_config starts with appendonly loads its AOF whatever it saved at
+        # shutdown (the walk's test of valkey#1568 replayed): only a DEBUG RELOAD keeps such data.
+        aof_on = str(self.server_config.get("appendonly", "no")).lower() == "yes"
+        kinds = ("reload",) if _changes_persistence(self.commands) or (rdb_only and aof_on) else _FAULTS
         schedule = [
             {"before": before, "fault": rng.choice(kinds), "node": rng.randrange(nodes + (replica is not None))}
             for before in sorted(gaps)
         ]
         persistence = rng.choice(_PERSISTENCE)
-        if _writes_unreplicated(self.commands) or _debug_settings(self.commands):
-            # DEBUG POPULATE's keys reach no AOF (fuzzer#86), and an AOF replays its commands without the DEBUG
-            # SET-* settings they ran under, which a restart drops (a RESTORE of a payload whose checksum was not
-            # checked is refused): only an RDB saved at shutdown keeps the data as it was.
-            persistence = _PERSISTENCE[0]
-        if _plants_aof(self.files):
-            # Nor may the node load an AOF the sequence put in place (the walk's test of valkey#1614 replayed).
+        if rdb_only:
             persistence = _PERSISTENCE[0]
         side, failed = self.start(
             "candidate.faults", nodes=nodes + (replica is not None), options={**_QUICK_SYNC, **persistence}
