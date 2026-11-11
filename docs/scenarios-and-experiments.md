@@ -184,6 +184,10 @@ Each instance starts with these settings, which `server_config`,
 - `--enable-debug-assert yes`: Valkey's assertions that are too costly for
   production run, as in Valkey's own test suite (a build older than 8.0, which
   lacks the config, starts without it);
+- `--sanitize-dump-payload yes`, so every RDB payload a server loads (its own
+  file at a restart, a full sync's, a `RESTORE`'s) is validated in full, and
+  data a server wrote wrongly stops the load instead of corrupting the server
+  that loaded it (Valkey 10 always validates, and only accepts the option);
 - in cluster mode, `--cluster-node-timeout 1000` and
   `--cluster-require-full-coverage no`.
 

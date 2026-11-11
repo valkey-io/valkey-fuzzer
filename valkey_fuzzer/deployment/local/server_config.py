@@ -78,6 +78,10 @@ DEFAULT_SERVER_CONFIG = {
     # verified against fresh ones, expiry and key tables in step, entry counts) and that Valkey's own test suite
     # runs with. Valkey 8.0 introduced the config; an older build starts without it (UNOBSERVABLE_CONFIGS).
     "enable-debug-assert": "yes",
+    # Every RDB payload a server loads (its own file at a restart, a full sync's, a RESTORE's) is validated in
+    # full, as Valkey's own tests have it: data a server wrote wrongly then stops the load with a report instead
+    # of corrupting the server that loaded it. Valkey 10 always does so, and only accepts the option.
+    "sanitize-dump-payload": "yes",
 }
 # Cluster mode adds fast failure detection and keeps serving with slots uncovered.
 CLUSTER_DEFAULT_SERVER_CONFIG = {"cluster-node-timeout": "1000", "cluster-require-full-coverage": "no"}

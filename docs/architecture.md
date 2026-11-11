@@ -349,6 +349,7 @@ touches nothing else. `provision`:
    `appendfsync everysec`, `save ""`, `maxmemory 500mb`, `loglevel notice`,
    `crash-memcheck-enabled no`, `enable-debug-assert yes`,
    and in cluster mode `cluster-node-timeout 1000` and
+   `sanitize-dump-payload yes`, and in cluster mode `cluster-node-timeout 1000` and
    `cluster-require-full-coverage no`) under that config, exactly the
    effective config the plan records;
 2. **checks every planned port** right after planning, before resolving

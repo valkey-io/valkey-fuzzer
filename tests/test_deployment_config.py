@@ -159,6 +159,10 @@ def test_instances_start_with_exactly_the_effective_config_the_plan_records(tmp_
     assert primary["crash-memcheck-enabled"] == "no"
     # Valkey's debug-only assertions are on, as in its own test suite.
     assert primary["enable-debug-assert"] == "yes"
+    # RDB payloads are validated in full, unless the deployment says otherwise.
+    assert (primary["sanitize-dump-payload"], replica["sanitize-dump-payload"]) == ("yes", "yes")
+    relaxed = runtime.compile(_scenario({**deployment, "server_config": {"sanitize-dump-payload": "no"}}))
+    assert to_plain_data(relaxed.instances)["valkey-0"]["server_config"]["sanitize-dump-payload"] == "no"
 
     config, plans = LocalDeploymentProvider._prepare(plan)
     for item in plans:
