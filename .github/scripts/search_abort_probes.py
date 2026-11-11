@@ -857,7 +857,90 @@ def multi_exec_search(r):
     _ignore(run)
 
 
+# --------------------------------------------------------------------------
+# OR-proximity family (variant analysis of #118): the OR-proximity iterator has
+# the same CHECK(current_position_) as proximity.cc:187. Two controls reduce
+# #118; two hypotheses nest a phrase in an OR branch so the OrProximityIterator
+# sees an un-positioned phrase (orproximity.cc:112). Each builds a HASH index
+# with TEXT/TAG/NUMERIC and WITHSUFFIXTRIE, then runs one FT.SEARCH.
+# --------------------------------------------------------------------------
+def _vp_index(r, index):
+    _ignore(lambda: r.execute_command("FT.DROPINDEX", index))
+    r.execute_command(
+        "FT.CREATE",
+        index,
+        "ON",
+        "HASH",
+        "PREFIX",
+        "1",
+        f"{index}:d:",
+        "SCHEMA",
+        "title",
+        "TEXT",
+        "w",
+        "TEXT",
+        "NOSTEM",
+        "WITHSUFFIXTRIE",
+        "c",
+        "TAG",
+        "n",
+        "NUMERIC",
+    )
+    r.hset(f"{index}:d:1", mapping={"title": "hello word3", "w": "lulu gama alp alpine", "c": "d2", "n": 1})
+    r.hset(f"{index}:d:2", mapping={"title": "late doc", "w": "alpine gama", "c": "d3", "n": 2})
+    r.hset(f"{index}:d:3", mapping={"title": "hello word1", "w": "bitter lulu", "c": "d2", "n": 3})
+
+
+def orprox_control_and_or_nontext_phrase(r):
+    """proximity.cc:187 control: AND around an OR whose branches AND a non-text predicate with an exact phrase."""
+    _vp_index(r, "vpa")
+    _ignore(
+        lambda: r.execute_command(
+            "FT.SEARCH", "vpa", '((@n:[-inf +inf] "lulu gama") | (@c:{d2} "gama alp")) @n:[-inf +inf]', "DIALECT", "2"
+        )
+    )
+
+
+def orprox_control_outer_text(r):
+    """proximity.cc:187 control variant: the outer AND uses a text predicate."""
+    _vp_index(r, "vpb")
+    _ignore(
+        lambda: r.execute_command(
+            "FT.SEARCH", "vpb", '((@n:[-inf +inf] "lulu gama") | (@c:{d2} "gama alp")) @w:alpine', "DIALECT", "2"
+        )
+    )
+
+
+def orprox_phrases_under_and(r):
+    """orproximity.cc:112 hypothesis: an OR of two (phrase AND non-text) branches, ANDed with a phrase in w."""
+    _vp_index(r, "vpc")
+    _ignore(
+        lambda: r.execute_command(
+            "FT.SEARCH", "vpc", '(("lulu gama" @n:[-inf +inf]) | ("gama alp" @c:{d2})) @w:"alpine gama"', "DIALECT", "2"
+        )
+    )
+
+
+def orprox_negated_phrase_in_branch(r):
+    """orproximity.cc:112 hypothesis: a negated phrase nested in the OR-of-nontext-AND shape (the kContainsNegate
+    exception of the skip-text guard)."""
+    _vp_index(r, "vpd")
+    _ignore(
+        lambda: r.execute_command(
+            "FT.SEARCH",
+            "vpd",
+            '((@n:[-inf +inf] "lulu gama") | (@c:{d2} -"gama alp")) @w:"alpine gama"',
+            "DIALECT",
+            "2",
+        )
+    )
+
+
 PROBES = [
+    orprox_control_and_or_nontext_phrase,
+    orprox_control_outer_text,
+    orprox_phrases_under_and,
+    orprox_negated_phrase_in_branch,
     text_and_or_phrase_tag,
     text_and_or_phrase_numeric,
     text_inorder_slop_phrase,
