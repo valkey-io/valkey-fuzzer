@@ -140,7 +140,7 @@ usual mode.
 
 ```bash
 valkey-fuzzer run examples/valkey/aof_durability.yaml --output report.json --output-format json --verbose
-valkey-fuzzer run --seed 42 --experiment valkey.rdb-compression --profile pr-quick
+valkey-fuzzer run --seed 42 --experiment valkey.aof-durability --profile pr-quick
 ```
 
 Compiles the scenario, runs it, and writes its report folder. Without a
@@ -169,7 +169,7 @@ The report records the scenario as run, including a `--valkey-binary` or
 ```bash
 valkey-fuzzer run --random                                    # an experiment drawn from those that opt in
 valkey-fuzzer run --seed 42 --experiment valkey.replication-partial-resync --profile pr-quick
-valkey-fuzzer run --random --experiment valkey.snapshot-equivalence --exclude server_config.rdbcompression=zstd
+valkey-fuzzer run --random --experiment valkey.snapshot-equivalence --exclude server_config.io-threads=4
 valkey-fuzzer run --random --experiment valkey.cluster-chaos
 valkey-fuzzer run --random --export-scenario s.yaml
 ```
@@ -209,20 +209,15 @@ with a header naming its seed and experiment; `valkey-fuzzer run
 `excludes`, `boundary` (how many drawn values were a
 range edge or the first or last listed value), and `profile`.
 
-zstd needs a build made with `BUILD_ZSTD=yes`. On other builds a scenario that
-draws it is `SKIP_UNSUPPORTED` (the experiments probe their builds with the
-drawn configuration); `--exclude server_config.rdbcompression=zstd --exclude
-server_config.repl-compression=zstd` avoids drawing it.
-
 ## batch
 
 ```bash
 valkey-fuzzer batch --random all --seeds 5 --profile pr-quick --workers 4
-valkey-fuzzer batch examples/valkey/forkless_batch.yaml --workers 2 --out forkless-batch
+valkey-fuzzer batch examples/valkey/cluster_election_batch.yaml --workers 2 --out election-batch
 valkey-fuzzer batch --scenarios proposals/ --profile candidate --valkey-binary ./valkey-server
 valkey-fuzzer batch --zoo BUILDS --workers 2
-valkey-fuzzer batch --failures forkless-batch --serial-reruns 2
-valkey-fuzzer batch --resume forkless-batch
+valkey-fuzzer batch --failures election-batch --serial-reruns 2
+valkey-fuzzer batch --resume election-batch
 valkey-fuzzer batch --random all --seeds 20 --guided 400 --valkey-binary ~/valkey-gcov/src/valkey-server --workers 8
 ```
 
@@ -253,13 +248,13 @@ sources:
       experiments: all               # or a list of experiment IDs
       seeds: 50                      # per experiment; default the profile's, else 1
       first_seed: 0                  # default: a fresh one, recorded in jobs.json
-      excludes: [server_config.rdbcompression=zstd]
+      excludes: [server_config.io-threads=4]
       base: {deployment: {replicas_per_primary: 1}}   # a partial scenario over every draw
       guided: 400                    # then 400 runs derived from the corpus (default 0)
   - matrix:
       seed: 2026
       seeds_per_case: 1
-      base: {scenario_id: forkless, experiment: {id: valkey.forkless-save}, deployment: {mode: standalone}}
+      base: {scenario_id: snapshot, experiment: {id: valkey.snapshot-equivalence}, deployment: {mode: standalone}}
       dimensions:
         deployment.replicas_per_primary: [0, 1]
         experiment.inputs.mutation_rate: [0, 1500]
@@ -524,25 +519,24 @@ Each experiment (abbreviated):
 
 ```json
 {
-  "id": "valkey.rdb-compression",
-  "description": "BGSAVE (fork or forkless) and restart reload ...",
+  "id": "valkey.snapshot-equivalence",
+  "description": "Deterministic workload, quiesced BGSAVE, and dataset/RDB/reply digests ...",
   "mode": "experiment",
   "directory": null,
-  "deployment_modes": ["standalone"],
+  "deployment_modes": ["standalone", "cluster"],
   "deployment_requirements": {"type": "object", "properties": {}, "required": [], "additionalProperties": true},
   "inputs": {
     "type": "object", "required": [], "additionalProperties": false,
     "properties": {"operations": {"type": "integer", "minimum": 1, "maximum": 1000000, "default": 3000}, "...": {}}
   },
   "generator": {
-    "declaration": {"inputs": {"operations": {"minimum": 1, "maximum": 3000}}, "server_config": ["valkey.pool.compression"]},
-    "pools": {"valkey.pool.compression": {"rdbcompression": ["no", "yes", "lzf", "lz4", "zstd"], "scope": ["deployment", "role"]}}
+    "declaration": {"inputs": {"value_size": {"values": [1, 64, 1024, 8192]}}, "server_config": ["valkey.pool.persistence"]},
+    "pools": {"valkey.pool.persistence": {"appendonly": ["yes", "no"], "appendfsync": ["always", "everysec", "no"]}}
   },
   "components": [{"id": "writes", "use": "valkey.workload.key-value", "role": "workload", "depends_on": [],
                   "required": true, "timeout_s": null, "config": {"max_ops": {"$ref": "inputs.operations"}}}],
-  "startup_overlays": [{"overlay_id": "save-and-reload", "selector": {"first": false, "instance_ids": [], "roles": []},
-                        "server_config": {}, "conflict_policy": "override"}],
-  "required_events": ["writes.drained", "restart.completed"],
+  "startup_overlays": [],
+  "required_events": ["writes.drained"],
   "required_evidence": [{"evidence_id": "valkey.dataset.digest", "source": "dataset", "min_count": 1}]
 }
 ```
@@ -628,7 +622,7 @@ component's random choices, not timing.
 ## diff
 
 ```bash
-valkey-fuzzer diff examples/valkey/differential_fork_vs_forkless.yaml --seed 7 --output diff.json
+valkey-fuzzer diff examples/valkey/differential_baseline_vs_candidate.yaml --seed 7 --output diff.json
 ```
 
 Runs one base scenario, with the same seed, under two or more variants and
@@ -637,7 +631,7 @@ compares evidence fields across them. `--seed` overrides the base seed, and
 under `<root>/differential/<name>/`, next to `differential.json`.
 
 ```yaml
-differential_id: fork-vs-forkless
+differential_id: aof-off-vs-on
 base:
   scenario_id: snapshot-equivalence
   seed: 41
@@ -648,17 +642,15 @@ base:
     mode: standalone
     base_port: 7620
 variants:
-  fork:
-    deployment.server_config: {bgsave-default-method: fork, forkless-infrastructure-enabled: "yes"}
-  forkless:
-    deployment.server_config: {bgsave-default-method: forkless, forkless-infrastructure-enabled: "yes"}
+  aof-off:
+    deployment.server_config: {appendonly: "no"}
+  aof-on:
+    deployment.server_config: {appendonly: "yes"}
 compare:
   equal:
     - {evidence_id: valkey.dataset.digest, source: dataset, field: digest}
     - {evidence_id: valkey.rdb.reload-verified, source: snapshot, field: content_digest}
     - {evidence_id: valkey.workload.ledger, source: writes, field: replies_digest}
-  differ:
-    - {evidence_id: valkey.bgsave.result, source: bgsave, field: after.rdb_last_bgsave_type}
 ```
 
 | Field | Required | Meaning |

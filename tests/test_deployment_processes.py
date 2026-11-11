@@ -24,7 +24,7 @@ from tests.deployment_support import (
 from tests.support import VirtualClock, valkey_build
 from valkey_fuzzer.commands.run import cleanup_logs
 from valkey_fuzzer.components.server import PrivateServer
-from valkey_fuzzer.deployment.local import cluster_nodes, processes, queries
+from valkey_fuzzer.deployment.local import cluster_nodes, processes, queries, server_config
 from valkey_fuzzer.deployment.local.formation import SETTLE_TIMEOUT_S, Formation
 from valkey_fuzzer.deployment.local.models import DeploymentMode, LocalDeploymentError
 from valkey_fuzzer.deployment.local.planner import plan_deployment
@@ -61,25 +61,28 @@ def test_the_instance_command_carries_the_mode_the_config_and_the_address(mode):
     assert isolated[isolated.index("--bind-source-addr") + 1] == "127.0.0.3"
 
 
-# A fork or forkless save, in the config each side of valkey-io/valkey#5261 knows.
-_SAVE_METHOD = {
-    "bgsave-default-method": {"fork": "fork", "forkless": "forkless"},
-    "forkless-policy": {"fork": "require-fork", "forkless": "prefer-forkless"},
-}
+# A config Valkey renamed, and one value of it, in the name and values each side of the rename knows.
+_RENAMED = {"old-option": {"a": "a", "b": "b"}, "new-option": {"a": "new-a", "b": "new-b"}}
 
 
-@pytest.mark.parametrize("method", ["fork", "forkless"])
-@pytest.mark.parametrize("written", list(_SAVE_METHOD))
-@pytest.mark.parametrize("knows", list(_SAVE_METHOD), ids=["before-5261", "after-5261"])
-def test_a_build_starts_with_the_save_method_config_by_the_name_it_knows(tmp_path, method, written, knows):
-    binary = str(valkey_build(tmp_path, knows))
-    config = {written: _SAVE_METHOD[written][method], "rdbcompression": "fork"}
+@pytest.fixture
+def renamed(monkeypatch):
+    monkeypatch.setattr(server_config, "RENAMED_CONFIGS", {"old-option": ("new-option", _RENAMED["new-option"])})
+    monkeypatch.setattr(server_config, "_RENAMED_NAMES", set(_RENAMED))
+
+
+@pytest.mark.parametrize("value", ["a", "b"])
+@pytest.mark.parametrize("written", list(_RENAMED))
+@pytest.mark.parametrize("knows", list(_RENAMED), ids=["before-rename", "after-rename"])
+def test_a_build_starts_with_a_renamed_config_by_the_name_it_knows(tmp_path, renamed, value, written, knows):
+    binary = str(valkey_build(tmp_path, next(name for name in _RENAMED if name != knows)))
+    config = {written: _RENAMED[written][value], "appendfilename": "a"}
     command = process_manager(valkey_binary=binary).build_instance_command(7000, "/d", "/l", config)
-    # Only the renamed config changes: an rdbcompression of "fork" stays as written.
-    assert command[-4:] == [f"--{knows}", _SAVE_METHOD[knows][method], "--rdbcompression", "fork"]
-    private = PrivateServer(binary, [f"--{written}", _SAVE_METHOD[written][method]])
+    # Only the renamed config changes: another config whose value is one of its values stays as written.
+    assert command[-4:] == [f"--{knows}", _RENAMED[knows][value], "--appendfilename", "a"]
+    private = PrivateServer(binary, [f"--{written}", _RENAMED[written][value]])
     try:
-        assert f"--{knows} {_SAVE_METHOD[knows][method]}" in private.start()
+        assert f"--{knows} {_RENAMED[knows][value]}" in private.start()
     finally:
         private.stop()
 

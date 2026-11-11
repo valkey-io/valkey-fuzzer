@@ -622,7 +622,7 @@ result = context.call(Touch().run, spec)
 `tests/test_live_valkey_experiments.py` runs every Valkey experiment against
 real servers. It uses `VALKEY_FUZZER_BINARY` (or `valkey-server` on `PATH`),
 and `VALKEY_FUZZER_OLD_BINARY` for the mixed-version, rolling-upgrade, and
-baseline-versus-candidate tests. Tests that need forkless save, root, tmpfs,
+baseline-versus-candidate tests. Tests that need root, tmpfs,
 or iptables skip when the host lacks them.
 
 ```bash

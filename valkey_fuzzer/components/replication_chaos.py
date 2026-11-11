@@ -19,10 +19,9 @@
 - ``stall {target, duration_s}``: ``SIGSTOP``, then ``SIGCONT``;
 - ``backlog_pressure {repl_backlog_size, output_limit, duration_s}``: shrink
   the primary's replication backlog and replica output buffer limit;
-- ``compression {target, value, duration_s}``: ``CONFIG SET repl-compression``.
 
-Targets are ``primary``, ``replica``, ``any``, an instance ID, ``all`` (for
-``compression``) or ``killed`` (for ``restart``); roles are the ones at the
+Targets are ``primary``, ``replica``, ``any``, an instance ID, or ``killed``
+(for ``restart``); roles are the ones at the
 start of the wave. Kill safety (the standalone policy of the engine's
 ``TargetSelector``): a kill never takes the last instance that is not down,
 so one copy of the latest synced data stays live. A promotion needs a live replica that is not stalled
@@ -80,7 +79,6 @@ from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.schema import ConfigField, ConfigSchema
 
 from .capabilities import iptables_supported
-from .compression import unsettled_links
 from .instances import (
     close_quietly,
     follows,
@@ -100,8 +98,6 @@ from .waves import WaveAction, WaveRun, wave_registration
 # How often the primary's replication offset is sampled during a wave.
 _SAMPLE_INTERVAL_S = 0.1
 _INFO_TIMEOUT_S = 1.0
-# How long a repl-compression restore waits for every link to renegotiate (one link per second per primary).
-CODEC_SETTLE_S = 15.0
 
 
 @dataclass
@@ -139,7 +135,7 @@ def excusing_operations(record: Mapping[str, Any], records: Sequence[Mapping[str
     other finished and acted on an instance the other involves: a kill,
     stall, or partition of that instance; a promotion, which changes the
     primary and repoints every replica; a repoint or restart of it; or a
-    backlog or compression change on it, which drops replica links (on the
+    backlog change on it, which drops replica links (on the
     primary, every replica's link).
     """
 
@@ -544,32 +540,9 @@ class StandaloneWaves(WaveRun):
         )
         self.hold(record, self.ids, config["duration_s"])
 
-    def _compression(self, record: dict[str, Any], config: dict[str, Any]) -> None:
-        targets = record["target"] if isinstance(record["target"], list) else [record["target"]]
-        if not self.claim(record, targets):
-            return
-        targets = self.reachable(record, targets)
-        if not targets:
-            return
-        for target in targets:
-            self.set_config(record, target, {"repl-compression": config["value"]})
-        with self.lock:
-            primary = self.primary
-        # On the primary, a new value renegotiates every replica's link.
-        affected = self.ids if primary in targets else [*targets, primary]
-        self.hold(record, affected, config["duration_s"])
-
     def set_config(self, record: dict[str, Any], instance_id: str, settings: Mapping[str, Any]) -> None:
         """``CONFIG SET`` ``settings`` on ``instance_id``, owned (``server.config``) until the values read
-        before are back; an instance whose process is gone restarts with its startup config instead.
-
-        Restoring ``repl-compression`` also waits, up to :data:`CODEC_SETTLE_S`,
-        until every link renegotiated (:func:`unsettled_links`): Valkey drops
-        and reconnects the links only after the ``CONFIG SET``, and a drop
-        after the wave would land in the next one (in s100166 it stopped a
-        ``FAILOVER TO``). Links still unsettled then are recorded under
-        ``codecs_unsettled``, for ``valkey.oracle.repl-compression`` to judge.
-        """
+        before are back; an instance whose process is gone restarts with its startup config instead."""
 
         saved = {name: self.command(instance_id, "CONFIG", "GET", name)[1] for name in settings}
 
@@ -577,15 +550,6 @@ class StandaloneWaves(WaveRun):
             if self.handle.is_alive(instance_id):
                 for name, value in saved.items():
                     self.command(instance_id, "CONFIG", "SET", name, value)
-            if "repl-compression" in saved:
-
-                def links() -> tuple[bool, list[str]]:
-                    problems = unsettled_links(self.handle)
-                    return not problems, problems
-
-                settled, problems = poll_until(links, timeout_s=CODEC_SETTLE_S, interval_s=0.2, context=self.context)
-                if not settled:
-                    record["codecs_unsettled"] = problems
 
         self.own(record, "server.config", instance_id, restore)
         for name, value in settings.items():

@@ -63,7 +63,7 @@ def test_every_listed_bound_and_enum_is_what_compiling_enforces_and_a_scenario_f
                         runtime.compile(bad)
                     assert getattr(caught.value, "path", None) == f"{where}.{name}", (row["id"], name, value)
                     rejected += 1
-    assert compiled >= 14 and rejected > 100
+    assert compiled >= 11 and rejected > 100
     # Every component and generator hook is listed, as text and as JSON with its config schema.
     _, out = _cli(capsys, "list", "components", "--format", "json")
     assert {row["component_id"] for row in json.loads(out)} == {item.component_id for item in component_registrations()}
@@ -72,7 +72,7 @@ def test_every_listed_bound_and_enum_is_what_compiling_enforces_and_a_scenario_f
         assert code == 0 and len(out.splitlines()) >= 3
 
 
-GOOD = "scenario_id: good\nseed: 1\nexperiment: {id: valkey.rdb-compression, inputs: {rdbcompression: lz4}}\n"
+GOOD = "scenario_id: good\nseed: 1\nexperiment: {id: valkey.aof-durability, inputs: {appendfsync: always}}\n"
 GOOD += "deployment: {mode: standalone}\n"
 DRAFT = (
     "id: draft.bgsave\nmode: smoke\ndeployment: {modes: [standalone]}\ninputs: {properties: {expect: {type: string}}}\n"
@@ -80,11 +80,11 @@ DRAFT = (
 )
 CASES = [
     (GOOD, []),
-    (GOOD.replace("lz4", "brotli"), ["experiment.inputs.rdbcompression"]),
+    (GOOD.replace("always", "sometimes"), ["experiment.inputs.appendfsync"]),
     (GOOD.replace("mode: standalone", "mode: cluster"), ["deployment.mode"]),
     (GOOD.replace("seed: 1", "seed: 1\nretries: 3"), ["retries"]),
-    (GOOD.replace("valkey.rdb-compression", "valkey.no-such"), ["experiment.id"]),
-    (GOOD.replace("valkey.rdb-compression, inputs: {rdbcompression: lz4}", "draft.bgsave, inputs: {expect: maybe}"),
+    (GOOD.replace("valkey.aof-durability", "valkey.no-such"), ["experiment.id"]),
+    (GOOD.replace("valkey.aof-durability, inputs: {appendfsync: always}", "draft.bgsave, inputs: {expect: maybe}"),
      ["components.save.config.expect"]),
     ("scenario_id: [\n", [""]),
     (None, [""]),  # a file that does not exist
@@ -106,7 +106,7 @@ def test_validate_reports_every_file_with_structured_errors_and_passes_only_if_a
     assert [(row["file"], row["ok"], [error["path"] for error in row["errors"]]) for row in rows] == [
         (path, not paths, paths) for path, (_, paths) in zip(files, CASES)
     ]
-    assert (rows[0]["experiment"], rows[0]["scenario_id"]) == ("valkey.rdb-compression", "good")
+    assert (rows[0]["experiment"], rows[0]["scenario_id"]) == ("valkey.aof-durability", "good")
     assert all(error["message"] for row in rows for error in row["errors"])
     assert _cli(capsys, "validate", files[0], files[0])[0] == 0
     code, out = _cli(capsys, "validate", files[0], files[1])

@@ -35,19 +35,19 @@ Examples (paths are relative to a checkout of the repository):
   valkey-fuzzer list experiments
   valkey-fuzzer validate examples/valkey/aof_durability.yaml
   valkey-fuzzer run examples/valkey/aof_durability.yaml --output report.json
-  valkey-fuzzer run examples/valkey/forkless_save.yaml --timeout 300 --verbose
+  valkey-fuzzer run examples/valkey/cluster_chaos.yaml --timeout 300 --verbose
   valkey-fuzzer replay report.json
   valkey-fuzzer minimize report.json --output minimized.yaml
-  valkey-fuzzer diff examples/valkey/differential_fork_vs_forkless.yaml
+  valkey-fuzzer diff examples/valkey/differential_baseline_vs_candidate.yaml
 
   # One random scenario of an experiment that declares metadata.generator
   valkey-fuzzer run --random
   valkey-fuzzer run --random --experiment valkey.cluster-chaos
-  valkey-fuzzer run --seed 42 --experiment valkey.rdb-compression --profile pr-quick
+  valkey-fuzzer run --seed 42 --experiment valkey.aof-durability --profile pr-quick
 
   # Many runs: random seeds, a matrix, scenario files, the bug zoo, earlier failures
   valkey-fuzzer batch --random all --seeds 5 --profile pr-quick --workers 4
-  valkey-fuzzer batch examples/valkey/forkless_batch.yaml --workers 2
+  valkey-fuzzer batch examples/valkey/cluster_election_batch.yaml --workers 2
   valkey-fuzzer batch --zoo BUILDS --workers 2
   valkey-fuzzer batch --resume BATCH_FOLDER
 

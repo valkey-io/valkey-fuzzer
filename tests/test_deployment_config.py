@@ -197,7 +197,7 @@ def test_instances_start_with_exactly_the_effective_config_the_plan_records(tmp_
 @pytest.mark.parametrize("overlay", [None, {"appendonly": "yes", "appendfsync": "everysec"}])
 def test_a_scenario_relying_on_the_defaults_is_checked_like_one_that_spells_them_out(tmp_path, overlay):
     document = copy.deepcopy(yaml.safe_load((EXPERIMENT_DIRECTORY / "valkey.aof-durability.yaml").read_text()))
-    document.update(id="tests.aof-defaults", extends=["valkey.base", "valkey.compression"])
+    document.update(id="tests.aof-defaults", extends=["valkey.base"])
     if overlay is None:
         document.pop("startup_overlays")
     else:

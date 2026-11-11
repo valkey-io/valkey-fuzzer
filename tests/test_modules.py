@@ -11,7 +11,6 @@ from typing import ClassVar
 
 import pytest
 
-from tests.test_compression_evidence import _bgsave
 from tests.test_valkey_components import FakeHandle, _spec
 from tests.valkey_experiments_support import evidence_values, fake_context, resolved, unit_plan, valkey_service
 from valkey_fuzzer.components import capabilities, providers, snapshots
@@ -22,6 +21,7 @@ from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.provenance import artifact_digests, replayed_drift
 from valkey_fuzzer.references import EnvironmentKind, parse_environment_reference
+from valkey_fuzzer.results import Evidence
 from valkey_fuzzer.service import with_artifact_paths
 from valkey_fuzzer.testing import FakeContext
 
@@ -178,6 +178,26 @@ def test_a_dataset_of_builtin_types_starts_no_probe(tmp_path, probe_servers):
 
     assert _digest(context).status.value == "PASS"
     assert probe_servers.started == []
+
+
+_PLAIN = b"VALKEY081\xfa" + b"\x00" * 16
+
+
+def _bgsave(tmp_path, instance_id="valkey-0", data=_PLAIN, sent_at=10.0, captured=True):
+    path = tmp_path / f"{instance_id}.rdb"
+    path.write_bytes(data)
+    value = {
+        "instance_id": instance_id,
+        "role": "primary",
+        "status": "ok" if captured else "err",
+        "reply": "Background saving started",
+        "sent_at": sent_at,
+        "replied_at": sent_at + 0.01,
+        "finished_at": sent_at + 1,
+    }
+    if captured:
+        value["rdb_artifact"] = str(path)
+    return Evidence("valkey.bgsave.result", "bgsave", "action.completed", 1.0, value)
 
 
 def test_the_rdb_reload_loads_the_saving_instances_modules_unless_load_config_loads_its_own(tmp_path, monkeypatch):

@@ -1,9 +1,0 @@
-description: >-
-  RENAME over an existing key of the same name length during a forkless save leaves the destination's
-  freed entry pointer in the iterator's early-iterate table, and the renamed key's reallocated entry
-  collides with it (valkey-io/valkey#4604 bug 3; #4996 is reverted).
-catches: valkey.oracle.liveness (the primary trips the wasAdded assertion in bgIteration_updateDbEntryPtr)
-scenarios:
-  - {file: scenario.yaml, fail: [liveness]}
-runs: 5
-min_detection_rate: 1.0

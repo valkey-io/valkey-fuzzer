@@ -29,7 +29,6 @@ from valkey_fuzzer.protocols import component_artifact_dir
 from valkey_fuzzer.results import ComponentStatus, Evidence, evidence_of, make_evidence, make_result
 from valkey_fuzzer.schema import ConfigError, ConfigField, plain_config
 
-from .compression import LOADED_COMPRESSED, RDB_STREAM_CODECS, rdb_format
 from .files import read_jsonl, write_jsonl
 from .instances import deployment, instance_at, is_cluster, stopped_on_purpose, unreachable_instances
 from .keyspace import BUILTIN_TYPES, dump_body, keyspace_digest, keyspace_snapshot
@@ -60,12 +59,6 @@ _RDB_FIELDS = {
     "bgsave": ConfigField(str),
     "workload": ConfigField(str, allow_none=True, default=None),
     "timeout_s": ConfigField(float, default=60.0, minimum=1, maximum=3600),
-    # The whole-stream codec every RDB must be in: none, lz4, zstd, or an
-    # rdbcompression value (no, yes, and lzf write none).
-    "expect_codec": ConfigField(str, allow_none=True, default=None, choices=(*RDB_STREAM_CODECS, None)),
-    # With expect_codec: the saving instance's own log must show it loaded
-    # data in that codec during the run (e.g. after a restart).
-    "instance_reload": ConfigField(bool, default=False),
     # Load with this binary instead of the saving instance's (cross-binary
     # compatibility); usually an artifact reference.
     "load_binary": ConfigField(str, allow_none=True, default=None, reference=True),
@@ -78,7 +71,6 @@ _RDB_FIELDS = {
 
 # The loading server's verdict on an RDB it could not load at startup.
 _LOAD_REFUSED = "Fatal error loading the DB"
-_DB_LOADED = re.compile(r"DB loaded from (disk|append only file)")
 _EXIT_STATUS = re.compile(r"^exit status (-?\d+)\n")
 
 
@@ -94,8 +86,6 @@ def _validate_rdb(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -> Non
         )
     if plain_config(bgsave.config).get("capture_rdb") is False:
         raise ConfigError(f"bgsave {config['bgsave']!r} sets capture_rdb: false, so it captures no RDB to check")
-    if config["instance_reload"] and config["expect_codec"] is None:
-        raise ConfigError("instance_reload checks the codec of a reload, so it needs expect_codec")
     if config["refused_log"] is not None:
         if config["expect"] != "refused":
             raise ConfigError("refused_log applies only with expect: refused")
@@ -161,25 +151,6 @@ def load_rdb(
         owned.discharge()
 
 
-def codec_problems(expected: str, result: dict[str, Any], load_log: Optional[list[str]]) -> list[str]:
-    """Why the saved RDB is not in codec ``expected`` (none, lz4, zstd).
-
-    The file's envelope must name it, and a load log (when there is one) must
-    show the matching path: ``Loading compressed RDB (algo=X)`` for a
-    compressed codec, no such line for ``none``.
-    """
-
-    problems = []
-    found = (result.get("rdb_format") or rdb_format(result["rdb_artifact"])).get("codec")
-    if found != expected:
-        problems.append(f"expected codec {expected}, the RDB is {'plain' if found == 'none' else found}")
-    if load_log is not None:
-        logged = sorted({match.group(1) for match in map(LOADED_COMPRESSED.search, load_log) if match})
-        if logged != ([] if expected == "none" else [expected]):
-            problems.append(f"expected codec {expected}, the load logged compressed codecs {logged or 'none'}")
-    return problems
-
-
 def _refusal_problem(error: str, pattern: Optional[str]) -> Optional[str]:
     """Why a failed load is not a clean refusal: the server must exit 1 with no crash report."""
 
@@ -232,9 +203,8 @@ def cut_bounds(ledger: list[dict[str, Any]], result: dict[str, Any]) -> tuple[in
     Position ``p`` means: operations ``1..p`` were sent before the snapshot's
     point in time, later ones after it. A primary's snapshot follows every
     operation that completed before BGSAVE was sent; any snapshot precedes
-    every operation sent after BGSAVE replied "started" (the fork, or the
-    forkless iterator's consistent start, happens inside the command), or
-    after the save finished.
+    every operation sent after BGSAVE replied "started" (the fork happens
+    inside the command), or after the save finished.
     """
 
     last = ledger[-1]["id"] if ledger else 0
@@ -301,9 +271,7 @@ def _list_problems(instance_id: str, lists: Mapping[str, Any], snapshot: Mapping
 class RdbSnapshotOracle:
     """Every captured RDB loads (or, with ``expect: refused``, is refused cleanly).
 
-    With a workload, each loaded RDB is a consistent cut of its write history;
-    with ``expect_codec``, each is in that whole-stream codec and its load took
-    the matching path.
+    With a workload, each loaded RDB is a consistent cut of its write history.
     """
 
     def evaluate(self, context: Any, spec: ComponentSpec, evidence: Sequence[Evidence]):
@@ -333,7 +301,6 @@ class RdbSnapshotOracle:
         problems = []
         errors = []
         per_instance: dict[str, Any] = {}
-        codec = RDB_STREAM_CODECS.get(config["expect_codec"])
         for result in results:
             instance_id = result["instance_id"]
             if result.get("capture_error"):
@@ -363,16 +330,6 @@ class RdbSnapshotOracle:
                 per_instance[instance_id] = {"loaded": False, "binary": binary, "error": str(exc)}
                 continue
             per_instance[instance_id] = {"loaded": content is not None, "binary": binary}
-            if codec is not None:
-                found = codec_problems(codec, result, content.get("log", []) if content else None)
-                if config["instance_reload"]:
-                    lines, unread = read_log(handle.log_file(instance_id))
-                    if unread is None:
-                        found += self._reload_problems(lines, codec)
-                    else:
-                        errors.append(f"{instance_id}: its log could not be read: {unread}")
-                problems.extend(f"{instance_id}: {problem}" for problem in found)
-                per_instance[instance_id]["rdb_format"] = result.get("rdb_format")
             if config["expect"] == "refused":
                 refusal = (
                     f"expected the load to be refused, but it loaded {content['meta'].get('dbsize')} key(s)"
@@ -413,30 +370,9 @@ class RdbSnapshotOracle:
         return make_result(
             spec,
             ComponentStatus.PASS,
-            verdict + (f" in codec {codec}" if codec is not None else ""),
+            verdict,
             evidence=(make_evidence(spec, "valkey.rdb.reload-verified", "oracle.completed", record),),
         )
-
-    @staticmethod
-    def _reload_problems(lines: Sequence[str], codec: str) -> list[str]:
-        """The instance's own reloads during the run (e.g. after a restart), in its log ``lines``, must be in
-        ``codec``: a reload from dump.rdb in that codec, one from the AOF in that codec or plain (a build before
-        valkey-io/valkey#4754 writes an AOF's base RDB uncompressed whatever rdbcompression is; one since, in its
-        codec)."""
-
-        sources = {match.group(1) for match in map(_DB_LOADED.search, lines) if match}
-        if not sources:
-            return ["the instance logged no reload during the run"]
-        logged = sorted({match.group(1) for match in map(LOADED_COMPRESSED.search, lines) if match})
-        wanted = [] if codec == "none" else [codec]
-        if "disk" in sources:
-            if logged != wanted:
-                return [
-                    f"expected the instance to reload codec {codec}, it logged compressed codecs {logged or 'none'}"
-                ]
-        elif logged not in ([], wanted):
-            return [f"expected the instance to reload codec {codec} or none, it logged compressed codecs {logged}"]
-        return []
 
     @staticmethod
     def _check_cut(

@@ -24,22 +24,10 @@ fuzzer catches bugs, and it shows when a check stops seeing them.
 | `double-vote-per-epoch` | build | A primary no longer refuses a second failover vote in an epoch it already voted in. | valkey.oracle.cluster-election-safety (one vote per primary per epoch, one winner per epoch) | 5 | 80% |
 | `eviction-drops-acknowledged-writes` | configuration | Configuration only: a 4 MB maxmemory with allkeys-random eviction silently drops acknowledged keys from a dataset of about 8 MB. | valkey.oracle.ledger (acknowledged writes must survive) | 5 | 100% |
 | `failover-leaves-slot-unclaimed` | build | After a failover the new primary claims every slot of its old primary except the first one. | valkey.oracle.deployment-state roles (the old primary keeps one slot and stays a primary) | 5 | 100% |
-| `forkless-exec-without-multi` | build | An EXEC without MULTI on a fresh connection during a forkless save dereferences the client's unallocated MULTI state (valkey-io/valkey#4604 bug 1; the guard of #4632 is gone). | valkey.oracle.liveness (the primary crashes on the stray EXEC the churn experiment sends) | 5 | 100% |
-| `forkless-rename-dangling-entry` | build | RENAME over an existing key of the same name length during a forkless save leaves the destination's freed entry pointer in the iterator's early-iterate table, and the renamed key's reallocated entry collides with it (valkey-io/valkey#4604 bug 3; #4996 is reverted). | valkey.oracle.liveness (the primary trips the wasAdded assertion in bgIteration_updateDbEntryPtr) | 5 | 100% |
-| `forkless-replica-blocks-primary-write` | skipped until valkey-io/valkey#5206 (merged 2026-10-30) | A replicated write to a key over 512 bytes that the replica's forkless save holds blocks the primary link client, which a replica must never block (valkey-io/valkey#4604 bug 5). Live at the pinned commit: no patch until the pin passes the fix; 5 of 5 runs on the clean pinned build crashed. | valkey.oracle.liveness (the replica trips the isReplicatedClient assertion in blockClient) | 5 | 100% |
-| `forkless-swapdb-load-frees-kvstore` | skipped until valkey-io/valkey#5082 and #5116 (merged 2026-10-30 and 2026-11-02) | A full sync loaded with repl-diskless-load swapdb frees the kvstore a replica's forkless save is still scanning (valkey-io/valkey#4604 bug 4). Live at the pinned commit: no patch until the pin passes the fix. Not yet reproduced by this scenario: 0 of 10 runs on the clean pinned build (no sanitizer) crashed. | valkey.oracle.liveness (the replica crashes in fullScanIteratorGetEntries after discarding its old DB) | 5 | 80% |
-| `info-hides-repl-compression` | build | The primary compresses a replica link with lz4 but INFO reports the link as plaintext. | valkey.oracle.repl-compression (INFO codec against the configured and logged codec) | 5 | 100% |
 | `psync-always-full-sync` | build | The primary refuses every partial resync and answers each PSYNC with a full sync. | valkey.replication-partial-resync: the forbidden "Full resync from primary" log line (reported by liveness) and the psync oracle (no sync_partial_ok, a new full sync, no PSYNC log lines) | 5 | 100% |
 | `rdb-save-drops-keys` | build | An RDB save silently omits every 50th key it iterates. | valkey.oracle.rdb-snapshot (the reloaded RDB against the write ledger) | 5 | 100% |
 | `replica-skips-writes` | build | A replica silently skips every 20th SET it receives from its primary; its replication offset still advances. | valkey.oracle.ledger replica convergence (check_replicas) | 5 | 100% |
 <!-- END cases -->
-
-valkey-io/valkey#4604's list-read race (bug 2: `LRANGE`/`LINDEX` change
-quicklist nodes the forkless serializer reads) has no case yet. Its fixes
-(#4782, and the list part of #4632) are in the pinned commit, but a revert
-of them was not caught in 10 runs of `valkey.forkless-save-churn`, 5 of
-them with two minutes of automatic saves: the race hits about one save in a
-hundred without a sanitizer, as the issue's reproducer reports.
 
 ## Layout
 
@@ -146,8 +134,7 @@ editing the case later does not change an old batch's verdict. Each run's report
    `zoo/valkey-commit`. Mark it with a `Bug zoo:` comment, and save it with
    `git diff > zoo/<case id>/patch.diff`. For a bug Valkey fixed, the patch
    is the fix's revert (`git revert --no-commit <fix>` at the pin, `src/`
-   only, trimmed to the hunks that matter): the `forkless-*` cases revert the
-   fixes of valkey-io/valkey#4604. A configuration-level case sets
+   only, trimmed to the hunks that matter). A configuration-level case sets
    `overrides` instead; a case whose fix the pin lacks sets `skipped_until`.
 2. Choose scenarios whose clean run passes and name the component that must
    catch the bug.

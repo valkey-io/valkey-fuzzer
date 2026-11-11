@@ -9,7 +9,6 @@ from types import SimpleNamespace
 import pytest
 
 from tests.valkey_experiments_support import valkey_service
-from valkey_fuzzer._data import to_plain_data
 from valkey_fuzzer.components import experiments, providers
 from valkey_fuzzer.components.providers import ENVIRONMENT_PROVIDERS, LocalBinaryProvider
 from valkey_fuzzer.plan import RunMode
@@ -41,19 +40,6 @@ def test_every_experiment_is_judged_by_liveness_and_one_without_required_inputs_
         }
         with pytest.raises(ScenarioCompileError, match=r"replicas_per_primary must be at least 1, got 0"):
             runtime.compile(scenario)
-
-
-def test_a_primary_killed_mid_save_in_cluster_mode_is_never_failed_over(runtime):
-    # A failover after the restart would lose what the restarted primary acknowledged until it was replaced.
-    scenario = {
-        "scenario_id": "check",
-        "seed": 1,
-        "experiment": {"id": "valkey.forkless-save-crash"},
-        "deployment": {"mode": "cluster", "primaries": 3, "replicas_per_primary": 1},
-    }
-    instances = to_plain_data(runtime.compile(scenario).instances)
-    replicas = [instance["server_config"] for instance in instances.values() if instance["role"] == "replica"]
-    assert len(replicas) == 3 and all(config["cluster-replica-no-failover"] == "yes" for config in replicas)
 
 
 def test_mounted_tmpfs_bytes_reads_only_a_tmpfs_a_write_would_reach(tmp_path, monkeypatch):

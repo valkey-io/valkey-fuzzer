@@ -31,11 +31,11 @@ octal. A `!!binary` scalar loads as `{$base64: ...}`, since plans and
 reports hold JSON data; `valkey.action.commands` sends one as bytes.
 
 ```yaml
-scenario_id: forkless-save-cluster
+scenario_id: snapshot-equivalence-cluster
 seed: 11
 experiment:
-  id: valkey.forkless-save     # experiment ID
-  inputs: {stable_keys: 2000}  # checked against the experiment's inputs schema
+  id: valkey.snapshot-equivalence  # experiment ID
+  inputs: {stable_keys: 2000}      # checked against the experiment's inputs schema
 deployment:
   mode: cluster                # standalone | cluster
   primaries: 3                 # cluster mode only
@@ -311,7 +311,7 @@ lists the format.
 
 ```yaml
 extends: [valkey.base]                    # fragments, merged first
-id: valkey.forkless-save
+id: example.slow-save
 mode: experiment                          # or smoke
 deployment:
   modes: [standalone, cluster]            # plus optional rules for deployment fields
@@ -321,10 +321,9 @@ inputs:
   properties:
     key_save_delay_us: {type: integer, minimum: 0, maximum: 100000, default: 500}
 startup_overlays:
-  - overlay_id: forkless-enabled
+  - overlay_id: slow-save
     selector: primaries                   # left out: every instance
     server_config:
-      bgsave-default-method: forkless
       rdb-key-save-delay: {$ref: inputs.key_save_delay_us}
 components:
   - use: valkey.action.bgsave             # registration ID; the role comes from it
@@ -339,7 +338,7 @@ required_evidence:
 
 | Field | Required | Meaning |
 | --- | --- | --- |
-| `id` | yes | `<namespace>.<name>`, for example `valkey.forkless-save`. Unique among installed experiments. |
+| `id` | yes | `<namespace>.<name>`, for example `valkey.aof-durability`. Unique among installed experiments. |
 | `deployment` | yes | `modes` and optional field rules; see [deployment](#deployment). |
 | `components` | yes | The configured components; see [components](#components). |
 | `extends` | no | Fragments merged before the document; see [Fragments](#fragments). |
@@ -460,21 +459,18 @@ loaded with `--experiment-dir` can extend them. Merge rules:
 - `required_events`, `required_evidence`, and `inputs.required` are unions.
 - Every other field is replaced.
 
-The Valkey components ship thirteen fragments:
+The Valkey components ship eleven fragments:
 
 | Fragment | Adds |
 | --- | --- |
 | `valkey.liveness` | the oracles that need no model of the feature under test: `liveness` ([`valkey.oracle.liveness`](components.md#valkeyoracleliveness)), `error-counters` ([`valkey.oracle.error-counters`](components.md#valkeyoracleerror-counters)), and `quiet-end` ([`valkey.oracle.quiet-end`](components.md#valkeyoraclequiet-end)) |
 | `valkey.writes` | `valkey.liveness`; the `writes` workload ([`valkey.workload.key-value`](components.md#valkeyworkloadkey-value)); the `data` oracle ([`valkey.oracle.ledger`](components.md#valkeyoracleledger)) with required evidence `valkey.data.ledger-verified`; the inputs `stable_keys` (default 1000), `mutable_keys` (200), `mutation_rate` (200 per second), and `value_size` (64 bytes), with the ranges [random scenarios](#declaring-what-may-be-randomized) draw them from |
 | `valkey.base` | `valkey.writes` and the `deployment-state` oracle ([`valkey.oracle.deployment-state`](components.md#valkeyoracledeployment-state)) |
-| `valkey.history` | the `history` oracle ([`valkey.oracle.history`](components.md#valkeyoraclehistory)) on the `data` oracle's ledger and loss policy; extend it after `valkey.writes` or `valkey.base`. The chaos experiments extend it: `aof-durability`, `cluster-partition`, `forkless-save-crash`, `mixed-version-cluster`, `repl-compression-mixed-version`, `replication-chaos`, `replication-full-resync`, and `rolling-upgrade` |
+| `valkey.history` | the `history` oracle ([`valkey.oracle.history`](components.md#valkeyoraclehistory)) on the `data` oracle's ledger and loss policy; extend it after `valkey.writes` or `valkey.base`. The chaos experiments extend it: `aof-durability`, `cluster-partition`, `mixed-version-cluster`, `replication-chaos`, `replication-full-resync`, and `rolling-upgrade` |
 | `valkey.drained-writes` | `valkey.writes`, whose workload performs exactly `operations` operations (input, default 2000) and publishes `writes.drained`; the `drained` action ([`valkey.action.wait-event`](components.md#valkeyactionwait-event)) that waits for it, with `writes.drained` a required event; random scenarios draw 1 to 3000 operations at 500 to 5000 per second |
 | `valkey.reconnect-replicas` | the `drop-replica-links` action ([`valkey.action.command`](components.md#valkeyactioncommand), `CLIENT KILL TYPE replica` on the primaries), then the `links-up` poll (every replica's `master_link_status` is `up`, within 120 s), with `drop-replica-links.completed` a required event; fragments name what `drop-replica-links` follows |
 | `valkey.psync` | `valkey.base` and a partial resync: writes for `disconnect_after_s` (input, default 1), then `valkey.reconnect-replicas` after `run-then-disconnect`, the `info` observer requiring `sync_partial_ok` to advance and `sync_full` not to, and the `logs` observer requiring both sides' PSYNC lines and forbidding a full resync; standalone or cluster with replicas |
 | `valkey.full-sync` | `valkey.base` and a forced full sync: writes for `run_before_sync_s` (input, default 1), then `change-replid` (`DEBUG CHANGE-REPL-ID`, which the `full-sync` startup overlay enables) and `valkey.reconnect-replicas` |
-| `valkey.forkless` | the `forkless-enabled` startup overlay on every instance; the `build` probe ([`valkey.capability.build-probe`](components.md#valkeycapabilitybuild-probe)) that the binary supports forkless saves; the input `key_save_delay_us` (default 500); random scenarios draw `value_size` up to 1024 and the compression pool |
-| `valkey.compression` | the input `rdbcompression` (`no`, `yes`, `lzf`, `lz4`, `zstd`; default `yes`, which every build accepts) as the `rdb-compression` startup overlay on every instance; the `build` probe with `deployment_config: [rdbcompression, repl-compression]`, so a codec the build lacks is `SKIP_UNSUPPORTED` |
-| `valkey.repl-compression` | `valkey.compression`; the inputs `primary_repl_compression` and `replica_repl_compression` (`no`, `yes`, `lz4`, `zstd`; default `lz4`) as overlays on the primaries and the replicas; `compressible` (default `true`) on the `writes` workload; the `compression` oracle ([`valkey.oracle.repl-compression`](components.md#valkeyoraclerepl-compression)) with required evidence `valkey.repl.compression-verified`; random scenarios draw 100 to 1000 `mutable_keys`, so every shard takes writes, and 1 to 3 replicas (standalone) or 1 to 2 (cluster) |
 | `valkey.command-table` | the `commands` workload ([`valkey.workload.command-table`](components.md#valkeyworkloadcommand-table)) at the input `command_rate` (default 0, which sends none); the `reply-schemas` oracle ([`valkey.oracle.reply-schema`](components.md#valkeyoraclereply-schema)), which holds its replies to Valkey's reply schemas; and the `command-metadata` oracle ([`valkey.oracle.command-metadata`](components.md#valkeyoraclecommand-metadata)), which holds the workload's first 1000 commands to the build's command metadata on private servers; random scenarios keep the default, so a batch turns them on for an experiment with a base (`experiment: {inputs: {command_rate: 200}}`). `valkey.cluster-chaos`, `valkey.replication-chaos`, and `valkey.cluster-partition` extend it |
 | `valkey.random` | only the server config pools of [random scenarios](#declaring-what-may-be-randomized) |
 | `valkey.profiles` | only the [search profiles](#legal-space-and-search-profiles); no experiment extends it |
@@ -505,28 +501,17 @@ scenario for each.
 
 | Experiment | Deployment | Needs | What it checks |
 | --- | --- | --- | --- |
-| `valkey.aof-durability` | standalone | | After `SIGKILL` of the primary under writes and a restart from its append-only file (whose RDB base is in the `rdbcompression` codec), no acknowledged write is lost outside `loss_window_s`, and the reload is logged. `appendfsync always` requires `loss_window_s` 0, and `everysec` at least 2.5. |
+| `valkey.aof-durability` | standalone | | After `SIGKILL` of the primary under writes and a restart from its append-only file, no acknowledged write is lost outside `loss_window_s`, and the reload is logged. `appendfsync always` requires `loss_window_s` 0, and `everysec` at least 2.5. |
 | `valkey.bgsave-disk-full` | standalone | Linux, root, a `valkey.resource.tmpfs` resource holding the primary's data | On a full data filesystem, AOF writes and BGSAVE fail with errors, rejected writes are never applied, and after space is freed AOF writes recover and the next BGSAVE reloads. |
 | `valkey.cluster-chaos` | cluster, replicas ≥ 1 | | After every wave of failovers with process kills, replication, cluster state, slot coverage, roles, views, test keys, and failover log lines validate. `run --random --experiment valkey.cluster-chaos` generates its scenarios; see [Cluster chaos and CI](cluster-chaos-and-ci.md). |
 | `valkey.cluster-election-durability` | cluster, replicas ≥ 1 | Valkey 9.2.0 or later, with `cluster-config-save-behavior` | Kills a primary right after it grants a failover vote, restarts it, runs a second election, and checks one winner per epoch, one vote per primary per epoch, a quorum of votes for every winner, and no split primary; under `sync`, also that no vote left before it was saved ([TLA+ model](../formal/cluster-election/README.md)). |
 | `valkey.cluster-partition` | cluster, replicas ≥ 1, `addressing: per_instance_loopback` | Linux, root, iptables | A primary cut off from the cluster bus is replaced by its replica and rejoins as a replica after the partition heals; no acknowledged write is lost, except writes the isolated primary itself acknowledged in the partition window. |
-| `valkey.forkless-save` | standalone, cluster | a build with forkless BGSAVE | A forkless BGSAVE ran (INFO and log evidence), its RDB is in the `rdbcompression` codec and reloads, and live data matches the write ledger. |
-| `valkey.forkless-save-cancel` | standalone, cluster | a build with forkless BGSAVE | `BGSAVE CANCEL` aborts a forkless save cleanly, and the next forkless save succeeds and reloads in the `rdbcompression` codec. |
-| `valkey.forkless-save-churn` | standalone | a build with forkless BGSAVE | A forkless BGSAVE under `RENAME`s over existing keys of one name length (`rename_weight`), pipelined `LRANGE`/`LINDEX` reads of `list_keys` lists of `list_length` elements under `list_compress_depth` (`list_read_weight`, `list_read_batch`), and an `EXEC` without `MULTI` on a fresh connection as the save starts (rejected, nothing else): the save completes, its RDB reloads in the `rdbcompression` codec as a consistent cut with every list intact, and live data matches the ledger. With `auto_save` (a `save` setting such as `"1 1"`) and `churn_s`, the workload first runs `churn_s` seconds across a forkless save about every second, for races one save rarely hits; then the save points are turned off and the captured save runs. The three shapes of valkey-io/valkey#4604 the workload could not reach before. |
-| `valkey.forkless-save-crash` | standalone, cluster | a build with forkless BGSAVE | After `SIGKILL` during a forkless save the primary restarts, a new forkless save succeeds in the `rdbcompression` codec, and no acknowledged write is lost, except writes the killed primary acknowledged within `loss_window_s` (2.5 s) of the kill. The save starts 3 s after the preload, so every preloaded key must survive. The instances run with `cluster-replica-no-failover yes`, so in cluster mode the restarted primary keeps its slots. |
-| `valkey.forkless-save-on-replica` | standalone, replicas ≥ 1 | a build with forkless BGSAVE | Every replica runs a forkless BGSAVE under replicated writes; `sync_delay_s` after it starts the primary changes its replication ID and drops the replica links, so each replica full-syncs mid-save, loaded as `diskless_load` says (`swapdb` frees the old keyspace in the background); the primary's own saves run without `rdb-key-save-delay`, so the sync streams at full speed while the replicas' saves still scan. Every replica survives, relinks, and converges on the ledger, and the primary counts a full sync. A replicated write blocks on a key the save holds only with values over 512 bytes (`value_size`), and the swapdb path runs only with `diskless_load: swapdb`: the bug zoo's cases set them (valkey-io/valkey#4604 bugs 4 and 5). |
 | `valkey.mixed-version-cluster` | cluster, replicas ≥ 1 | two different builds | A cluster that mixes two builds fails over under writes, and every instance runs its assigned binary. A graceful failover loses nothing; with `force_failover`, only the old primary's last writes may be lost. |
-| `valkey.rdb-compression` | standalone | a build with streaming RDB compression | A BGSAVE under writes (fork or forkless, `bgsave_method`) and a quiesced final BGSAVE write an RDB in the `rdbcompression` codec, each reloads with the matching load path as a consistent cut of the writes, and after an AOF rewrite and a restart from `dump.rdb` (`appendonly: "no"`) or the AOF (`"yes"`, whose base RDB Valkey writes plain) the primary reloads in that codec (plain from the AOF) with no acknowledged write lost, and the deployment state validates. |
-| `valkey.rdb-compression-compat` | standalone | the loading binary as an artifact (`load_binary`) | The RDB saved in the `rdbcompression` codec is refused cleanly (`load_expect: refused`, optionally logging `refused_log`) or loaded (`loads`, optionally with `load_config`) by another build. |
-| `valkey.repl-compression-full-sync` | standalone or cluster, replicas ≥ 1 | a build with replication compression | After `DEBUG CHANGE-REPL-ID` and dropped links force a full sync under writes, every link and its full sync ran in the negotiated codec and the predicted transport (`repl_diskless_sync`, `repl_diskless_load`, `dual_channel`), compression shrank the stream by `min_ratio`, and every replica holds its primary's data. |
-| `valkey.repl-compression-mixed-version` | cluster, replicas ≥ 1 | replicas on an older build without `repl-compression` (`instance_binaries.replica`, also the `old_binary` input) | Before and after a failover to an old replica, every link is plaintext and every full sync to an old replica is diskless; a newer replica loading from disk rewrites the RDB into its own codec. An old build with `repl-compression`, or two copies of one build, is `ERROR`. |
-| `valkey.repl-compression-partial-resync` | standalone or cluster, replicas ≥ 1 | a build with replication compression | Dropped compressed links resume with PSYNC (no full sync), re-enable the negotiated codec, and shrink the stream by `min_ratio`. |
-| `valkey.repl-compression-runtime-change` | standalone or cluster, replicas ≥ 1 | a build that accepts the values (zstd by default) | Three `CONFIG SET repl-compression` changes under writes (primaries, replicas, primaries) renegotiate the links through partial resyncs, never a full sync, and the final links match the final configuration with no acknowledged write lost. The changes must make a primary and a replica renegotiate. |
-| `valkey.replication-chaos` | standalone, replicas ≥ 1 | partitions: Linux, root, iptables, `addressing: per_instance_loopback` | Seeded `waves` of kills, restarts, graceful (`FAILOVER TO`) and forced (`REPLICAOF NO ONE`, optionally with a split brain) promotions, repoints, stalls, backlog pressure, `repl-compression` flips, and partitions under writes ([`valkey.action.replication-chaos`](components.md#valkeyactionreplication-chaos)). After every wave the deployment is healed and must have one primary, every replica linked to it, equal offsets, and equal test keys; at the end every link uses its negotiated codec, and no acknowledged write is lost outside a forced promotion's window (below). |
+| `valkey.replication-chaos` | standalone, replicas ≥ 1 | partitions: Linux, root, iptables, `addressing: per_instance_loopback` | Seeded `waves` of kills, restarts, graceful (`FAILOVER TO`) and forced (`REPLICAOF NO ONE`, optionally with a split brain) promotions, repoints, stalls, backlog pressure, and partitions under writes ([`valkey.action.replication-chaos`](components.md#valkeyactionreplication-chaos)). After every wave the deployment is healed and must have one primary, every replica linked to it, equal offsets, and equal test keys; at the end no acknowledged write is lost outside a forced promotion's window (below). |
 | `valkey.replication-full-resync` | standalone or cluster, replicas ≥ 1 | | A replica stalled with `SIGSTOP` while writes overflow the backlog is refused a partial resync, completes a full resync, and converges. |
 | `valkey.replication-partial-resync` | standalone or cluster, replicas ≥ 1 | | After the primary drops every replica link, the replicas resume with a partial resync (PSYNC), no full sync happens, and they converge. |
 | `valkey.rolling-upgrade` | standalone or cluster, replicas ≥ 1 | two different builds, the target as an artifact | Every instance moves to the new build under writes, replicas first with graceful failovers, and no acknowledged write is lost. |
-| `valkey.snapshot-equivalence` | standalone, cluster | | A fixed number of seeded operations, then a BGSAVE of the quiesced dataset that must reload in the `rdbcompression` codec; records dataset, RDB, and reply digests for [differential runs](cli.md#diff). |
+| `valkey.snapshot-equivalence` | standalone, cluster | | A fixed number of seeded operations, then a BGSAVE of the quiesced dataset that must reload; records dataset, RDB, and reply digests for [differential runs](cli.md#diff). |
 
 An experiment can also compare one command sequence across two builds, the
 build under test and its parent, with
@@ -563,19 +548,8 @@ with no acknowledged write lost;
 [`examples/valkey/replica_killed_under_writes.yaml`](../examples/valkey/replica_killed_under_writes.yaml)
 runs it.
 
-Three differentials compare codecs:
-[`differential_rdb_codecs.yaml`](../examples/valkey/differential_rdb_codecs.yaml) (`no`, `lz4`, `zstd`:
-equal dataset, reloaded RDB, and reply digests; different `rdb_format.codec`),
-[`differential_lzf.yaml`](../examples/valkey/differential_lzf.yaml) (LZF against none: equal digests
-and codec, different `rdb_format.size`), and
-[`differential_repl_codecs.yaml`](../examples/valkey/differential_repl_codecs.yaml) (a full sync in
-`no`, `lz4`, `zstd`: each variant passes, with different `links.0.algo`; its writes run for a time, so
-the variants' datasets are not compared).
-
-On Valkey unstable a forkless BGSAVE ignores whole-stream `rdbcompression`, so `valkey.rdb-compression`
-with `bgsave_method: forkless` and the forkless experiments fail with `lz4` or `zstd` ("expected codec
-lz4, the RDB is plain") until forkless compression is merged; random runs can leave those codecs out
-with `--exclude server_config.rdbcompression=lz4` (and `=zstd`).
+[`differential_baseline_vs_candidate.yaml`](../examples/valkey/differential_baseline_vs_candidate.yaml)
+runs the same seeded workload on two builds and requires equal dataset, reloaded RDB, and reply digests.
 
 In `valkey.replication-chaos` a graceful promotion loses nothing. A forced
 promotion, or the heal's promotion after the primary was killed, may lose
@@ -611,7 +585,7 @@ metadata:
       value_size: {values: [1, 64, 4096]}
       loss_window_s: fixed
       waves: {hook: valkey.generator.waves}
-    server_config: [valkey.pool.replication, valkey.pool.compression]
+    server_config: [valkey.pool.replication]
     reject:
       - {server_config.repl-diskless-sync: "no", inputs.expect_disk_sync: false}
 ```
@@ -638,15 +612,10 @@ the replicas each get their own values (`deployment.instance_configs`). The
 `valkey.random` fragment defines `valkey.pool.persistence`
 (`appendonly`, `appendfsync`, `aof-use-rdb-preamble`),
 `valkey.pool.replication` (`repl-diskless-sync`, `repl-diskless-load`,
-`dual-channel-replication-enabled`, `repl-diskless-sync-delay`), and
-`valkey.pool.compression` (`rdbcompression`, `repl-compression`, scoped). An
-experiment can define its own under `metadata.generator.pools`. An experiment
-that takes a codec as an input (`valkey.compression`) draws the input instead
-of the pool key, and its oracles expect that codec; `--exclude
+`dual-channel-replication-enabled`, `repl-diskless-sync-delay`). An
+experiment can define its own under `metadata.generator.pools`. `--exclude
 server_config.<key>=<value>` also excludes the value from an input an overlay
-writes into `<key>`. Every experiment that can draw a codec probes its builds
-with `deployment_config` naming both codec settings, so `zstd` on a build
-without it is `SKIP_UNSUPPORTED`.
+writes into `<key>`.
 
 A pool with `default: true` is drawn by every experiment without being
 listed, after the pools it lists; a key a listed pool or a startup overlay
@@ -720,11 +689,7 @@ what they return. The Valkey hooks:
 | `valkey.generator.waves` | `valkey.cluster-chaos`, `valkey.replication-chaos` | One to four waves of one to three operations of the drawn deployment mode, with kills that always have a target. Standalone: a `restart` after half the kills, partitions only with per-instance loopback addresses, repoints to another replica only with two replicas or more, at most `replicas_per_primary` kills per wave, only replicas after the first. Cluster: one to three failovers of distinct shards per wave, four in five with a kill before, with, or after it, and fewer kills in the run than there are replicas. |
 | `valkey.generator.tmpfs-data` | `valkey.bgsave-disk-full` | A 16, 32, or 64 MB tmpfs resource holding the primary's data, passed as `disk`. |
 | `valkey.generator.upgrade-target` | `valkey.rolling-upgrade` | `to_binary` as the deployment's own build (the two-build probe then skips the run) unless the scenario sets it. |
-| `valkey.generator.old-build` | `valkey.repl-compression-mixed-version` | `old_binary` the same way. |
-| `valkey.generator.rdb-loader` | `valkey.rdb-compression-compat` | `load_binary` as the deployment's own build, with `load_expect: loads`, unless the scenario sets it. |
-| `valkey.generator.repl-compression-changes` | `valkey.repl-compression-runtime-change` | The three runtime changes, among those after which a primary and a replica both renegotiate from the drawn initial values. |
 | `valkey.generator.wait-replicas` | `valkey.replication-chaos` | `wait_replicas` from 0 to the drawn `replicas_per_primary`. |
-| `valkey.generator.compression-ratio` | `valkey.repl-compression-full-sync`, `-partial-resync` | `min_ratio`: 1.5 for compressible values, 0 (off) otherwise. |
 
 ### What the Valkey experiments randomize
 
@@ -732,28 +697,17 @@ Inputs not listed use the `valkey.writes` ranges.
 
 | Experiment | Deployment | Inputs | Pools |
 | --- | --- | --- | --- |
-| `valkey.aof-durability` | standalone, 0-2 replicas | `appendfsync`, `rdbcompression`, rate up to 2000, `run_before_crash_s` 0.5-5, `run_after_crash_s` 0-3, `loss_window_s` 0 or 2.5 (from `valkey.generator.aof-loss-window`) | replication |
+| `valkey.aof-durability` | standalone, 0-2 replicas | `appendfsync`, rate up to 2000, `run_before_crash_s` 0.5-5, `run_after_crash_s` 0-3, `loss_window_s` 0 or 2.5 (from `valkey.generator.aof-loss-window`) | replication |
 | `valkey.bgsave-disk-full` | standalone, tmpfs 16-64 MB | stable keys 100-2000, mutable keys up to 500, rate 50-1000, value size 64 B-1 kB | |
 | `valkey.cluster-chaos` | 3-16 primaries, 1-5 replicas | `waves` | |
 | `valkey.cluster-election-durability` | 3-5 primaries, 1-2 replicas | `save_behavior`, `election`, `second_election`, `shard` 0-2, `vote_occurrence` 1-2, restart and second-election delays | |
 | `valkey.cluster-partition` | 3-5 primaries, 1 replica, per-instance loopback | `hold_after_failover_s` 0-3 | |
-| `valkey.forkless-save` | standalone or cluster, 0-2 replicas | `rdbcompression`, stable keys 2000-6000, `key_save_delay_us` 300-1000, rate up to 2000, value size up to 1 kB, `compressible` | compression |
-| `valkey.forkless-save-cancel` | standalone or cluster, 0-2 replicas | `rdbcompression`, stable keys 3000-8000, mutable keys up to 500, `key_save_delay_us` 600-1500, `cancel_delay_s` 0-0.3, value size up to 1 kB | compression |
-| `valkey.forkless-save-churn` | standalone, 0-2 replicas | `rdbcompression`, stable keys 2000-6000, mutable keys 2-1000, `key_save_delay_us` 300-2000, rate up to 2000, value size up to 1 kB, `compressible`, `rename_weight` 0-1, `list_keys` 1-2, `list_length` 1000-100000, `list_read_weight` 0-1, `list_read_batch` 1-50, `list_compress_depth` 1 or 2; `churn_s` stays 0 | compression |
-| `valkey.forkless-save-crash` | standalone 0-2 or cluster 0-1 replicas | `rdbcompression`, stable keys 3000-8000, mutable keys up to 500, `key_save_delay_us` 600-1500, `kill_delay_s` 0-0.3, value size up to 1 kB | compression |
-| `valkey.forkless-save-on-replica` | standalone, 1-2 replicas | `rdbcompression`, stable keys 2000-20000, `key_save_delay_us` 200-1000, rate up to 1000, `sync_delay_s` 0-0.3; `value_size` (64) and `diskless_load` (`disabled`) stay fixed | compression |
 | `valkey.mixed-version-cluster` | 3 primaries, 1-2 replicas | `failover_shard` 0-2, `force_failover` | |
-| `valkey.rdb-compression` | standalone, 0-2 replicas | `rdbcompression`, `bgsave_method`, `appendonly`, `compressible`, `operations` 1-3000, rate 500-5000 | replication, compression |
-| `valkey.rdb-compression-compat` | standalone | `rdbcompression`, `compressible`, `operations` 1-3000, rate 500-5000; the loader from `valkey.generator.rdb-loader` | |
-| `valkey.repl-compression-full-sync` | standalone 1-3 or cluster 1-2 replicas | every codec and transport input, stable keys 500-2000, mutable keys 100-1000, rate 200-2000, value size 256 B-16 kB, `run_before_sync_s` and `run_after_sync_s` 0.5-3 | |
-| `valkey.repl-compression-mixed-version` | 3 primaries, 1-2 replicas | `rdbcompression`, `primary_repl_compression`, `failover_shard` 0-2, `run_before_sync_s` 0.5-2 | |
-| `valkey.repl-compression-partial-resync` | standalone 1-3 or cluster 1-2 replicas | the codecs, `compressible`, mutable keys 100-1000, rate 100-2000, value size 256 B-1 kB, `disconnect_after_s` and `run_after_resync_s` 0.5-3 | replication |
-| `valkey.repl-compression-runtime-change` | standalone 1-3 or cluster 1-2 replicas | the codecs and their changes, `compressible`, mutable keys 100-1000, `change_interval_s` 3-5 | |
-| `valkey.replication-chaos` | standalone, 1-4 replicas | `waves`, `wait_replicas`, `rdbcompression`, stable keys up to 5000, rate 50-1000, value size 16 B-16 kB | compression |
+| `valkey.replication-chaos` | standalone, 1-4 replicas | `waves`, `wait_replicas`, stable keys up to 5000, rate 50-1000, value size 16 B-16 kB | compression |
 | `valkey.replication-full-resync` | standalone 1-3 or cluster 1-2 replicas | rate 1000-3000, mutable keys 100-1000, value size 16 or 64 kB, `pause_s` 3-5 | replication, compression |
 | `valkey.replication-partial-resync` | standalone 1-3 or cluster 1-2 replicas | rate up to 2000, value size up to 1 kB, `disconnect_after_s` 0.5-3 | replication, compression |
 | `valkey.rolling-upgrade` | standalone or cluster, 1-2 replicas | | |
-| `valkey.snapshot-equivalence` | standalone or cluster, 0-2 replicas | `rdbcompression`, `operations` 1-3000, rate 500-5000, value size up to 8 kB | persistence, replication, compression |
+| `valkey.snapshot-equivalence` | standalone or cluster, 0-2 replicas | `operations` 1-3000, rate 500-5000, value size up to 8 kB | persistence, replication, compression |
 
 Durability windows (`loss_window_s`, `loss_window_after_s`) are never drawn
 wider than the configuration needs: a wider window would only loosen what
@@ -763,8 +717,7 @@ run to a few minutes on one host and keep each experiment's own preconditions
 (a save that outlasts the cancel or kill delay, writes that overflow the
 output limit during a stall, a backlog that holds a disconnect's writes, an
 append-only file small enough that no rewrite child refuses a BGSAVE).
-`valkey.mixed-version-cluster`, `valkey.rolling-upgrade`, and
-`valkey.repl-compression-mixed-version` need two builds, which only a base can
+`valkey.mixed-version-cluster` and `valkey.rolling-upgrade` need two builds, which only a base can
 name; without one their runs are `ERROR` (exclude them, or pass the base).
 
 ## Legal space and search profiles

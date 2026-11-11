@@ -56,7 +56,10 @@ def test_variants_patch_the_base_and_share_its_seed():
     [
         ({"variants": {"only": {}}}, "at least two"),
         ({"variants": {"a": {"seed": 1}, "b": {}}}, "must start with"),
-        ({"variants": {"a": {"experiment.id": "valkey.forkless-save"}, "b": {}}}, "may only patch experiment.inputs"),
+        (
+            {"variants": {"a": {"experiment.id": "valkey.snapshot-equivalence"}, "b": {}}},
+            "may only patch experiment.inputs",
+        ),
         ({"compare": {}}, "at least one"),
         ({"compare": {"equal": [{"evidence_id": "a.b"}], "require_status": "MAYBE"}}, "require_status"),
         # An ERROR variant makes the differential ERROR before require_status is looked at.

@@ -11,5 +11,5 @@ deployment:
   base_port: 7500
   enable_cleanup: true
 
-# A real replication-compression experiment would add capability probes, actions,
-# negotiated-codec evidence, continuous traffic, and convergence oracles.
+# A real replication experiment would add capability probes, actions, path
+# evidence, continuous traffic, and convergence oracles.

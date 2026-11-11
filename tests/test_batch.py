@@ -42,7 +42,7 @@ from .valkey_experiments_support import valkey_service
 ROOT = Path(__file__).resolve().parent.parent
 STUB = [sys.executable, str(ROOT / "tests" / "batch_worker_stub.py")]
 SNAPSHOT = "valkey.snapshot-equivalence"
-NO_ZSTD = ["server_config.rdbcompression=zstd", "server_config.repl-compression=zstd"]
+EXCLUDES = ["server_config.io-threads=4", "server_config.repl-diskless-load=swapdb"]
 
 
 def _id(seed):
@@ -73,7 +73,7 @@ def workers(stub, monkeypatch):
 
 def _random(seeds, **extra):
     return normalize_source(
-        {"random": {"experiments": [SNAPSHOT], "seeds": seeds, "first_seed": 0, "excludes": NO_ZSTD, **extra}}, "/"
+        {"random": {"experiments": [SNAPSHOT], "seeds": seeds, "first_seed": 0, "excludes": EXCLUDES, **extra}}, "/"
     )
 
 
@@ -121,7 +121,13 @@ def test_the_worker_isolates_its_run_keeps_a_zoo_build_and_refuses_a_scenario_to
         task(
             {
                 "id": "g",
-                "generate": {"seed": 9, "experiment": SNAPSHOT, "excludes": NO_ZSTD, "base": {}, "profile": "pr-quick"},
+                "generate": {
+                    "seed": 9,
+                    "experiment": SNAPSHOT,
+                    "excludes": EXCLUDES,
+                    "base": {},
+                    "profile": "pr-quick",
+                },
             }
         )
         == 0
@@ -559,7 +565,7 @@ def test_zoo_cases_run_through_the_batch_and_one_that_does_not_hold_fails_it(tmp
 
 def test_a_profile_sets_the_seeds_and_deadline_and_pruning_keeps_a_passing_runs_report(tmp_path, workers, stub):
     stub.behave(**{"1": "fail:data"})
-    sources = [normalize_source({"random": {"experiments": [SNAPSHOT], "first_seed": 0, "excludes": NO_ZSTD}}, "/")]
+    sources = [normalize_source({"random": {"experiments": [SNAPSHOT], "first_seed": 0, "excludes": EXCLUDES}}, "/")]
     runner = _batch(tmp_path, sources, profile="pr-quick", workers=3, prune_pass=True)
     runner.run()
     # The profile's seeds and deadline, unless the deadline is given.
@@ -577,7 +583,7 @@ def test_the_command_runs_a_batch_and_exits_with_its_worst_result(tmp_path, work
         "2",
         "--first-seed",
         "0",
-        *[arg for item in NO_ZSTD for arg in ("--exclude", item)],
+        *[arg for item in EXCLUDES for arg in ("--exclude", item)],
         "--port-base",
         "12000",
     ]

@@ -15,11 +15,8 @@ import yaml
 from tests.valkey_experiments_support import evidence_values, valkey_service
 from valkey_fuzzer._data import to_plain_data
 from valkey_fuzzer.components import EXPERIMENT_DIRECTORY
-from valkey_fuzzer.components.capabilities import probe_binary
 from valkey_fuzzer.deployment.local.ports import highest_base_port, port_unavailable_reason
 from valkey_fuzzer.differential import Differential, run_differential
-from valkey_fuzzer.plan import ComponentSpec
-from valkey_fuzzer.testing import FakeContext
 
 BINARY = os.environ.get("VALKEY_FUZZER_BINARY") or shutil.which("valkey-server")
 OLD_BINARY = os.environ.get("VALKEY_FUZZER_OLD_BINARY")
@@ -51,18 +48,6 @@ def free_port_block(width: int) -> int:
 
 def free_base_port() -> int:
     return free_port_block(40)
-
-
-def build_accepts(binary, startup_config, *, config_get=None, info_fields=None) -> bool:
-    """Whether ``binary`` starts with ``startup_config`` and reports ``config_get`` and ``info_fields``."""
-
-    if not binary:
-        return False
-    config = {"startup_config": startup_config, "config_get": config_get or {}, "config_set": {},
-              "info_fields": info_fields or {}, "commands": [], "lacks_configs": [], "min_version": None,
-              "timeout_s": 15.0}  # fmt: skip
-    spec = ComponentSpec(use="valkey.capability.build-probe", id="probe")
-    return probe_binary(FakeContext(), spec, binary, config)[0].value == "PASS"
 
 
 def scenario(experiment, mode="standalone", inputs=None, *, replicas=None, seed=7, binary=None, **deployment):

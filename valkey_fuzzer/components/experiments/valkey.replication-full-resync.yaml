@@ -6,8 +6,8 @@
 # Path evidence: the stall fired and overflowed the output limit (the primary
 # logs closing the replica's link). Only then must the primary refuse a
 # partial resync and serve a full one, which the `full-resync` oracle checks: a
-# stall that never overflowed the limit (the link's codec shrank the stream,
-# the writes were few) did not reach that state, and the run is an ERROR, not
+# stall that never overflowed the limit (the writes were few) did not reach
+# that state, and the run is an ERROR, not
 # a FAIL.
 extends: [valkey.base, valkey.history]
 id: valkey.replication-full-resync
@@ -31,7 +31,7 @@ metadata:
       mutation_rate: {minimum: 1000, maximum: 3000}
       value_size: {values: [16384, 65536]}
       pause_s: {minimum: 3, maximum: 5}
-    server_config: [valkey.pool.replication, valkey.pool.compression]
+    server_config: [valkey.pool.replication]
 inputs:
   properties:
     stable_keys: {default: 500}
@@ -48,12 +48,6 @@ startup_overlays:
       repl-backlog-size: 16kb
       client-output-buffer-limit: "replica 64kb 0 0"
 components:
-  # Probe each binary with the configuration the deployment gives it: a codec
-  # the build lacks (zstd without BUILD_ZSTD=yes) makes the run SKIP_UNSUPPORTED.
-  - use: valkey.capability.build-probe
-    id: build
-    config: {deployment_config: [rdbcompression, repl-compression]}
-
   - use: valkey.observer.info
     id: info
     config:

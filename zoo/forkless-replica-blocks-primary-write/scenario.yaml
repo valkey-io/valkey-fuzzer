@@ -1,9 +1,0 @@
-scenario_id: zoo-forkless-replica-blocks-primary-write
-seed: 1405
-experiment:
-  id: valkey.forkless-save-on-replica
-  inputs: {stable_keys: 2000, mutable_keys: 200, key_save_delay_us: 10000, value_size: 2000, mutation_rate: 200, sync_delay_s: 1}
-deployment:
-  mode: standalone
-  replicas_per_primary: 1
-  base_port: 21560

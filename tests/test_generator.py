@@ -8,7 +8,6 @@ import yaml
 
 from valkey_fuzzer.catalog import Catalog, register_valkey_components
 from valkey_fuzzer.components import EXPERIMENT_DIRECTORY, experiments
-from valkey_fuzzer.components.generators import renegotiates
 from valkey_fuzzer.deployment.local.provider import local_deployment_provider_registrations
 from valkey_fuzzer.documents import merge
 from valkey_fuzzer.generator import MAX_ATTEMPTS, Exclusion, GeneratorBlock, GeneratorError, generate, installed_pools
@@ -20,7 +19,7 @@ from valkey_fuzzer.service import RunService
 from .generator_support import CLUSTER_EXPERIMENT, SMALL_CLUSTER_SEEDS, generate_scenario, generator_service
 from .valkey_experiments_support import valkey_service
 
-NO_ZSTD = (Exclusion.parse("server_config.rdbcompression=zstd"), Exclusion.parse("server_config.repl-compression=zstd"))
+NO_ZSTD = (Exclusion.parse("server_config.rdbcompression=zstd"),)
 EXPERIMENTS = sorted(spec.experiment_id for spec in experiments())
 # A data-only experiment with one input of every kind the generator draws by default.
 _INPUTS = {
@@ -206,7 +205,7 @@ def test_every_shipped_experiment_draws_every_key_of_the_default_pools_its_overl
         overlaid = {key for overlay in spec.startup_overlays for key in overlay.server_config}
         drawn = set()
         for seed in range(5):
-            deployment = service.generate(seed, experiment=experiment, excludes=NO_ZSTD).scenario["deployment"]
+            deployment = service.generate(seed, experiment=experiment).scenario["deployment"]
             for config in (deployment.get("server_config") or {}, *(deployment.get("instance_configs") or {}).values()):
                 drawn |= set(config) & keys
         assert drawn == keys - overlaid, experiment
@@ -241,8 +240,8 @@ def test_every_shipped_experiment_draws_the_same_valid_bounded_scenario_from_one
     service = generator_service()
     first_try = 0
     for seed in range(10):
-        generated = service.generate(seed, experiment=experiment, excludes=NO_ZSTD)
-        assert service.generate(seed, experiment=experiment, excludes=NO_ZSTD).scenario == generated.scenario
+        generated = service.generate(seed, experiment=experiment)
+        assert service.generate(seed, experiment=experiment).scenario == generated.scenario
         first_try += generated.attempt == 0
         plan = generated.plan
         configs = [
@@ -259,40 +258,12 @@ def test_every_shipped_experiment_draws_the_same_valid_bounded_scenario_from_one
             # One host runs every instance; cluster chaos draws clusters of up to 16 shards.
             shards = plan.deployment.get("primaries", 1) if plan.deployment_mode == "cluster" else 1
             assert shards * (1 + plan.deployment["replicas_per_primary"]) <= 15
-        # A codec the build lacks (zstd without BUILD_ZSTD) is then SKIP_UNSUPPORTED, never a failed start: the
-        # probe names every drawn codec setting as one the build may lack.
-        drawn = {key for config in configs for key in ("rdbcompression", "repl-compression") if key in config}
-        if drawn:
-            probes = [item for item in plan.components if item.use == "valkey.capability.build-probe"]
-            assert any(drawn <= set(probe.config.get("deployment_config") or ()) for probe in probes)
     assert first_try >= 8
     if experiment == CLUSTER_EXPERIMENT:
         # The live random test runs these seeds: their clusters fit one host.
         for seed in SMALL_CLUSTER_SEEDS:
             deployment = generate_scenario(seed)["deployment"]
             assert deployment["primaries"] * (1 + deployment["replicas_per_primary"]) <= 10, seed
-
-
-def test_experiment_hooks_draw_inputs_their_oracles_can_judge():
-    service = generator_service()
-    names = (
-        "primary_repl_compression",
-        "replica_repl_compression",
-        "primary_change_1",
-        "replica_change",
-        "primary_change_2",
-    )
-    ratios = set()
-    for seed in range(40):
-        inputs = service.generate(seed, experiment="valkey.repl-compression-runtime-change").plan.inputs
-        assert renegotiates(*(inputs[name] for name in names)) == (True, True)
-        # Known-bad (fail-open): a ratio required of incompressible values, or none of compressible ones.
-        inputs = service.generate(seed, experiment="valkey.repl-compression-full-sync").plan.inputs
-        assert inputs["min_ratio"] == (1.5 if inputs["compressible"] else 0)
-        ratios.add(inputs["compressible"])
-    assert ratios == {True, False}
-    # Known-bad: a replica that never changes what it advertises does not renegotiate.
-    assert renegotiates("lz4", "zstd", "zstd", "zstd", "no") == (True, False)
 
 
 @pytest.mark.parametrize("mode", ["standalone", "cluster"])

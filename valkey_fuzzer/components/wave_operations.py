@@ -125,17 +125,6 @@ OPERATIONS = {
         held=True,
         mutates=("config:repl-backlog-size", "config:client-output-buffer-limit", "run-state"),
     ),
-    "compression": Operation(
-        (STANDALONE,),
-        (*ROLE_TARGETS, "all"),
-        {
-            "target": ConfigField(str, default="primary"),
-            "value": ConfigField(str, default="lz4", choices=("no", "yes", "lz4", "zstd")),
-            "duration_s": _DURATION,
-        },
-        held=True,
-        mutates=("config:repl-compression", "run-state"),
-    ),
 }
 
 

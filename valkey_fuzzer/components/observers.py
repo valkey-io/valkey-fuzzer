@@ -65,7 +65,7 @@ def field_values(fields: dict[str, Any], path: str) -> list[Any]:
 
     A plain field name reads that field. A dotted path reads into the
     ``key=value,...`` mappings INFO reports, such as ``slave0.state``; a ``*``
-    in its first segment stands for an index, so ``slave*.repl_compression``
+    in its first segment stands for an index, so ``slave*.lag``
     reads that entry of every replica line. A missing plain field reads as
     ``None``; missing entries of a dotted path are skipped.
     """

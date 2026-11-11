@@ -147,7 +147,7 @@ def canonicalize_server_config(server_config: Optional[Mapping[str, Any]]) -> di
     """Validate a config mapping and return one entry per normalized option.
 
     Repeated directives must be represented by one list or tuple value. Two
-    mapping keys such as ``repl_compression`` and ``repl-compression`` are
+    mapping keys such as ``maxmemory_policy`` and ``maxmemory-policy`` are
     ambiguous because both produce the same Valkey command-line option, so
     they are rejected instead of relying on argument order.
     """
@@ -183,12 +183,9 @@ def build_server_config_arguments(server_config: Mapping[str, Any]) -> list[str]
 
 
 # The configs Valkey renamed, {old name: (new name, {old value: new value})}: a build knows one name or the
-# other, and either may be written. valkey-io/valkey#5261 renamed bgsave-default-method (fork, forkless) to
-# forkless-policy (require-fork, prefer-forkless). Every server start, and the build probe's CONFIG GET and
-# CONFIG SET, give each build the name it knows (config_for_build).
-RENAMED_CONFIGS = {
-    "bgsave-default-method": ("forkless-policy", {"fork": "require-fork", "forkless": "prefer-forkless"}),
-}
+# other, and either may be written. Every server start, and the build probe's CONFIG GET and CONFIG SET, give
+# each build the name it knows (config_for_build).
+RENAMED_CONFIGS: dict[str, tuple[str, dict[str, str]]] = {}
 _RENAMED_NAMES = {name for old, (new, _) in RENAMED_CONFIGS.items() for name in (old, new)}
 
 

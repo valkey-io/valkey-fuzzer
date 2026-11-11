@@ -356,7 +356,7 @@ def _check_pr_batch_inputs(tmp_path, scenarios, inputs):
 
 def test_the_pr_batch_runs_a_random_baseline_without_scenarios(tmp_path):
     inputs = {"random_seeds": "4", "request_id": "replay-007-122ec7e16"}
-    inputs["exclude_experiments"] = "valkey.replication-chaos  valkey.repl-compression-full-sync"
+    inputs["exclude_experiments"] = "valkey.replication-chaos  valkey.cluster-chaos"
     assert _check_pr_batch_inputs(tmp_path, {}, inputs) is None
     assert list((tmp_path / "candidates").iterdir()) == []
 

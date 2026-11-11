@@ -18,8 +18,8 @@ from valkey_fuzzer.results import ComponentResult, ComponentStatus, Evidence, Ou
 from valkey_fuzzer.service import ReplayDriftError
 
 GENERATED = ["--seed", "9", "--experiment", "valkey.cluster-chaos"]
-FORKLESS_SAVE = str(Path(__file__).resolve().parents[1] / "examples" / "valkey" / "forkless_save.yaml")
-DIFFERENTIAL = Path(__file__).resolve().parents[1] / "examples" / "valkey" / "differential_fork_vs_forkless.yaml"
+EXAMPLE = str(Path(__file__).resolve().parents[1] / "examples" / "valkey" / "snapshot_equivalence.yaml")
+DIFFERENTIAL = Path(__file__).resolve().parents[1] / "examples" / "valkey" / "differential_baseline_vs_candidate.yaml"
 
 
 @pytest.mark.usefixtures("report_root")
@@ -27,7 +27,7 @@ DIFFERENTIAL = Path(__file__).resolve().parents[1] / "examples" / "valkey" / "di
     ("argv", "status", "code"),
     [
         (["run", *GENERATED, "--export-scenario"], OutcomeStatus.FAIL, 1),
-        (["run", FORKLESS_SAVE, "--output"], OutcomeStatus.PASS, 2),
+        (["run", EXAMPLE, "--output"], OutcomeStatus.PASS, 2),
         # A FAIL stands when only the copy of its report cannot be written, as for run.
         (["replay", "REPORT", "--output"], OutcomeStatus.FAIL, 1),
         (["replay", "REPORT", "--output"], OutcomeStatus.PASS, 2),
@@ -41,7 +41,7 @@ def test_a_run_whose_requested_output_cannot_be_written_does_not_succeed(
     (tmp_path / "file").write_text("")
     if "REPORT" in argv:
         report = str(tmp_path / "recorded.json")
-        with patch("sys.argv", ["valkey-fuzzer", "run", FORKLESS_SAVE, "--output", report]):
+        with patch("sys.argv", ["valkey-fuzzer", "run", EXAMPLE, "--output", report]):
             main()
         argv = [report if item == "REPORT" else item for item in argv]
     with patch("sys.argv", ["valkey-fuzzer", *argv, str(tmp_path / "file" / "out")]):
@@ -141,17 +141,17 @@ def test_a_report_with_a_small_float_replays_and_minimizes_as_written(service, c
     # The report JSON holds 5e-05, which a YAML 1.1 loader reads back as the string "5e-05".
     scenario = tmp_path / "cancel.yaml"
     scenario.write_text(
-        "scenario_id: cancel\nseed: 11\nexperiment:\n  id: valkey.forkless-save-cancel\n"
-        "  inputs: {cancel_delay_s: 0.00005}\ndeployment: {mode: standalone}\n"
+        "scenario_id: cancel\nseed: 11\nexperiment:\n  id: valkey.aof-durability\n"
+        "  inputs: {run_after_crash_s: 0.00005}\ndeployment: {mode: standalone, replicas_per_primary: 1}\n"
     )
     canned_runs.status = OutcomeStatus.FAIL
     prepared = service.prepare_run(str(scenario))
     record = service.execute(prepared.plan, scenario=prepared.scenario, report_dir=str(tmp_path / "r"))
-    assert '"cancel_delay_s": 5e-05' in Path(record.report_path).read_text()
+    assert '"run_after_crash_s": 5e-05' in Path(record.report_path).read_text()
 
     assert service.prepare_replay(record.report_path).drift == []
     minimization = service.prepare_minimization(record.report_path)
-    assert minimization.scenario["experiment"]["inputs"]["cancel_delay_s"] == 5e-05
+    assert minimization.scenario["experiment"]["inputs"]["run_after_crash_s"] == 5e-05
 
     duplicated = tmp_path / "duplicated.json"
     duplicated.write_text('{"outcome": 1, "outcome": 2}')

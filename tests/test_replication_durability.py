@@ -234,7 +234,12 @@ def _window(instance_id="valkey-0"):
 
 
 _CLUSTER = (("mode", "cluster"), ("replicas_per_primary", 1))
-_FORKLESS = ("valkey.forkless-save-crash", (("mode", "cluster"),), ())
+# A cluster run whose primary is killed: only the killed shard's writes may be lost, within the window.
+_CLUSTER_CRASH = {
+    "loss_window_s": 2.5,
+    "loss_window_faults": ["kill-during-save"],
+    "loss_window_scope": "fault_targets",
+}
 _PARTITIONED = ("valkey.cluster-partition", (*_CLUSTER, ("addressing", "per_instance_loopback")), ())
 _MIXED_FORCED = ("valkey.mixed-version-cluster", _CLUSTER, (("force_failover", True),))
 _MIXED_GRACEFUL = ("valkey.mixed-version-cluster", _CLUSTER, ())
@@ -256,8 +261,8 @@ _WAIT = {"loss_window_scope": "fault_targets"}
         # No primary to read from: the harness cannot tell (liveness and deployment-state judge the deployment).
         pytest.param({"converge_timeout_s": 0.2}, None, {KEY: "v"}, [_op(1, "set", KEY, "ok", "v")], [], {}, "ERROR", id="no-live-primary"),
         # Only the crashed primary's writes may be lost.
-        pytest.param(_FORKLESS, {SHARD1_KEY: "v0"}, {SHARD1_KEY: "v0"}, [_op(1, "set", SHARD1_KEY, "ok", "v1", t_end=99.5, instance_id="valkey-1")], [_crash(target="valkey-0")], {}, "FAIL", id="crash-other-shard-lost"),
-        pytest.param(_FORKLESS, {SHARD0_KEY: "v0"}, {SHARD0_KEY: "v0"}, [_op(1, "set", SHARD0_KEY, "ok", "v1", t_end=99.5, instance_id="valkey-0")], [_crash(target="valkey-0")], {}, "PASS", id="crash-own-shard-lost"),
+        pytest.param((_CLUSTER_CRASH,), {SHARD1_KEY: "v0"}, {SHARD1_KEY: "v0"}, [_op(1, "set", SHARD1_KEY, "ok", "v1", t_end=99.5, instance_id="valkey-1")], [_crash(target="valkey-0")], {}, "FAIL", id="crash-other-shard-lost"),
+        pytest.param((_CLUSTER_CRASH,), {SHARD0_KEY: "v0"}, {SHARD0_KEY: "v0"}, [_op(1, "set", SHARD0_KEY, "ok", "v1", t_end=99.5, instance_id="valkey-0")], [_crash(target="valkey-0")], {}, "PASS", id="crash-own-shard-lost"),
         # Only the isolated primary's writes may be lost, and reads outside its shard stay strict.
         pytest.param(_PARTITIONED, {SHARD0_KEY: "v0"}, {SHARD0_KEY: "v0"}, [_op(1, "set", SHARD0_KEY, "ok", "v1", t_end=105.0, instance_id="valkey-1")], [_PARTITION], {}, "FAIL", id="partition-majority-lost"),
         pytest.param(_PARTITIONED, {SHARD0_KEY: "v0"}, {SHARD0_KEY: "v0"}, [_op(1, "set", SHARD0_KEY, "ok", "v1", t_end=105.0, instance_id="valkey-0")], [_PARTITION], {}, "PASS", id="partition-isolated-lost"),
@@ -276,7 +281,12 @@ def test_the_ledger_oracle_fails_on_any_value_a_correct_server_could_not_hold(
     tmp_path, oracle, handle, preload, ledger, evidence, summary, status
 ):
     cluster = isinstance(oracle, tuple)
-    spec = _experiment_oracle(*oracle) if cluster else _oracle(**oracle)
+    if not cluster:
+        spec = _oracle(**oracle)
+    elif len(oracle) == 1:  # a cluster run's ledger config, given directly
+        spec = _oracle(**oracle[0])
+    else:
+        spec = _experiment_oracle(*oracle)
     paths = {name: os.path.join(tmp_path, f"{name}.jsonl") for name in ("preload", "ledger")}
     write_jsonl(paths["preload"], ({"key": key, "value": value} for key, value in preload.items()))
     write_jsonl(paths["ledger"], ledger)

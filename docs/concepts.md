@@ -63,7 +63,7 @@ unique within the experiment.
 A **generator hook** is not a component: it is a function
 `hook(rng, scenario)` in its own registry that draws part of a
 [random scenario](scenarios-and-experiments.md#generator-hooks) (cluster
-chaos waves, runtime codec changes). It runs while a scenario is drawn and
+chaos waves, a tmpfs for a disk-full test). It runs while a scenario is drawn and
 never in a plan.
 
 A fault's `inject` installs its trigger. The fault is injected when the
@@ -110,11 +110,11 @@ result: an `evidence_id` (for example `valkey.rdb.reload-verified`), its
 Oracles read the evidence recorded before them.
 
 An experiment lists **required events** and **required evidence**. They exist
-because configuration alone does not show that a code path ran: a forkless
-save experiment must see INFO report a forkless save in progress, not only
-that forkless saving was configured. They are path evidence: a run that never
+because configuration alone does not show that a code path ran: a full
+resync experiment must see INFO count a full resync, not only that the
+replica was stalled long enough to need one. They are path evidence: a run that never
 produced them did not test what it claims, and is `ERROR`. Behaviour, such as
-no save left in progress after a cancel, is judged by oracles and actions:
+no save left in progress at the end, is judged by oracles and actions:
 observers only record it, and a `valkey.oracle.evidence` oracle checks what
 they recorded.
 
@@ -141,8 +141,8 @@ scenario seed, so a seed repeats them; it does not fix timing (see
   provider, and Valkey binary match the recorded provenance (a bare
   `plan.json` has none to check). It uses what is installed now, so it is not
   hermetic.
-- A **differential run** runs one seeded scenario under several variants (fork
-  versus forkless save, two builds) and compares chosen evidence fields: some
+- A **differential run** runs one seeded scenario under several variants (a
+  config on versus off, two builds) and compares chosen evidence fields: some
   must be equal, others must differ.
 - A **batch** runs many scenarios (random seeds under a **search profile**, a
   matrix, scenario files, the bug zoo, an earlier batch's failures) on

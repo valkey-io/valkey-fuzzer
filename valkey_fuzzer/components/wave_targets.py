@@ -153,12 +153,6 @@ class TargetSelector:
                 self._disrupted.add(choice.instance_id)
             return choice, None
 
-    def select_all(self) -> list[str]:
-        """Every instance that is not down, for an operation on ``all``."""
-
-        with self._lock:
-            return sorted(member.instance_id for member in self._members if member.instance_id not in self._down)
-
     def select_other(self, target: str, other_than: str, rng: Any) -> tuple[Optional[str], Optional[Refusal]]:
         """A live ``target`` (a role or an ID) other than ``other_than``, e.g. where a repoint sends a replica."""
 

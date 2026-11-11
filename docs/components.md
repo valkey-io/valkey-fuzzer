@@ -129,8 +129,7 @@ a retry succeeded makes the fault, and the run, `ERROR`.
 | [`valkey.oracle.quiet-end`](#valkeyoraclequiet-end) | oracle | any | every instance comes to rest: no blocked client or child process, links up, not spinning |
 | [`valkey.oracle.ledger`](#valkeyoracleledger) | oracle | any | data matches the workload ledger |
 | [`valkey.oracle.history`](#valkeyoraclehistory) | oracle | any | the workload's history is linearizable (Porcupine) |
-| [`valkey.oracle.rdb-snapshot`](#valkeyoraclerdb-snapshot) | oracle | any | captured RDBs reload with plausible data, in the expected codec |
-| [`valkey.oracle.repl-compression`](#valkeyoraclerepl-compression) | oracle | any | every replication link uses the predicted codec |
+| [`valkey.oracle.rdb-snapshot`](#valkeyoraclerdb-snapshot) | oracle | any | captured RDBs reload with plausible data |
 | [`valkey.oracle.deployment-state`](#valkeyoracledeployment-state) | oracle | any | the deployment's state validators pass, with a chaos action's kills and keys |
 | [`valkey.oracle.cluster-election-safety`](#valkeyoraclecluster-election-safety) | oracle | cluster | the election model's invariants hold |
 | [`valkey.oracle.binary-check`](#valkeyoraclebinary-check) | oracle | any | each instance runs its assigned binary |
@@ -192,7 +191,6 @@ schemas.
 | `valkey.oracle.liveness` | none | `valkey.liveness.verified` | none |
 | `valkey.oracle.quiet-end` | none | `valkey.quiet-end.verified` | none |
 | `valkey.oracle.rdb-snapshot` | none | `valkey.rdb.reload-verified` | `process.private-server` |
-| `valkey.oracle.repl-compression` | none | `valkey.repl.compression-verified` | none |
 | `valkey.oracle.reply-schema` | none | none | none |
 | `valkey.oracle.search-results` | none | `valkey.search.results-verified` | none |
 | `valkey.workload.command-table` | none | `valkey.workload.command-table` | none |
@@ -221,8 +219,8 @@ not a feature the host lacks). It never builds Valkey from source. With
 configuration the deployment gives the instances that run it.
 `deployment_config` names the settings the build may lack: when the build
 rejects the configuration but starts without those settings (and the
-probe's own `startup_config`), such as `rdbcompression zstd` on a build made
-without `BUILD_ZSTD=yes`, the run is `SKIP_UNSUPPORTED`; any other rejected
+probe's own `startup_config`), such as `dual-channel-replication-enabled yes`
+on a build from before dual-channel replication, the run is `SKIP_UNSUPPORTED`; any other rejected
 setting makes it `ERROR`. Those starts ask whether the build accepts the
 configuration and, once started, implements `commands`: a module the
 deployment loads (`deployment.server_config.loadmodule`) brings its commands
@@ -231,18 +229,17 @@ starts instead of the probe's own, and a deployment that does not load the
 module is `SKIP_UNSUPPORTED` (a module that fails to load is `ERROR`). The
 `config_get` values and INFO fields are checked on the probe's own
 `startup_config`, never on the deployment's. A scenario
-that configures a feature away (such as `bgsave-default-method fork` for a
-forkless experiment) therefore runs and lacks the experiment's required path
-evidence, which makes it `ERROR`; it is never hidden as unsupported.
+that configures a feature away therefore runs and lacks the experiment's
+required path evidence, which makes it `ERROR`; it is never hidden as unsupported.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `startup_config` | mapping | `{}` | Server config the probe server starts with; a directive the build rejects means `SKIP`. |
-| `deployment_config` | list | `[]` | Settings the build may lack, such as `[rdbcompression, repl-compression]`. Non-empty: also start each binary with each distinct config the deployment gives its instances (`server_config`, `instance_configs`, and startup overlays), on top of `startup_config`; `SKIP` when the build refuses it but starts without these settings, `ERROR` when it refuses something else. |
+| `deployment_config` | list | `[]` | Settings the build may lack, such as `[dual-channel-replication-enabled]`. Non-empty: also start each binary with each distinct config the deployment gives its instances (`server_config`, `instance_configs`, and startup overlays), on top of `startup_config`; `SKIP` when the build refuses it but starts without these settings, `ERROR` when it refuses something else. |
 | `scope` | `all` or `listed` | `all` | `listed` probes only `binaries` (which it then requires), not the deployment's. |
-| `config_get` | mapping | `{}` | Config name to `null` (must exist) or a list of accepted values. A renamed config, such as `bgsave-default-method`, is read by the name the build knows ([Effective server config](contracts.md#effective-server-config)). |
+| `config_get` | mapping | `{}` | Config name to `null` (must exist) or a list of accepted values. A renamed config is read by the name the build knows ([Effective server config](contracts.md#effective-server-config)). |
 | `info_fields` | mapping | `{}` | INFO section to the field names it must report. |
-| `lacks_configs` | list | `[]` | Configs the build must not know (`CONFIG GET` returns nothing), such as `repl-compression` for an older build; a build that knows one is `ERROR`. |
+| `lacks_configs` | list | `[]` | Configs the build must not know (`CONFIG GET` returns nothing), such as `dual-channel-replication-enabled` for a build from before it; a build that knows one is `ERROR`. |
 | `config_set` | mapping | `{}` | Config name to the values `CONFIG SET` must accept at runtime. |
 | `commands` | list | `[]` | Command names the build must implement; with `deployment_config` (`[loadmodule]` for a module's commands, such as `JSON.GET`), checked on the deployment config's starts. |
 | `min_version` | string or null | `null` | Lowest accepted version, such as `"8.1.0"`. |
@@ -788,7 +785,6 @@ see what Valkey did, or never got a save started.
 | `timeout_s` | number, 0.5 to 7200 | 120 | |
 | `poll_interval_s` | number, 0.001 to 10 | 0.02 | |
 | `expect` | `ok`, `err`, `not_completed`, or `any` | `ok` | The status every save must reach. |
-| `expect_type` | `fork`, `forkless`, or null | `null` | With `expect: ok`, the `rdb_last_bgsave_type` every save must report. |
 | `capture_rdb` | boolean | `true` | Copy each `ok` save's RDB into the component's artifact folder, for `valkey.oracle.rdb-snapshot`. |
 
 Evidence: `valkey.bgsave.result` per instance (status, observed save types,
@@ -796,12 +792,7 @@ persistence fields before and after, the captured RDB, the instance's `role`
 (`primary` or `replica`), `refusals` (how many `BGSAVE`s Valkey refused while
 another child ran, before the one it accepted),
 and `sent_at`, `replied_at`, and `finished_at`: when `BGSAVE` was sent, when
-its reply arrived, and when the save was seen finished). An `ok` save also
-records `rdb_format`, read from the first bytes of the RDB: `envelope` (`VCS`
-for a streaming-compressed RDB, `plain`, `unknown`, or `unreadable`), `codec`
-(`lz4` or `zstd` for `VCS`; `none` for `plain`, including LZF, which
-compresses strings inside a plain RDB), `size`, and `rdb_version` (plain) or
-`vcs_version` and `stream_kind` (`VCS`). Events:
+its reply arrived, and when the save was seen finished). Events:
 `<id>.save-started` once the commands were sent (faults that must hit a save
 in progress trigger on it), `<id>.save-completed` once every save finished or
 `timeout_s` passed.
@@ -999,7 +990,6 @@ start of the wave; each operation draws from its own random stream,
 | `partition` | `target` (`replica`), `duration_s` (1) | Drops traffic between the instance and every other instance (iptables), then heals. Needs `addressing: per_instance_loopback`; on a host without Linux, root, and iptables the action is `ERROR`. |
 | `stall` | `target` (`replica`), `duration_s` (1) | `SIGSTOP`, then `SIGCONT`. |
 | `backlog_pressure` | `repl_backlog_size` (16384), `output_limit` (65536 bytes), `duration_s` (1) | On the current primary: shrinks `repl-backlog-size` and the replica class of `client-output-buffer-limit`, then restores both. |
-| `compression` | `target` (`primary`, `replica`, `any`, `all`, or an ID; `primary`), `value` (`no`, `yes`, `lz4`, `zstd`; `lz4`), `duration_s` (1) | `CONFIG SET repl-compression`, then restores the previous value and waits, up to 15 seconds, until every live link renegotiated the codec the restored settings predict (Valkey reconnects each link after the `CONFIG SET`, one per second; a reconnect left for the next wave would land in it). Links still on another codec then are recorded as `codecs_unsettled`, for [`valkey.oracle.repl-compression`](#valkeyoraclerepl-compression) to judge. |
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -1074,7 +1064,7 @@ problems too. Replication chaos stops after the first failed wave.
 Evidence: `valkey.chaos.schedule` (`operations`, each with its `wave`,
 `op`, `shard`, `target`, `config`, `success`, `applied_at`, and `refused`,
 `skipped`, `missing`, `error`, `undo_error`, `undone_at`/`undone_by`,
-`codecs_unsettled`, or `excused_by`; `kills`, the kills whose instance is still down; `all_kills`,
+or `excused_by`; `kills`, the kills whose instance is still down; `all_kills`,
 every kill tried; `waves`, each with its `planned`, `applied`, `healed`
 (landed, and every change it owned is undone: a held fault, or a kill the
 heal restarted), `still_active` (a change it owns is still in place: its
@@ -1118,8 +1108,8 @@ applied (`ERROR`), with nothing to restart. After `SIGSTOP` it sends `SIGCONT` o
 has passed, or as soon as the pause is cut short; if that `SIGCONT` fails,
 recovery sends it again. A kill without `restart` lasts until the deployment
 is removed, so it is not undone; the fault records the instance as
-`valkey.instances.expected-down`, which the liveness, ledger, dataset-digest,
-and repl-compression oracles honor.
+`valkey.instances.expected-down`, which the liveness, ledger, and
+dataset-digest oracles honor.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -1220,8 +1210,8 @@ Observers only record: they collect evidence for the whole run, record an
 evidence item when a declared expectation is met, and never judge the
 server. An expectation or rule marked `required: true` becomes required
 evidence: path evidence, without which the run did not reach what it tests
-and is `ERROR`. Mark only path evidence required, such as a forkless save
-seen in progress. An expectation about behaviour, such as no save left in
+and is `ERROR`. Mark only path evidence required, such as a save seen
+in progress. An expectation about behaviour, such as no save left in
 progress or a partial resync counted, is left unmarked and checked by a
 [`valkey.oracle.evidence`](#valkeyoracleevidence) oracle that depends on the
 observer, which fails the run when it is missing. An observer that could not
@@ -1256,15 +1246,15 @@ instance suffices) or `all`. `required` defaults to `false`.
 
 A `field` can read into the `key=value,...` lists some INFO fields hold with a
 dotted path: `slave0.state` in `slave0:ip=…,state=online`. A `*` in the first
-segment stands for an index, so `slave*.repl_compression` names that entry of
+segment stands for an index, so `slave*.state` names that entry of
 every replica line; a predicate then holds when the path names at least one
 entry and every entry matches, and a delta sums the entries.
 
 ```yaml
 expectations:
-  - {evidence_id: valkey.forkless.in-progress, field: rdb_current_bgsave_type, equals: forkless, when: during, required: true}
+  - {evidence_id: valkey.save.in-progress, field: rdb_bgsave_in_progress, equals: "1", when: during, required: true}
   - {evidence_id: valkey.persistence.saves-advanced, field: rdb_saves, delta_min: 1, instances: all}
-  - {evidence_id: valkey.repl.links-lz4, field: slave*.repl_compression, equals: lz4, when: final}
+  - {evidence_id: valkey.repl.links-online, field: slave*.state, equals: online, when: final}
 ```
 
 Evidence: one item per met expectation, under its `evidence_id`.
@@ -1617,57 +1607,18 @@ bgsave with `capture_rdb: false` is rejected.
 | `bgsave` | string | | The `id` of the `valkey.action.bgsave` whose captured RDBs to check; checked when the scenario compiles. |
 | `workload` | string or null | `null` | The workload's `id`. |
 | `timeout_s` | number, 1 to 3600 | 60 | |
-| `expect_codec` | `none`, `lz4`, `zstd`, an `rdbcompression` value, or null | `null` | Every RDB's `rdb_format.codec` must be this (`no`, `yes`, and `lzf` mean `none`), and its load must log `Loading compressed RDB (algo=X)` exactly when the codec is compressed. |
-| `instance_reload` | boolean | `false` | With `expect_codec`: the saving instance must also have reloaded during the run (`DB loaded from …`), in that codec from `dump.rdb` and with no compressed load from the AOF (Valkey writes an AOF's base RDB plain). |
 | `load_binary` | string or reference, or null | `null` | Load with this binary instead of the saving instance's. |
 | `load_config` | mapping | `{}` | Server config of the loading server, such as `{rdb-version-check: relaxed}`. |
 | `expect` | `loads` or `refused` | `loads` | `refused`: the loading server must refuse every RDB cleanly (exit status 1, `Fatal error loading the DB`, no crash report); a configuration error is not a refusal. |
 | `refused_log` | regex or null | `null` | With `expect: refused`: the refusal must log this. |
 
 `FAIL` when a target captured no RDB, one fails to load (or loads when it
-must be refused), is in another codec, or its contents are wrong. `ERROR`
+must be refused), or its contents are wrong. `ERROR`
 when the loading server did not start or was still loading after
 `timeout_s`: whether the RDB loads is unknown; and when a target's save was
 `unanswered` or `unavailable`, or its RDB could not be copied.
 Evidence: `valkey.rdb.reload-verified` (per-snapshot results and a
 `content_digest` of the loaded data).
-
-### `valkey.oracle.repl-compression`
-
-Checks every primary-to-replica link against a model of Valkey's negotiation, built from each instance's
-`repl-compression`, `rdbcompression`, `repl-diskless-sync`, and `dual-channel-replication-enabled`, read
-when the oracle runs:
-
-- A replica advertises what its own `repl-compression` allows: `zstd` advertises zstd and lz4, `yes` and
-  `lz4` advertise lz4, `no` nothing. A build without `repl-compression` advertises nothing.
-- A primary uses the strongest codec its `repl-compression` allows that the replica advertised; a build
-  without `repl-compression` sends plaintext.
-- A full sync sends the RDB in that codec, disk-based only when the primary has `repl-diskless-sync no`,
-  the codec equals the whole-stream codec of its `rdbcompression`, and the replica is a build with
-  `repl-compression` (an older one reads an older RDB version); otherwise diskless. Dual-channel needs
-  it enabled on both sides and the primary's `repl-diskless-sync yes`; a sync that is diskless only
-  because of its codec or the replica's RDB version stays a normal sync.
-- A replica that loads from the socket loads the wire codec; one that loads from disk first rewrites the
-  RDB into its own `rdbcompression`.
-
-It waits up to `converge_timeout_s` for INFO to agree with the model, then requires, per link: INFO
-`slaveN:repl_compression` equals the predicted codec (absent for plaintext) and the compressor saw bytes;
-the primary logged `Replication compression enabled for replica R (algo=X)` in the link's last session
-(since its last `Replica R asks for synchronization`), and never for a plaintext link.
-
-| Field | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `converge_timeout_s` | number, 0 to 600 | 30 | How long INFO may take to match, for example after a runtime change. |
-| `min_ratio` | number or null | `null` | Every compressed link's uncompressed-to-compressed byte ratio must reach this. |
-| `full_sync` | boolean | `false` | Each link's last full sync must have run as predicted: the primary's `Starting BGSAVE for SYNC with target: T using: U, compression: X` line names the predicted target, dual-channel or normal sync, and codec, and the replica's load took the predicted codec. |
-| `expect_algo` | `none`, `lz4`, `zstd`, or null | `null` | Every link's predicted codec must be this; a scenario that configures something else (or two identical builds for a mixed-version pair) tests another codec, an `ERROR`. |
-| `min_links` | integer | 1 | Fewest links the deployment must have. |
-
-`FAIL` names the link, the expected codec and the configuration it came from, and what INFO or the log
-showed. `ERROR` when an instance is still unreachable at `converge_timeout_s`: its links were never seen;
-when a log the check needs cannot be read; or when the predicted codec is not `expect_algo`. Evidence: `valkey.repl.compression-verified` with `links` (`primary`, `replica`, `algo`,
-`observed`, `compressed_bytes`, `uncompressed_bytes`, `ratio`, `enabled_logged`, and with `full_sync`
-the expected and logged sync and the replica's load) and `instances` (each one's configuration).
 
 ### `valkey.oracle.deployment-state`
 

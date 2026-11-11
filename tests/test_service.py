@@ -29,21 +29,21 @@ from valkey_fuzzer.schema import ExperimentDocumentError, ScenarioCompileError
 from valkey_fuzzer.service import RunService
 from valkey_fuzzer.testing import FakeDeploymentProvider
 
-FORKLESS = str(Path(__file__).resolve().parents[1] / "examples" / "valkey" / "forkless_save.yaml")
+EXAMPLE = str(Path(__file__).resolve().parents[1] / "examples" / "valkey" / "snapshot_equivalence.yaml")
 
 
 def test_report_folders_sort_by_start_time_and_never_collide(tmp_path, monkeypatch):
     suffixes = iter(["aaaaaa", "aaaaaa", "bbbbbb", "cccccc"])
     monkeypatch.setattr(hoststate.secrets, "token_hex", lambda size: next(suffixes))
     monkeypatch.setattr(hoststate.time, "time", lambda: 1_700_000_000.25)
-    first = new_report_folder(str(tmp_path), "forkless-save")
+    first = new_report_folder(str(tmp_path), "snapshot-equivalence")
     # Same millisecond and the same random suffix: the next suffix is tried.
-    second = new_report_folder(str(tmp_path), "forkless-save")
+    second = new_report_folder(str(tmp_path), "snapshot-equivalence")
     monkeypatch.setattr(hoststate.time, "time", lambda: 1_700_000_000.5)
     third = new_report_folder(str(tmp_path), "a/b c")
     assert [Path(item).name for item in (first, second, third)] == [
-        "20231114T221320.250Z-forkless-save-aaaaaa",
-        "20231114T221320.250Z-forkless-save-bbbbbb",
+        "20231114T221320.250Z-snapshot-equivalence-aaaaaa",
+        "20231114T221320.250Z-snapshot-equivalence-bbbbbb",
         "20231114T221320.500Z-a-b-c-cccccc",
     ]
     (tmp_path / "file").write_text("")
@@ -52,7 +52,7 @@ def test_report_folders_sort_by_start_time_and_never_collide(tmp_path, monkeypat
 
 
 def test_provenance_of_the_same_run_matches_but_a_garbled_record_drifts(service):
-    plan = service.prepare_run(FORKLESS).plan
+    plan = service.prepare_run(EXAMPLE).plan
     recorded = reproducer(service.catalog, plan)
     assert provenance_drift(service.catalog, plan, recorded) == ([], [])
     # Known-bad: a malformed list compares as empty, so what it should hold drifts.
@@ -74,7 +74,7 @@ def test_provenance_of_the_same_run_matches_but_a_garbled_record_drifts(service)
     ],
 )
 def test_replay_and_minimize_reject_an_incomplete_run_report(service, tmp_path, edit, missing):
-    prepared = service.prepare_run(FORKLESS)
+    prepared = service.prepare_run(EXAMPLE)
     report = copy.deepcopy(service.execute(prepared.plan, scenario=prepared.scenario).report)
     edit(report)
     path = tmp_path / "report.json"
@@ -158,7 +158,7 @@ def test_registered_components_and_directory_experiments_compile_and_run_on_a_fr
     ("files", "error"),
     [
         ({"first/a.yaml": "example.a", "second/a.yaml": "example.a"}, DuplicateExperimentError),
-        ({"first/a.yaml": "valkey.forkless-save"}, DuplicateExperimentError),
+        ({"first/a.yaml": "valkey.snapshot-equivalence"}, DuplicateExperimentError),
         ({"first/a.yaml": "example.a", "second/broken.yaml": None}, ExperimentDocumentError),
     ],
     ids=["one-id-in-two-directories", "a-directory-and-a-shipped-experiment", "a-malformed-document"],

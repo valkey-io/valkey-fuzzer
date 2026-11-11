@@ -38,7 +38,6 @@ from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
 from valkey_fuzzer.schema import BASE64_KEY, ConfigError, ConfigField, ConfigSchema, plain_config
 
 from .capabilities import resolve_binary, starts_with
-from .compression import rdb_format
 from .instances import (
     check_shard,
     close_quietly,
@@ -1626,7 +1625,6 @@ _BGSAVE_FIELDS = {
     "timeout_s": ConfigField(float, default=120.0, minimum=0.5, maximum=7200),
     "poll_interval_s": ConfigField(float, default=0.02, minimum=0.001, maximum=10),
     "expect": ConfigField(str, default="ok", choices=("ok", "err", "not_completed", "any")),
-    "expect_type": ConfigField(str, allow_none=True, default=None, choices=("fork", "forkless", None)),
     "capture_rdb": ConfigField(bool, default=True),
 }
 
@@ -1839,12 +1837,6 @@ class BgsaveAction:
                 unseen.append(f"{record['instance_id']}: {_UNSEEN[record['status']]} ({record['error']})")
             elif config["expect"] != "any" and record["status"] != config["expect"]:
                 problems.append(f"{record['instance_id']}: expected {config['expect']}, got {record['status']}")
-            if config["expect_type"] and config["expect"] == "ok":
-                last_type = record["after"].get("rdb_last_bgsave_type")
-                if last_type != config["expect_type"]:
-                    problems.append(
-                        f"{record['instance_id']}: last save type {last_type!r}, expected {config['expect_type']}"
-                    )
         return make_result(
             spec,
             ComponentStatus.FAIL if problems else ComponentStatus.ERROR if unseen else ComponentStatus.PASS,
@@ -1874,15 +1866,13 @@ class BgsaveAction:
         }
         if status != "ok":
             return record
-        saved = target.rdb_path
         if config["capture_rdb"]:
             destination = os.path.join(component_artifact_dir(context, spec), f"{target.instance_id}.rdb")
             try:
                 shutil.copyfile(target.rdb_path, destination)
-                record["rdb_artifact"] = saved = destination
+                record["rdb_artifact"] = destination
             except OSError as exc:
                 record["capture_error"] = str(exc)
-        record["rdb_format"] = rdb_format(saved)
         return record
 
 
@@ -2552,7 +2542,6 @@ _BGSAVE_DECLARES = Declarations(
                     "finished_at": nullable(float),
                     "rdb_artifact": optional(str),
                     "capture_error": optional(str),
-                    "rdb_format": optional(dict),
                 }
             ),
             many=True,

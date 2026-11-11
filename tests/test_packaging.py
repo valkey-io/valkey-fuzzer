@@ -26,7 +26,7 @@ def test_the_data_files_of_the_components_ship_with_them():
     patterns = re.findall(r'"([^"]+)"', shipped)
     components = ROOT / "valkey_fuzzer" / "components"
     data = [path for path in components.rglob("*") if path.is_file() and path.suffix in (".yaml", ".json")]
-    assert len(data) > 30
+    assert len(data) > 20
     for path in data:
         assert any(path.match(pattern) for pattern in patterns), path
 

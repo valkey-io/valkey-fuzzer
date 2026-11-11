@@ -12,7 +12,7 @@ setup errors: ``ERROR``.
 With ``deployment_config`` it also starts each deployment binary with the
 configuration the deployment gives the instances that run it, and only asks
 whether the build accepts it. ``deployment_config`` names the settings the
-build may lack (such as ``rdbcompression``, whose codec a build may not have):
+build may lack (a setting an older build does not have):
 a rejected configuration is ``SKIP`` only when the build starts without those
 settings, and ``ERROR`` otherwise, so a typo in any other setting never skips.
 It never judges whether that configuration is what the experiment wants: a
@@ -82,11 +82,11 @@ _PROBE_FIELDS = {
     # Configs the build must NOT know (CONFIG GET returns nothing), e.g. to
     # prove a binary really is older than a feature; one it knows is ERROR.
     "lacks_configs": ConfigField(list, default=list, items=TEXT),
-    # The settings the build may lack, such as rdbcompression: also start each
+    # The settings the build may lack: also start each
     # deployment binary with the server config the deployment gives the
     # instances that run it (deployment, instance, and startup overlay
     # layers), once per distinct config. A config the build rejects is SKIP
-    # when the build starts without these settings (zstd without BUILD_ZSTD),
+    # when the build starts without these settings,
     # and ERROR otherwise. Only whether the server starts counts, never the
     # values it runs with. Empty: the deployment config is not probed.
     "deployment_config": ConfigField(list, default=list, items=TEXT),

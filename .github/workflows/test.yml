@@ -128,4 +128,4 @@ jobs:
         TLA2TOOLS_JAR: ${{ runner.temp }}/tla2tools.jar
       run: |
         python -m pytest -q -rs -m live tests/test_live_spec_register.py tests/test_live_valkey_experiments.py \
-          -k "aof-durability or replication- or cluster-chaos or forkless-save-with-fork or data_only_experiment or register_counterexample"
+          -k "aof-durability or replication- or cluster-chaos or data_only_experiment or register_counterexample"

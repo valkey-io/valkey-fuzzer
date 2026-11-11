@@ -82,7 +82,6 @@ _FORCED = {"extra": (_component("valkey.action.failover", "failover", force=True
         ("valkey.capability.build-probe", {"config_set": {"x": "zstd"}}, {}, "must be a list"),
         ("valkey.capability.build-probe", {"config_set": {"x": []}}, {}, "at least one value"),
         ("valkey.capability.build-probe", {"lacks_configs": ["x"], "config_get": {"x": None}}, {}, "both required"),
-        ("valkey.oracle.rdb-snapshot", {"bgsave": "bgsave", "instance_reload": True}, _BGSAVE, "needs expect_codec"),
         ("valkey.oracle.rdb-snapshot", {"bgsave": "bgsave", "refused_log": "x"}, _BGSAVE, "only with expect: refused"),
         ("valkey.oracle.rdb-snapshot", {"bgsave": "bgsave", "expect": "refused", "refused_log": "("}, _BGSAVE, "not a valid regex"),
         ("valkey.oracle.rdb-snapshot", {"bgsave": "bgsave"}, {"extra": (_component("valkey.action.bgsave", "bgsave", capture_rdb=False),)}, "capture_rdb: false"),
@@ -607,7 +606,7 @@ class _SaveClient(FakeClient):
             return {"role": "master"}
         self.polls += 1
         done = self.polls > 2
-        return {"rdb_bgsave_in_progress": "0" if done else "1", "rdb_current_bgsave_type": "none" if done else "forkless", "rdb_last_bgsave_status": self.status, "rdb_last_bgsave_type": "forkless", "rdb_saves": self.polls}  # fmt: skip
+        return {"rdb_bgsave_in_progress": "0" if done else "1", "rdb_current_bgsave_type": "none" if done else "fork", "rdb_last_bgsave_status": self.status, "rdb_last_bgsave_type": "fork", "rdb_saves": self.polls}  # fmt: skip
 
 
 class _BusyClient(FakeClient):
@@ -722,7 +721,7 @@ def test_bgsave_follows_each_save_and_records_the_rdb_it_wrote(
         (tmp_path / node.instance_id).mkdir()
         failing = setup_error and node.instance_id == "valkey-1"
         handle.clients[node.instance_id] = _SaveClient(tmp_path / node.instance_id, rdb, status, failing)
-    spec = _spec("valkey.action.bgsave", "save", instances="all", expect_type="forkless")
+    spec = _spec("valkey.action.bgsave", "save", instances="all")
     context = fake_context(handle, artifact_dir=str(tmp_path / "artifacts"))
     if setup_error:
         with pytest.raises(RuntimeError, match="unknown command"):
@@ -733,7 +732,6 @@ def test_bgsave_follows_each_save_and_records_the_rdb_it_wrote(
         records = [dict(item.value) for item in result.evidence]
         assert all(("rdb_artifact" in record) is (rdb is not None) for record in records)
         if rdb is not None:
-            assert {record["rdb_format"]["codec"] for record in records} == {"lz4"}
             assert all(os.path.exists(record["rdb_artifact"]) for record in records)
     # Every client is closed, even when a later target's setup failed.
     assert all(client.closed for client in handle.clients.values())

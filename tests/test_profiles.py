@@ -61,8 +61,8 @@ def test_weights_never_add_a_value_the_experiment_does_not_list():
 def test_an_edge_heavy_profile_draws_more_edges_and_changes_no_experiments_oracles():
     catalog = generator_service().catalog
     adversarial = find_profile(catalog, "adversarial")
-    plain = sum(_generate("valkey.forkless-save", seed).boundary for seed in range(40))
-    assert sum(_generate("valkey.forkless-save", seed, adversarial).boundary for seed in range(40)) > plain
+    plain = sum(_generate("valkey.replication-chaos", seed).boundary for seed in range(40))
+    assert sum(_generate("valkey.replication-chaos", seed, adversarial).boundary for seed in range(40)) > plain
 
     def oracles(plan):
         return sorted((item.id, item.use) for item in plan.components if item.role is ComponentRole.ORACLE)

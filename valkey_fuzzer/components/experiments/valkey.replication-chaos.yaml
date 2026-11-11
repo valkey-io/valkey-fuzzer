@@ -1,9 +1,8 @@
 # Replication chaos on a standalone primary and its replicas, under writes:
 # seeded waves of kills, restarts, graceful (FAILOVER TO) and forced
-# (REPLICAOF NO ONE) promotions, repoints, stalls, backlog pressure,
-# compression flips, and partitions (Linux, root, iptables, per-instance
-# loopback addresses). After every wave the action heals the deployment and
-# validates it with writes paused: one primary, every replica linked to it,
+# (REPLICAOF NO ONE) promotions, repoints, stalls, backlog pressure, and
+# partitions (Linux, root, iptables, per-instance loopback addresses). After
+# every wave the action heals the deployment and validates it with writes paused: one primary, every replica linked to it,
 # equal offsets, and equal test keys.
 #
 # Durability matches what Valkey guarantees: a graceful promotion loses
@@ -12,12 +11,7 @@
 # stopped acknowledging (the action publishes each such window as
 # valkey.data.loss-window evidence, scoped to the old primary); a write WAIT
 # confirmed on every replica (inputs.wait_replicas) is never lost.
-#
-# Every instance starts with the rdbcompression input (valkey.compression), and
-# random scenarios also draw repl-compression; the `compression` oracle checks
-# that every final link, after the waves' compression flips and topology
-# changes, uses the codec the final configuration negotiates.
-extends: [valkey.writes, valkey.compression, valkey.history, valkey.command-table]
+extends: [valkey.writes, valkey.history, valkey.command-table]
 id: valkey.replication-chaos
 deployment:
   modes: [standalone]
@@ -36,13 +30,12 @@ metadata:
       mutation_rate: {minimum: 50, maximum: 1000}
       stable_keys: {minimum: 0, maximum: 5000}
       validation: fixed
-    server_config: [valkey.pool.compression]
 inputs:
   required: [waves]
   properties:
     waves:
       type: array
-      description: "waves of operations that start together: kill, restart, promote, repoint, partition, stall, backlog_pressure, compression"
+      description: "waves of operations that start together: kill, restart, promote, repoint, partition, stall, backlog_pressure"
     validation:
       type: object
       default: {stabilization_wait: 0, max_retries: 2, retry_delay: 1}
@@ -75,10 +68,6 @@ components:
     config:
       validation: {$ref: inputs.validation}
       chaos: chaos
-
-  - use: valkey.oracle.repl-compression
-    id: compression
-    config: {converge_timeout_s: 60}
 
   - use: valkey.oracle.ledger
     id: data

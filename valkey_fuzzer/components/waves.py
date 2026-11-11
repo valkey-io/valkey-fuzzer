@@ -194,9 +194,7 @@ class WaveRun:
             kind, target = operation["op"], operation.get("target")
             rng = self.rngs[f"{number}.{index}"] = self.context.rng(self.spec.id, f"wave-{number}-op-{index}")
             reason, shard = None, operation.get("shard")
-            if kind == "compression" and target == "all":
-                target = self.selector.select_all()
-            elif kind != "restart" and OPERATIONS[kind].targets:
+            if kind != "restart" and OPERATIONS[kind].targets:
                 member, reason = self.selector.select(kind, target, rng)
                 target, shard = (member.instance_id, member.shard) if member else (None, None)
             record: dict[str, Any] = {

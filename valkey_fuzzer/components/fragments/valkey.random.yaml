@@ -24,15 +24,6 @@ metadata:
         repl-diskless-load: [disabled, on-empty-db, swapdb]
         dual-channel-replication-enabled: ["no", "yes"]
         repl-diskless-sync-delay: ["0", "1", "5"]
-      # The same codecs the valkey.compression and valkey.repl-compression
-      # inputs take. zstd needs a build with BUILD_ZSTD=yes: an experiment that
-      # draws from this pool probes its builds with deployment_config naming
-      # both settings, so zstd on another build is SKIP_UNSUPPORTED (or
-      # --exclude it).
-      valkey.pool.compression:
-        rdbcompression: ["no", "yes", lzf, lz4, zstd]
-        repl-compression: ["no", "yes", lz4, zstd]
-        scope: [deployment, role]
       # At fuzzing load the IO threads of 9.1 and later never start (they start
       # once the main thread is busy 30% of the time); io-threads-always-active,
       # as upstream's --io-threads test mode sets, starts them on every event,

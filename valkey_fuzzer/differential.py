@@ -4,21 +4,20 @@ A differential document runs the same base scenario (same seed, so the same
 generated workload) under several variants, then compares selected evidence
 fields.  ``equal`` rules hold externally visible behaviour constant (dataset
 digests, client replies, reloaded snapshots); ``differ`` rules require the
-path-specific evidence to change (e.g. the save type), proving each variant
-actually exercised a different path.
+path-specific evidence to change, proving each variant actually exercised a
+different path.
 
-    differential_id: fork-vs-forkless
+    differential_id: baseline-vs-candidate
     base: {<scenario>}
     variants:
-      fork:
-        deployment.server_config: {bgsave-default-method: fork, ...}
-      forkless:
-        deployment.server_config: {bgsave-default-method: forkless, ...}
+      baseline:
+        deployment.valkey_binary: {$ref: artifacts.baseline.binary}
+      candidate:
+        deployment.valkey_binary: {$ref: artifacts.candidate.binary}
     compare:
       equal:
         - {evidence_id: valkey.dataset.digest, source: dataset, field: digest}
-      differ:
-        - {evidence_id: valkey.bgsave.result, source: bgsave, field: after.rdb_last_bgsave_type}
+        - {evidence_id: valkey.workload.ledger, source: writes, field: replies_digest}
 
 Evidence IDs and fields are opaque here; the experiment defines them.
 """

@@ -139,10 +139,10 @@ def environment_provider(behavior: ProviderBehavior, kind) -> EnvironmentProvide
 
 
 def recorded_report(service, tmp_path, edit=None) -> str:
-    """Run examples/valkey/forkless_save.yaml with ``service`` and save its report, changed by ``edit``, for a replay."""
+    """Run examples/valkey/snapshot_equivalence.yaml with ``service`` and save its report, changed by ``edit``, for a replay."""
 
     prepared = service.prepare_run(
-        str(Path(__file__).resolve().parents[1] / "examples" / "valkey" / "forkless_save.yaml")
+        str(Path(__file__).resolve().parents[1] / "examples" / "valkey" / "snapshot_equivalence.yaml")
     )
     report = copy.deepcopy(
         service.execute(prepared.plan, scenario=prepared.scenario, report_dir=str(tmp_path / "r")).report
@@ -223,15 +223,13 @@ def sigterm_during(target, call):
     return seen, code
 
 
-def valkey_build(directory: Path, knows: str) -> Path:
-    """A valkey-server in ``directory`` that knows forkless saves only by config ``knows`` (bgsave-default-method,
-    before valkey-io/valkey#5261, or forkless-policy): it rejects the other name as Valkey rejects a directive it
-    does not know, and exits printing its arguments, never starting."""
+def valkey_build(directory: Path, rejects: str) -> Path:
+    """A valkey-server in ``directory`` that rejects config ``rejects`` as Valkey rejects a directive it does not
+    know (a build on the other side of a rename), and exits printing its arguments, never starting."""
 
-    other = {"bgsave-default-method": "forkless-policy", "forkless-policy": "bgsave-default-method"}[knows]
     binary = directory / "valkey-server"
     binary.write_text(
-        f'#!/bin/sh\ncase " $* " in *" --{other} "*) echo "Bad directive or wrong number of arguments";; esac\necho "$*"\nexit 1\n'
+        f'#!/bin/sh\ncase " $* " in *" --{rejects} "*) echo "Bad directive or wrong number of arguments";; esac\necho "$*"\nexit 1\n'
     )
     binary.chmod(0o755)
     return binary

@@ -35,12 +35,9 @@ def _base(experiment):
     if not OLD_BINARY:
         return base
     old = {"old": {"use": "valkey.artifact.local-binary", "with": {"path": OLD_BINARY}}}
-    if experiment in ("valkey.mixed-version-cluster", "valkey.repl-compression-mixed-version"):
+    if experiment == "valkey.mixed-version-cluster":
         base["deployment"]["instance_binaries"] = {"replica": OLD_BINARY}
     inputs = {
-        "valkey.repl-compression-mixed-version": {"old_binary": {"$ref": "artifacts.old.binary"}},
-        # An older release refuses an RDB from a newer one in every codec.
-        "valkey.rdb-compression-compat": {"load_binary": {"$ref": "artifacts.old.binary"}, "load_expect": "refused"},
         "valkey.rolling-upgrade": {"to_binary": {"$ref": "artifacts.new.binary"}},
     }.get(experiment)
     if inputs:
@@ -54,7 +51,7 @@ def _base(experiment):
 
 
 # A run of these without a second build is set up wrong, so it is ERROR.
-TWO_BUILDS = ("valkey.mixed-version-cluster", "valkey.repl-compression-mixed-version", "valkey.rolling-upgrade")
+TWO_BUILDS = ("valkey.mixed-version-cluster", "valkey.rolling-upgrade")
 
 
 @pytest.mark.parametrize("experiment", opted_in(valkey_service().catalog))

@@ -314,7 +314,6 @@ jobs:
           if [ "${RANDOM_SEEDS}" != "0" ]; then
             random=(--random all --seeds "${RANDOM_SEEDS}" --first-seed "$((16#${INPUT_VALKEY_SHA:0:7}))"
               --exclude experiment=valkey.rolling-upgrade --exclude experiment=valkey.mixed-version-cluster
-              --exclude experiment=valkey.repl-compression-mixed-version
               --exclude server_config.io-threads=4)
             for experiment in ${EXCLUDE_EXPERIMENTS}; do
               random+=(--exclude "experiment=${experiment}")

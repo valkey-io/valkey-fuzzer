@@ -36,7 +36,7 @@ class FakeStandalone:
     """A primary (valkey-0) and ``replicas`` replicas whose replication the fake clients report.
 
     ``record_dead=False`` is a deployment that forgets the new role of a stopped instance; ``fail`` maps a
-    signal or command (``"SIGCONT"``, ``"restart"``, ``"CONFIG SET repl-compression no"``) to how many times it
+    signal or command (``"SIGCONT"``, ``"restart"``, ``"CONFIG SET repl-backlog-size 1048576"``) to how many times it
     fails before it works.
     """
 
@@ -53,7 +53,10 @@ class FakeStandalone:
         self.upstream = {item: None if item == "valkey-0" else "valkey-0" for item in ids}
         self.recorded = dict(self.upstream)
         self.offset, self.replid = dict.fromkeys(ids, 1000), dict.fromkeys(ids, "a" * 40)
-        self.config = {item: {"repl-compression": "no", "repl-backlog-size": "1048576"} for item in ids}
+        self.config = {
+            item: {"repl-backlog-size": "1048576", "client-output-buffer-limit": "replica 268435456 67108864 60"}
+            for item in ids
+        }
         self.failover_works, self.record_dead, self.fail = failover_works, record_dead, dict(fail or {})
         self.commands, self.exit_on_its_own = [], None
         self.lock = threading.RLock()
@@ -150,8 +153,8 @@ class FakeStandalone:
 
     def execute(self, instance_id, args):
         name = " ".join(str(arg) for arg in args).upper()
-        if name == "CONFIG SET REPL-COMPRESSION NO":
-            self._refuse("CONFIG SET repl-compression no")
+        if name == "CONFIG SET REPL-BACKLOG-SIZE 1048576":
+            self._refuse("CONFIG SET repl-backlog-size 1048576")
         with self.lock:
             if not self.reachable(instance_id):
                 raise ConnectionError(f"{instance_id} is unreachable")
@@ -275,7 +278,6 @@ def test_held_faults_and_a_restart_are_undone_within_the_wave():
     handle = FakeStandalone()
     waves = [
         [{"op": "stall", "target": "valkey-1", "duration_s": 0.05},
-         {"op": "compression", "target": "all", "value": "lz4", "duration_s": 0.05},
          {"op": "backlog_pressure", "duration_s": 0.05}, {"op": "repoint", "target": "valkey-2", "to": "valkey-1"}],
         [{"op": "kill", "target": "valkey-2"}, {"op": "restart", "target": "killed", "delay_s": 0.1}],
         # A promotion of an instance the wave killed is refused and excused.
@@ -285,7 +287,6 @@ def test_held_faults_and_a_restart_are_undone_within_the_wave():
     result, _ = run_chaos(handle, waves)
     assert result.status is ComponentStatus.PASS, result.summary
     assert not any(handle.stopped.values())
-    assert {config["repl-compression"] for config in handle.config.values()} == {"no"}
     assert handle.config["valkey-0"]["repl-backlog-size"] == "1048576"
     # The heal pointed the chained replica back at the primary.
     assert handle.upstream["valkey-2"] == "valkey-0"
@@ -392,10 +393,10 @@ def test_replication_chaos_that_breaks_or_runs_nothing_does_not_pass(monkeypatch
 # Conflict keys: overlapping faults on one state are serialized
 # ---------------------------------------------------------------------------
 
-# The second flip starts while the first holds and would end after it.
+# The second change starts while the first holds and would end after it.
 _FLIPS = [
-    {"op": "compression", "target": "valkey-0", "value": "lz4", "duration_s": 0.1},
-    {"op": "compression", "target": "valkey-0", "value": "yes", "duration_s": 0.1, "delay_s": 0.05},
+    {"op": "backlog_pressure", "repl_backlog_size": 16384, "output_limit": 65536, "duration_s": 0.1},
+    {"op": "backlog_pressure", "repl_backlog_size": 65536, "output_limit": 262144, "duration_s": 0.1, "delay_s": 0.05},
 ]
 
 
@@ -406,7 +407,7 @@ def test_overlapping_faults_on_one_instance_are_serialized(monkeypatch):
     first, second = chaos_operation(result, "1.0"), chaos_operation(result, "1.1")
     # The second waited for the first's undo, so it saved the original value.
     assert second["waited_for"] == ["1.0"] and second["applied_at"] >= first["undone_at"]
-    assert handle.config["valkey-0"]["repl-compression"] == "no"
+    assert handle.config["valkey-0"]["repl-backlog-size"] == "1048576"
 
     # A kill waits for a stall to be undone, then kills a running process that the heal restarts.
     handle = FakeStandalone()
@@ -420,24 +421,28 @@ def test_overlapping_faults_on_one_instance_are_serialized(monkeypatch):
         and chaos_operation(result, "1.1")["undone_by"] == "heal"
     )
 
-    # Known-bad: without conflict keys the second flip saved the first's lz4 and restored it last.
+    # Known-bad: without conflict keys the second change saved the first's backlog and restored it last.
     monkeypatch.setattr(StandaloneWaves, "claim", lambda self, record, owns: True)
     handle = FakeStandalone(replicas=1)
     run_chaos(handle, [_FLIPS])
-    assert handle.config["valkey-0"]["repl-compression"] == "lz4"
+    assert handle.config["valkey-0"]["repl-backlog-size"] == "16384"
 
 
 # ---------------------------------------------------------------------------
 # Undo obligations: an undo the harness could not complete is ERROR, whatever later waves show
 # ---------------------------------------------------------------------------
 
-_RESTORE = "CONFIG SET repl-compression no"
+_RESTORE = "CONFIG SET repl-backlog-size 1048576"
 
 
 @pytest.mark.parametrize(
     ("refusals", "undone_by", "summary"),
     [
-        (1, "heal", "wave 1 compression 1.0 could not be undone (OSError: CONFIG SET repl-compression no refused)"),
+        (
+            1,
+            "heal",
+            "wave 1 backlog_pressure 1.0 could not be undone (OSError: CONFIG SET repl-backlog-size 1048576 refused)",
+        ),
         (2, "cleanup", "wave 1: could not undo the server.config on valkey-0"),
         (3, None, "the changes of operation(s) ['1.0'] are still in place after the final cleanup"),
     ],
@@ -466,7 +471,7 @@ _STALL = [[{"op": "stall", "target": "valkey-1", "duration_s": 0.05}]]
         ({"SIGCONT": 2}, _STALL, []),
         ({"SIGCONT": 9}, _STALL, ["1.0"]),
         ({"SIGCONT": 9}, [[{"op": "stall", "target": "valkey-1", "duration_s": 0.05},
-                           {"op": "compression", "target": "valkey-0", "value": "lz4", "duration_s": 0.05}]], ["1.0"]),
+                           {"op": "backlog_pressure", "duration_s": 0.05}]], ["1.0"]),
         ({"restart": 99}, [[{"op": "kill", "target": "valkey-2"}]], ["1.0"]),
         ({}, [[{"op": "kill", "target": "valkey-2"}]], []),
     ],

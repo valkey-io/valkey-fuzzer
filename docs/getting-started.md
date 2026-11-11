@@ -61,7 +61,7 @@ build:
 valkey-fuzzer run examples/valkey/aof_durability.yaml --valkey-binary ~/src/valkey/src/valkey-server
 ```
 
-Some experiments need features that only some builds have (forkless BGSAVE,
+Some experiments need features that only some builds have (such as
 `cluster-config-save-behavior`). They probe the binary first and report
 `SKIP_UNSUPPORTED` instead of failing when it lacks a feature they name.
 
@@ -208,8 +208,8 @@ seed. Everything about cluster chaos is in
 
 [`examples/valkey/`](../examples/valkey/) has a scenario for every Valkey
 experiment, and the [experiment table](scenarios-and-experiments.md#the-valkey-experiments)
-says what each one checks and what it needs. Some need a second build, a
-forkless BGSAVE build, or Linux and root; on a host without them they report
+says what each one checks and what it needs. Some need a second build, or
+Linux and root; on a host without them they report
 `SKIP_UNSUPPORTED`. Edit `base_port` when you run several scenarios at once by
 hand, so their ports do not overlap, or let a [batch](#running-many-tests) run
 them.
@@ -217,7 +217,7 @@ them.
 The same runner also drives two tools over runs:
 
 ```bash
-valkey-fuzzer diff examples/valkey/differential_fork_vs_forkless.yaml
+valkey-fuzzer diff examples/valkey/differential_baseline_vs_candidate.yaml
 valkey-fuzzer minimize report.json --output minimized.yaml
 ```
 
@@ -240,7 +240,7 @@ valkey-fuzzer batch --random all --seeds 5 --profile pr-quick --workers 4 --out 
 # Scenario files, a whole directory of them, as written
 valkey-fuzzer batch --scenarios examples/valkey/aof_durability.yaml --scenarios proposals/
 # A matrix over a base scenario, from a spec
-valkey-fuzzer batch examples/valkey/forkless_batch.yaml --workers 2
+valkey-fuzzer batch examples/valkey/cluster_election_batch.yaml --workers 2
 # The bug zoo: every case's clean control must pass and its broken build must be caught
 valkey-fuzzer batch --zoo BUILDS --workers 2
 # The failures of an earlier batch again, then one of each kind once more, alone

@@ -90,7 +90,7 @@ def test_a_killed_fuzzer_is_swept_and_nothing_else_is(tmp_path, tmp_path_factory
     try:
         # A long write workload: the fuzzer is still running when it is killed.
         run = scenario(
-            "valkey.rdb-compression", inputs={"operations": 1000000, "mutation_rate": 50}, replicas=1, seed=5
+            "valkey.snapshot-equivalence", inputs={"operations": 1000000, "mutation_rate": 50}, replicas=1, seed=5
         )
         run["deployment"].update(base_port=free_port_block(3), base_data_dir=str(root))
         (tmp_path / "scenario.yaml").write_text(yaml.safe_dump(run))

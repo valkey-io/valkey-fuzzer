@@ -56,13 +56,13 @@ The rules behind them:
   not depend on it, such as a crash found before the fault fired, stands.
 - **Path evidence and behaviour are different things.** Required events and
   required evidence are path evidence: they show the run reached what it
-  claims to test, such as INFO reporting a forkless save in progress rather
-  than merely configured. A run missing any of them is `ERROR`, and its
+  claims to test, such as INFO counting a full resync rather than the stall
+  that should cause one merely having happened. A run missing any of them is `ERROR`, and its
   summary names each missing item and its source, for example
-  `required evidence was not observed: valkey.forkless.in-progress from info`.
+  `required evidence was not observed: valkey.replication.full-resync-counted from info`.
   A trusted `FAIL` an action or oracle found anyway still stands, and the
   missing items stay in the diagnostics: a crash is a crash whether or not
-  the save was forkless. Behaviour is judged by actions and oracles only.
+  the resync happened. Behaviour is judged by actions and oracles only.
   Observers only record; an expectation about behaviour, such as no save
   left in progress or a partial resync counted, is a `valkey.oracle.evidence`
   rule over what they recorded, and its absence is a `FAIL`. In `experiment`
@@ -166,10 +166,8 @@ default is checked like writing it out. For example,
 deployment's default `appendfsync everysec` makes too short. A plan whose
 provider would now start other instances is refused.
 
-A config Valkey renamed is written either way and records as written. Since
-valkey-io/valkey#5261 `bgsave-default-method` (`fork`, `forkless`) is
-`forkless-policy` (`require-fork`, `prefer-forkless`), and a build knows only
-one of them. Every start of a build (the deployment's instances, its
+A config Valkey renamed is written either way and records as written; a build
+knows only one of the names. Every start of a build (the deployment's instances, its
 restarts, and every private server) gives it the name and value it knows, and
 the build probe's `config_get` and `config_set` read and set that name. One
 table, `RENAMED_CONFIGS` in `valkey_fuzzer/deployment/local/server_config.py`,

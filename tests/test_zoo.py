@@ -124,9 +124,9 @@ def test_a_case_whose_fix_the_pinned_commit_lacks_is_skipped_until_the_pin_has_i
     case = _case(tmp_path, {**_CASE, "skipped_until": "valkey-io/valkey#5206"}, patch=False)
     assert not case.patched and case.skipped_until == "valkey-io/valkey#5206"
     assert "a pinned Valkey commit with valkey-io/valkey#5206" in case.unmet_requirements()
-    # The shipped cases of fixes merged after the pin carry no patch.
+    # A shipped case of a fix merged after the pin carries no patch.
     skipped = [item for item in CASES if item.skipped_until]
-    assert skipped and not any(item.patched or item.overrides for item in skipped)
+    assert not any(item.patched or item.overrides for item in skipped)
 
 
 def test_a_zoo_directory_without_the_zoo_names_where_the_zoo_is(tmp_path):

@@ -50,9 +50,9 @@ STARTING = f"{PREFIX} * oO0OoO0OoO0Oo Valkey is starting oO0OoO0OoO0Oo"
 @pytest.mark.parametrize(
     ("node", "log", "alive", "evidence", "cause", "problem"),
     [
-        ("valkey-0", "forkless-save-s100016-valkey-0.log", False, (), ASSERTION, "crash report"),
+        ("valkey-0", "save-assertion-s100016-valkey-0.log", False, (), ASSERTION, "crash report"),
         # A recursive assertion during the bug report is not the cause.
-        ("valkey-2", "forkless-save-crash-s200014-valkey-2.log", False, (), ASSERTION, "crash report"),
+        ("valkey-2", "save-assertion-s200014-valkey-2.log", False, (), ASSERTION, "crash report"),
         # A signal names the function it hit in, as in valkey-io/valkey#3645's proposed test, so two
         # segfaults elsewhere are two failures.
         (
@@ -147,17 +147,17 @@ def _signature(experiment, liveness, failing=None):
 def test_one_crash_is_one_signature_whatever_experiment_hit_it_and_whatever_failed_after_it():
     # The soak split this crash into six signatures, by experiment and by what else failed after it.
     crashed = [
-        _signature("valkey.forkless-save", _liveness("valkey-0", "forkless-save-s100016-valkey-0.log"),
+        _signature("valkey.snapshot-equivalence", _liveness("valkey-0", "save-assertion-s100016-valkey-0.log"),
                    {"bgsave": "valkey-0: expected ok, got unavailable", "data": "cannot read dataset: Error 111"}),
-        _signature("valkey.forkless-save-crash", _liveness("valkey-2", "forkless-save-crash-s200014-valkey-2.log"),
+        _signature("valkey.aof-durability", _liveness("valkey-2", "save-assertion-s200014-valkey-2.log"),
                    {"data": "replicas did not converge: valkey-2"}),
-        _signature("valkey.forkless-save-cancel", _liveness("valkey-0", "forkless-save-cancel-s300008-valkey-0.log")),
+        _signature("valkey.replication-chaos", _liveness("valkey-0", "save-assertion-s300008-valkey-0.log")),
     ]  # fmt: skip
     assert len({signature_key(*item) for item in crashed}) == 1
     assert "bgiteration.c:N 'wasAdded' is not true" in signature_label(*crashed[0])
     assert same_failure(crashed[0][1], crashed[1][1]), "the minimizer keeps a reduction that crashes the same way"
     fatal = [_signature(experiment, _liveness(node, DUAL_CHANNEL)) for experiment, node in
-             (("valkey.repl-dual-channel", "valkey-1"), ("valkey.repl-compression-full-sync", "valkey-2"))]  # fmt: skip
+             (("valkey.repl-dual-channel", "valkey-1"), ("valkey.replication-full-resync", "valkey-2"))]  # fmt: skip
     assert len({signature_key(*item) for item in fatal}) == 1
     assert signature_label(*fatal[0]) == f"FAIL | crash | {SHORT_READ}"
 

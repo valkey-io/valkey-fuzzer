@@ -1,8 +1,8 @@
 """Each Valkey experiment passes on a real deployment, a broken variant of it fails, and one missing a
 prerequisite is unsupported.
 
-Needs a valkey-server (``VALKEY_FUZZER_BINARY`` or ``PATH``); forkless rows need
-a build with forkless save, old-binary rows ``VALKEY_FUZZER_OLD_BINARY``. One
+Needs a valkey-server (``VALKEY_FUZZER_BINARY`` or ``PATH``); old-binary rows
+need ``VALKEY_FUZZER_OLD_BINARY``. One
 experiment runs per scenario, so each row picks one topology, and the rows
 together cover standalone, replicated, and cluster deployments.
 """
@@ -22,13 +22,6 @@ pytestmark = [pytest.mark.live, pytest.mark.slow]
 if not BINARY:
     pytest.skip("valkey-server is not available", allow_module_level=True)
 
-FORKLESS = live.build_accepts(
-    BINARY,
-    {"forkless-infrastructure-enabled": "yes", "bgsave-default-method": "forkless"},
-    config_get={"bgsave-default-method": ["forkless"]},
-    info_fields={"persistence": ["rdb_current_bgsave_type"]},
-)
-needs_forkless = pytest.mark.skipif(not FORKLESS, reason="valkey-server build lacks forkless save")
 PARTITIONS = capabilities.iptables_supported()[0] and capabilities.per_instance_loopback_supported()[0]
 ELECTION = "valkey.cluster-election-durability"
 
@@ -74,19 +67,6 @@ _WAVES = [
 @pytest.mark.parametrize(
     ("build", "fields", "then"),
     [
-        pytest.param(lambda: scenario("valkey.forkless-save", "cluster"),
-                     {"valkey.forkless.in-progress": {}, "valkey.forkless.log-completed": {}, "valkey.rdb.reload-verified": {}},
-                     None, marks=needs_forkless, id="forkless-save-cluster"),
-        pytest.param(lambda: scenario("valkey.forkless-save-cancel", replicas=1), {"valkey.forkless.log-cancelled": {}},
-                     None, marks=needs_forkless, id="forkless-save-cancel-replicas"),
-        pytest.param(lambda: scenario("valkey.forkless-save-crash"), {"valkey.fault.injected": {"restarted": True}},
-                     None, marks=needs_forkless, id="forkless-save-crash-standalone"),
-        pytest.param(lambda: scenario("valkey.forkless-save-churn", inputs={"list_length": 5000}),
-                     {"valkey.forkless.in-progress": {}, "valkey.fault.injected": {}, "valkey.rdb.reload-verified": {}},
-                     None, marks=needs_forkless, id="forkless-save-churn-standalone"),
-        pytest.param(lambda: scenario("valkey.forkless-save-on-replica", inputs={"diskless_load": "swapdb"}, replicas=1),
-                     {"valkey.forkless.in-progress": {}, "valkey.replication.full-resync-counted": {}},
-                     None, marks=needs_forkless, id="forkless-save-on-replica-swapdb"),
         pytest.param(lambda: scenario("valkey.aof-durability", replicas=1), {}, None, id="aof-durability-replicas"),
         pytest.param(lambda: scenario("valkey.replication-partial-resync", replicas=1), {}, None, id="replication-partial-resync-replicas"),
         pytest.param(lambda: scenario("valkey.replication-full-resync", "cluster"), {}, None, id="replication-full-resync-cluster"),
@@ -120,13 +100,6 @@ def _rogue_kill(document):
     document["components"].insert(0, {"use": "valkey.fault.process-signal", "id": "rogue", "config": config})
 
 
-def _save_with_fork(document):
-    # The overlay comes from the valkey.forkless fragment; a same-ID entry deep-merges onto it.
-    document["startup_overlays"] = [
-        {"overlay_id": "forkless-enabled", "server_config": {"bgsave-default-method": "fork"}}
-    ]
-
-
 def _without_aof(document):
     document["startup_overlays"][0]["server_config"]["appendonly"] = "no"
 
@@ -138,10 +111,6 @@ def _without_aof(document):
         # bug zoo's broken builds are cluster chaos's negative controls.
         pytest.param("valkey.cluster-chaos", _rogue_kill, "cluster", {"waves": [[{"op": "failover", "shard": 0}]]},
                      {"status": "PASS", "says": ["1 stopped on purpose"]}, id="cluster-chaos-rogue-kill"),
-        # The feature is configured but not exercised: the save runs with fork.
-        pytest.param("valkey.forkless-save", _save_with_fork, "standalone", None,
-                     {"missing": ["valkey.forkless.in-progress", "valkey.forkless.log-started"]}, marks=needs_forkless,
-                     id="forkless-save-with-fork"),
         # Without AOF a crash loses acknowledged writes.
         pytest.param("valkey.aof-durability", _without_aof, "standalone", None, {"failed": ["data"], "says": ["lost"]},
                      id="aof-durability-without-aof"),
@@ -242,15 +211,13 @@ def _differential(variants, compare):
     return {"differential_id": "live", "base": base, "variants": variants, "compare": compare}
 
 
-_SAVE_TYPE = {"evidence_id": "valkey.bgsave.result", "source": "bgsave", "field": "after.rdb_last_bgsave_type"}
-
-
 @pytest.mark.parametrize(
     ("document", "status"),
     [
-        pytest.param(lambda: _differential({method: {"deployment.server_config": {"forkless-infrastructure-enabled": "yes", "bgsave-default-method": method}}
-                                            for method in ("fork", "forkless")}, {"equal": _DIGESTS, "differ": [_SAVE_TYPE]}),
-                     "PASS", marks=needs_forkless, id="fork-vs-forkless"),
+        # The same seeded writes with AOF off and on leave the same data, replies, and snapshot.
+        pytest.param(lambda: _differential({aof: {"deployment.server_config": {"appendonly": aof}} for aof in ("no", "yes")},
+                                           {"equal": _DIGESTS}),
+                     "PASS", id="aof-off-vs-on"),
         # Negative control: changing the generated data must break equality.
         pytest.param(lambda: _differential({"small": {}, "large": {"experiment.inputs.value_size": 65}}, {"equal": _DIGESTS[:1]}),
                      "FAIL", id="divergent-data"),

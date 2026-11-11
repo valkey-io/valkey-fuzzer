@@ -24,8 +24,7 @@ from valkey_fuzzer.results import Evidence, OutcomeStatus
 from valkey_fuzzer.runner import PreflightError
 
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "valkey"
-FORKLESS = str(EXAMPLES / "forkless_save.yaml")
-NO_ZSTD = ("--exclude", "server_config.rdbcompression=zstd", "--exclude", "server_config.repl-compression=zstd")
+EXAMPLE = str(EXAMPLES / "snapshot_equivalence.yaml")
 
 pytestmark = pytest.mark.usefixtures("report_root")
 
@@ -39,7 +38,7 @@ def _cli(*argv):
 
 def _run_report(tmp_path, *options):
     output = tmp_path / "report.json"
-    _cli("run", FORKLESS, "--output", output, *options)
+    _cli("run", EXAMPLE, "--output", output, *options)
     return output
 
 
@@ -56,7 +55,7 @@ def _run_report(tmp_path, *options):
 def test_run_and_replay_exit_with_the_code_of_their_outcome(tmp_path, canned_runs, status, options, code):
     canned_runs.status = status
     report = _run_report(tmp_path, "--artifact-dir", tmp_path / "a", *options)
-    (saved,) = (tmp_path / "a" / "runs").glob("*-forkless-save-*/report.json")
+    (saved,) = (tmp_path / "a" / "runs").glob("*-snapshot-equivalence-*/report.json")
     assert json.loads(saved.read_text()) == json.loads(report.read_text())
 
     assert _cli("replay", report, *options) == code
@@ -66,20 +65,20 @@ def test_run_and_replay_exit_with_the_code_of_their_outcome(tmp_path, canned_run
 @pytest.mark.parametrize(
     "text",
     [
-        "scenario_id: a\nscenario_id: b\nseed: 1\nexperiment: {id: valkey.forkless-save}\n",
-        "api_version: old\nscenario_id: a\nseed: 1\nexperiment: {id: valkey.forkless-save}\n",
-        "scenario_id: a\nseed: 1\nexperiment: {id: valkey.forkless-save, inputs: {nope: 1}}\n",
+        "scenario_id: a\nscenario_id: b\nseed: 1\nexperiment: {id: valkey.snapshot-equivalence}\n",
+        "api_version: old\nscenario_id: a\nseed: 1\nexperiment: {id: valkey.snapshot-equivalence}\n",
+        "scenario_id: a\nseed: 1\nexperiment: {id: valkey.snapshot-equivalence, inputs: {nope: 1}}\n",
     ],
 )
 def test_a_scenario_that_does_not_compile_is_a_harness_error_and_never_runs(tmp_path, canned_runs, text):
     scenario = tmp_path / "scenario.yaml"
     scenario.write_text(text + "deployment: {mode: standalone}\n")
     assert _cli("run", scenario) == _cli("validate", scenario) == EXIT_HARNESS_ERROR
-    assert _cli("validate", FORKLESS) == 0
+    assert _cli("validate", EXAMPLE) == 0
     assert not canned_runs.plans
 
 
-USAGE_ERRORS = [("run", FORKLESS, "--random"), ("run", FORKLESS, "--experiment", "valkey.forkless-save"), ("run",)]  # fmt: skip
+USAGE_ERRORS = [("run", EXAMPLE, "--random"), ("run", EXAMPLE, "--experiment", "valkey.snapshot-equivalence"), ("run",)]  # fmt: skip
 PARSER_ERRORS = [("run", "--random", "--exclude", "x"), ("batch", "--random", "all", "--workers", 0), ("run", "--timeout", "nan")]  # fmt: skip
 
 
@@ -87,11 +86,11 @@ def test_bad_inputs_are_harness_errors_that_run_nothing(tmp_path, canned_runs):
     for command in ("run", "validate", "diff", "batch", "minimize", "replay"):
         assert _cli(command, tmp_path / "missing.yaml") == EXIT_HARNESS_ERROR, command
     assert _cli("run", "--seed", 1, "--experiment", "valkey.no-such-experiment") == EXIT_HARNESS_ERROR
-    every = ("--exclude", "inputs.compressible=true", "--exclude", "inputs.compressible=false")
-    assert _cli("run", "--seed", 1, "--experiment", "valkey.forkless-save", *every) == EXIT_HARNESS_ERROR
+    every = tuple(arg for size in (1, 64, 1024, 8192) for arg in ("--exclude", f"inputs.value_size={size}"))
+    assert _cli("run", "--seed", 1, "--experiment", "valkey.snapshot-equivalence", *every) == EXIT_HARNESS_ERROR
     base = tmp_path / "base.yaml"
     base.write_text("[1]")
-    assert _cli("run", "--seed", 1, "--experiment", "valkey.forkless-save", "--base", base) == EXIT_HARNESS_ERROR
+    assert _cli("run", "--seed", 1, "--experiment", "valkey.snapshot-equivalence", "--base", base) == EXIT_HARNESS_ERROR
     # Mixed-up options are usage errors (a harness error, never exit 1, a FAIL), and the parser refuses
     # malformed values.
     for argv in USAGE_ERRORS:
@@ -101,7 +100,7 @@ def test_bad_inputs_are_harness_errors_that_run_nothing(tmp_path, canned_runs):
             _cli(*argv)
     assert not canned_runs.plans
     # A report that cannot be written fails the run and leaves no temporary file.
-    assert _cli("run", FORKLESS, "--output", tmp_path) == EXIT_HARNESS_ERROR
+    assert _cli("run", EXAMPLE, "--output", tmp_path) == EXIT_HARNESS_ERROR
     assert not tuple(tmp_path.parent.glob(f".{tmp_path.name}.*.tmp"))
 
 
@@ -109,7 +108,7 @@ def test_a_run_that_fails_its_execution_preflight_leaves_an_error_report(tmp_pat
     message = "unknown instance_configs selector 'replica'"
     canned_runs.error = PreflightError(message)
     canned_runs.error.__cause__ = ValueError(message)
-    assert _cli("run", FORKLESS, "--output", tmp_path / "report.json") == EXIT_HARNESS_ERROR
+    assert _cli("run", EXAMPLE, "--output", tmp_path / "report.json") == EXIT_HARNESS_ERROR
     report = json.loads((tmp_path / "report.json").read_text())
     assert report["status"] == "ERROR" and "run failed before execution" in report["summary"]
     # Recorded as the runner and the batch worker record errors, phase included, so batch groups one error
@@ -117,7 +116,7 @@ def test_a_run_that_fails_its_execution_preflight_leaves_an_error_report(tmp_pat
     assert report["outcome"]["diagnostics"]["error"] == {"type": "ValueError", "message": message, "phase": "preflight"}
     # A runner that fails once the plan passed preflight is no preflight failure, in the summary or the signature.
     canned_runs.error = RuntimeError("the event journal broke")
-    assert _cli("run", FORKLESS, "--output", tmp_path / "report.json") == EXIT_HARNESS_ERROR
+    assert _cli("run", EXAMPLE, "--output", tmp_path / "report.json") == EXIT_HARNESS_ERROR
     report = json.loads((tmp_path / "report.json").read_text())
     assert report["summary"] == "the runner failed: the event journal broke"
     assert report["outcome"]["diagnostics"]["error"]["phase"] == "runner"
@@ -147,7 +146,7 @@ def test_sigterm_takes_the_interrupt_path_and_exits_130(target, call):
 
 def test_a_seeded_run_saves_a_scenario_that_runs_the_same_plan_as_the_seed(tmp_path, canned_runs):
     exported = tmp_path / "exported.yaml"
-    seeded = ("run", "--seed", 42, "--experiment", "valkey.forkless-save", *NO_ZSTD, "--valkey-binary", "/opt/valkey")
+    seeded = ("run", "--seed", 42, "--experiment", "valkey.snapshot-equivalence", "--valkey-binary", "/opt/valkey")
     assert _cli(*seeded, "--export-scenario", exported) == 0
     (path,) = (tmp_path / "valkey-fuzzer" / "runs").glob("*/report.json")
     report = json.loads(path.read_text())
@@ -162,7 +161,7 @@ def test_a_seeded_run_saves_a_scenario_that_runs_the_same_plan_as_the_seed(tmp_p
 
 def test_a_run_of_a_scenario_file_saves_the_scenario_it_ran(tmp_path, canned_runs):
     # Every run saves its scenario, not only a generated one.
-    assert _cli("run", FORKLESS, "--valkey-binary", "/opt/valkey") == 0
+    assert _cli("run", EXAMPLE, "--valkey-binary", "/opt/valkey") == 0
     (path,) = (tmp_path / "valkey-fuzzer" / "runs").glob("*/report.json")
     saved = path.parent / SCENARIO_FILE
     assert yaml.safe_load(saved.read_text()) == json.loads(path.read_text())["scenario"]
@@ -185,7 +184,7 @@ def test_the_printed_reproduce_command_draws_the_same_scenario(tmp_path, canned_
 def test_random_runs_use_fresh_seeds_honour_exclusions_and_a_base_overrides_the_draws(tmp_path, canned_runs):
     excluded = ("--exclude", "experiment=valkey.cluster-chaos", "--exclude", "experiment=valkey.snapshot-equivalence")
     for _ in range(6):
-        assert _cli("run", "--random", *NO_ZSTD, *excluded) == 0
+        assert _cli("run", "--random", *excluded) == 0
     assert len({plan.seed for plan in canned_runs.plans}) == 6
     assert not {plan.experiment_id for plan in canned_runs.plans} & {
         "valkey.cluster-chaos",
@@ -195,7 +194,7 @@ def test_random_runs_use_fresh_seeds_honour_exclusions_and_a_base_overrides_the_
     base.write_text(
         yaml.safe_dump({"deployment": {"replicas_per_primary": 2}, "experiment": {"inputs": {"pause_s": 4}}})
     )
-    assert _cli("run", "--seed", 1, "--experiment", "valkey.replication-full-resync", *NO_ZSTD, "--base", base) == 0
+    assert _cli("run", "--seed", 1, "--experiment", "valkey.replication-full-resync", "--base", base) == 0
     assert (canned_runs.plans[-1].deployment["replicas_per_primary"], canned_runs.plans[-1].inputs["pause_s"]) == (2, 4)
 
 
@@ -245,13 +244,13 @@ def test_replay_refuses_a_drifted_environment_unless_allowed_and_then_records_th
 
 def test_replay_runs_a_bare_plan_or_a_yaml_report_but_minimize_needs_a_run_report(tmp_path, canned_runs):
     plan = tmp_path / "plan.json"
-    plan.write_text(valkey_service().compile(yaml.safe_load(Path(FORKLESS).read_text())).to_json())
+    plan.write_text(valkey_service().compile(yaml.safe_load(Path(EXAMPLE).read_text())).to_json())
     assert _cli("replay", plan, "--output", tmp_path / "replay.json") == 0
     assert json.loads((tmp_path / "replay.json").read_text())["provenance"]["verified"] is False
     assert _cli("minimize", plan) == EXIT_HARNESS_ERROR
     # --output-format is the --output file's; --format, in list, validate, and sweep, is stdout's.
-    assert _cli("run", FORKLESS, "--output-format", "yaml") == EXIT_HARNESS_ERROR, "it needs --output"
-    assert _cli("run", FORKLESS, "--output", tmp_path / "r.yaml", "--output-format", "yaml") == 0
+    assert _cli("run", EXAMPLE, "--output-format", "yaml") == EXIT_HARNESS_ERROR, "it needs --output"
+    assert _cli("run", EXAMPLE, "--output", tmp_path / "r.yaml", "--output-format", "yaml") == 0
     assert yaml.safe_load((tmp_path / "r.yaml").read_text())["status"] == "PASS"
     assert _cli("replay", tmp_path / "r.yaml") == 0
     assert canned_runs.plans[0] == canned_runs.plans[1] == canned_runs.plans[2]
@@ -365,7 +364,8 @@ def test_an_artifact_override_must_name_a_declared_local_binary_artifact_once(
         in capsys.readouterr().err
     )
     assert (
-        _cli("run", "--seed", "1", "--experiment", "valkey.forkless-save", "--artifact", "x=/y") == EXIT_HARNESS_ERROR
+        _cli("run", "--seed", "1", "--experiment", "valkey.snapshot-equivalence", "--artifact", "x=/y")
+        == EXIT_HARNESS_ERROR
     )
     assert "--artifact needs a scenario file" in capsys.readouterr().err
     with pytest.raises(SystemExit):
@@ -380,24 +380,42 @@ def test_an_artifact_override_must_name_a_declared_local_binary_artifact_once(
 @pytest.mark.parametrize(("diverges", "code"), [(False, 0), (True, EXIT_FAILURE)])
 def test_diff_passes_only_when_the_variants_evidence_agrees(tmp_path, canned_runs, diverges, code):
     def evidence(plan):
-        method = plan.deployment["server_config"]["bgsave-default-method"]
+        method = plan.deployment["server_config"]["appendonly"]
         return (
             Evidence(
                 "valkey.dataset.digest", "dataset", "oracle.completed", 1.0, {"digest": method if diverges else 1}
             ),
             Evidence("valkey.rdb.reload-verified", "snapshot", "oracle.completed", 1.0, {"content_digest": 1}),
             Evidence("valkey.workload.ledger", "writes", "workload.stopped", 1.0, {"replies_digest": 1}),
-            Evidence(
-                "valkey.bgsave.result", "bgsave", "action.completed", 1.0, {"after": {"rdb_last_bgsave_type": method}}
-            ),
+            Evidence("valkey.bgsave.result", "bgsave", "action.completed", 1.0, {"after": {"aof_enabled": method}}),
         )
 
     canned_runs.evidence = evidence
-    output = tmp_path / "diff.json"
-    assert (
-        _cli("diff", EXAMPLES / "differential_fork_vs_forkless.yaml", "--output", output, "--artifact-dir", tmp_path)
-        == code
+    document = tmp_path / "differential.yaml"
+    document.write_text(
+        yaml.safe_dump(
+            {
+                "differential_id": "aof-on-vs-off",
+                "base": yaml.safe_load(Path(EXAMPLE).read_text()),
+                "variants": {
+                    "off": {"deployment.server_config": {"appendonly": "no"}},
+                    "on": {"deployment.server_config": {"appendonly": "yes"}},
+                },
+                "compare": {
+                    "equal": [
+                        {"evidence_id": "valkey.dataset.digest", "source": "dataset", "field": "digest"},
+                        {"evidence_id": "valkey.rdb.reload-verified", "source": "snapshot", "field": "content_digest"},
+                        {"evidence_id": "valkey.workload.ledger", "source": "writes", "field": "replies_digest"},
+                    ],
+                    "differ": [
+                        {"evidence_id": "valkey.bgsave.result", "source": "bgsave", "field": "after.aof_enabled"}
+                    ],
+                },
+            }
+        )
     )
+    output = tmp_path / "diff.json"
+    assert _cli("diff", document, "--output", output, "--artifact-dir", tmp_path) == code
     (session,) = (tmp_path / "differential").iterdir()
     assert json.loads((session / "differential.json").read_text()) == json.loads(output.read_text())
     assert len(list(session.glob("*/report.json"))) == 2
@@ -425,8 +443,8 @@ def test_minimize_shrinks_a_failing_run_and_leaves_a_passing_one_alone(tmp_path,
     report = _run_report(tmp_path / "fail")
     assert _cli("minimize", report, "--output", output, "--max-attempts", 8, "--artifact-dir", tmp_path) == 0
     minimized = yaml.safe_load(output.read_text())["experiment"]["inputs"]
-    assert minimized["stable_keys"] < yaml.safe_load(Path(FORKLESS).read_text())["experiment"]["inputs"]["stable_keys"]
-    assert list((tmp_path / "minimize").glob("*-forkless-save-*/attempt-1/report.json"))
+    assert minimized["stable_keys"] < yaml.safe_load(Path(EXAMPLE).read_text())["experiment"]["inputs"]["stable_keys"]
+    assert list((tmp_path / "minimize").glob("*-snapshot-equivalence-*/attempt-1/report.json"))
 
 
 @pytest.mark.parametrize(
