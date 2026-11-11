@@ -70,6 +70,10 @@ DEFAULT_SERVER_CONFIG = {
     "appendfsync": "everysec",
     "save": "",
     "maxmemory": DEFAULT_MAXMEMORY,
+    # A crashing server otherwise tests its memory for hardware faults before it exits. That tells a fuzzing run
+    # nothing, and under AddressSanitizer the test itself is reported (it copies sanitizer-owned memory, and its
+    # region table overflows past 128 mappings: valkey#4213), burying the crash that started it.
+    "crash-memcheck-enabled": "no",
 }
 # Cluster mode adds fast failure detection and keeps serving with slots uncovered.
 CLUSTER_DEFAULT_SERVER_CONFIG = {"cluster-node-timeout": "1000", "cluster-require-full-coverage": "no"}

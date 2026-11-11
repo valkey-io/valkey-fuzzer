@@ -68,8 +68,10 @@ jobs:
           SEEDS: ${{ inputs.seeds || '120' }}
         run: |
           # At most one always-active IO thread a server: three (io-threads 4) take more than a runner's four cores.
+          # No swapdb load: a replica's full sync with it aborts in valkey-search (fuzzer issue #77, still open),
+          # which failed one seed in ten here and hid everything else those seeds could find.
           valkey-fuzzer batch --random proposed.search-chaos --seeds "${SEEDS}" --workers 3 \
-            --exclude server_config.io-threads=4 \
+            --exclude server_config.io-threads=4 --exclude server_config.repl-diskless-load=swapdb \
             --base /tmp/search-chaos/base.yaml --experiment-dir /tmp/search-chaos/experiments \
             --profile nightly-soak --serial-reruns 2 --prune-pass --timeout 1800 \
             --valkey-binary /tmp/valkey/src/valkey-server --artifact-dir /tmp/search-chaos/artifacts --out "${BATCH_DIR}"

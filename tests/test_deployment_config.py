@@ -155,6 +155,8 @@ def test_instances_start_with_exactly_the_effective_config_the_plan_records(tmp_
     # The provider's defaults, the deployment's layers, and the experiment's overlay, in that order.
     assert (primary["appendfsync"], primary["appendonly"], replica["maxmemory"]) == ("always", "yes", "1gb")
     assert primary["maxmemory"] == DEFAULT_SERVER_CONFIG["maxmemory"]
+    # A crash is reported as itself, not as what the crash-time memory test trips under a sanitizer.
+    assert primary["crash-memcheck-enabled"] == "no"
 
     config, plans = LocalDeploymentProvider._prepare(plan)
     for item in plans:
