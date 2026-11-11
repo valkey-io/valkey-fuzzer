@@ -1,0 +1,91 @@
+name: Valkey Fuzzer Cluster Chaos Every 4 Hours
+
+# Three fresh valkey.cluster-chaos seeds through the batch runner, every four hours.
+on:
+  schedule:
+    - cron: '0 */4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  random-fuzzer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      FUZZER_ARTIFACT_DIR: /tmp/valkey-fuzzer/artifacts
+      # The batch folder; valkey-ci-agent's fuzzer monitor reads batch/summary.json
+      # and, for each entry of its runs, the run report at batch/<runs[].report>.
+      FUZZER_BATCH_DIR: /tmp/valkey-fuzzer/artifacts/batch
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.11'
+
+      # Built here: without --valkey-binary the local deployment would build its
+      # fixed fallback release, and the soak would never see a new Valkey commit.
+      - name: Build Valkey unstable
+        run: |
+          git clone --depth 1 https://github.com/valkey-io/valkey.git /tmp/valkey-unstable
+          make -C /tmp/valkey-unstable -j"$(nproc)"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+
+      - name: Run the fuzzer batch
+        run: |
+          mkdir -p "${FUZZER_ARTIFACT_DIR}"
+          echo "========================================"
+          echo "Random Fuzzer Batch"
+          echo "Timestamp: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+          echo "========================================"
+          # Three fresh cluster chaos seeds, one at a time; the batch folder holds
+          # each run's own report (runs/<id>/report.json) and summary.json.
+          valkey-fuzzer batch --random valkey.cluster-chaos --seeds 3 --profile nightly-soak --timeout 900 \
+            --valkey-binary /tmp/valkey-unstable/src/valkey-server --out "${FUZZER_BATCH_DIR}"
+
+      - name: Print Valkey node logs
+        if: always()
+        run: |
+          echo ""
+          echo "========================================"
+          echo "Valkey Node Logs"
+          echo "========================================"
+          found=0
+          for logfile in "${FUZZER_BATCH_DIR}"/runs/*/logs/*.log; do
+            if [ -f "$logfile" ]; then
+              found=1
+              echo ""
+              echo "--- ${logfile#"${FUZZER_BATCH_DIR}"/} ---"
+              cat "$logfile"
+            fi
+          done
+          if [ "$found" = 0 ]; then
+            echo "No Valkey logs found under ${FUZZER_BATCH_DIR}/runs"
+          fi
+
+      - name: Summarize the batch
+        if: always()
+        env:
+          SUMMARY_TITLE: Valkey Fuzzer Cluster Chaos
+          BATCH_DIR: ${{ env.FUZZER_BATCH_DIR }}
+        run: python .github/scripts/ci.py summary
+
+      - name: Upload fuzzer run artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzzer-run-artifacts-${{ github.run_id }}
+          path: ${{ env.FUZZER_ARTIFACT_DIR }}
+          if-no-files-found: warn
+          retention-days: 60
