@@ -72,7 +72,8 @@ def test_every_valkey_fuzzer_command_in_a_workflow_parses_with_the_cli(name):
         for line in re.sub(r"\\\n\s*", " ", scripts).splitlines()
     ]
     # The workflows that only run pytest or ruff name no valkey-fuzzer command.
-    no_cli = ("lint.yml", "test.yml", "valkey-experiments-live.yml")
+    # search-abort-probes runs a probe script, not the fuzzer CLI.
+    no_cli = ("lint.yml", "test.yml", "valkey-experiments-live.yml", "search-abort-probes.yml")
     assert any(line.startswith("valkey-fuzzer ") for line in commands) or name in no_cli
     # A bash array ("${name[@]}") stands for the arguments its literal lists; one assigned in a loop stands
     # for none.
