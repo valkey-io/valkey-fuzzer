@@ -115,8 +115,8 @@ Status: PASS
 Mode: experiment
 Deployment: standalone
 Duration: 16.58s
-Components: 10 passed, 0 failed, 0 skipped, 0 errors
-Evidence: 9
+Components: 13 passed, 0 failed, 0 skipped, 0 errors
+Evidence: 12
 Valkey SHA: dff4c58e
 Summary: experiment passed
 Report: /tmp/valkey-fuzzer/runs/20261028T041350.730Z-aof-durability-5405f2/report.json

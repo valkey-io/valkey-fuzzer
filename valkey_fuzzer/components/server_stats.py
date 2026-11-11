@@ -435,8 +435,6 @@ class QuietEndOracle:
         return down
 
 
-_RECORD = mapping_of({"instances": MAPPING})
-
 REGISTRATIONS = (
     component_registration(
         "valkey.oracle.error-counters",
@@ -452,6 +450,6 @@ REGISTRATIONS = (
         "valkey.oracle.quiet-end",
         QuietEndOracle,
         _QUIET_FIELDS,
-        declares=Declarations(evidence={"valkey.quiet-end.verified": declared(_RECORD)}),
+        declares=Declarations(evidence={"valkey.quiet-end.verified": declared(mapping_of({"instances": MAPPING}))}),
     ),
 )
