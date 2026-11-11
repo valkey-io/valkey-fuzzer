@@ -1179,6 +1179,10 @@ _PARENT = {"compare_with": "/opt/parent/valkey-server"}
         ({**_PARENT, "server_config": {"dir": "/x"}, "commands": [{"command": ["PING"]}]}, "server_config: .*'dir' is managed"),
         ({**_PARENT, "server_config": {"cluster-enabled": "yes"}, "commands": [{"command": ["PING"]}]}, "'cluster-enabled' is managed"),
         ({**_PARENT, "commands": [{"command": ["SHUTDOWN", "NOSAVE"]}]}, r"commands\[0\]: SHUTDOWN is refused: it stops the server"),
+        ({**_PARENT, "commands": [{"raw": "SHUTDOWN\r\n"}]}, r"commands\[0\]: raw SHUTDOWN is refused: it stops the server"),
+        ({**_PARENT, "commands": [{"raw": "PING\r\nshutdown nosave\r\n"}]}, "raw SHUTDOWN is refused"),
+        ({**_PARENT, "commands": [{"raw": "*2\r\n$5\r\nDEBUG\r\n$7\r\nRESTART\r\n"}]}, "raw DEBUG RESTART is refused"),
+        ({"commands": [{"raw": "PSYNC ? -1\r\n"}]}, "raw PSYNC is refused: it changes the deployment's topology"),
         ({**_PARENT, "commands": [{"command": ["DEBUG", "RESTART"]}]}, "DEBUG RESTART is refused: it ends or restarts"),
         ({**_PARENT, "commands": [{"command": ["debug", "crash-and-recover", 0]}]}, "DEBUG CRASH-AND-RECOVER is refused"),
         ({**_PARENT, "commands": [{"command": ["DEBUG", "RELOAD"]}]}, "DEBUG RELOAD is refused"),
@@ -2746,3 +2750,18 @@ def test_checks_run_at_once_and_combine_in_their_order_whichever_finishes_first(
         ("faults", {"outcome": "pass"}),
     ]
     assert kept == [f"{name}.log" for name in checks._ORDER]
+
+
+def test_raw_bytes_are_read_as_whole_requests_inline_or_resp_and_what_is_cut_short_is_left_out():
+    assert actions._raw_requests("PING\r\nset k v\r\n") == [["PING"], ["SET", "K", "V"]]
+    assert actions._raw_requests("*2\r\n$3\r\nGET\r\n$1\r\nk\r\nPING\r\n") == [["GET", "K"], ["PING"]]
+    # A request cut short on purpose, as the tests of the parsers send, is no whole request.
+    assert actions._raw_requests("PI") == [] and actions._raw_requests("*2\r\n$3\r\nGET\r\n") == []
+    assert actions._raw_requests("*x\r\nSHUTDOWN\r\n") == []
+    assert actions._raw_requests({"$base64": "U0hVVERPV04NCg=="}) == [["SHUTDOWN"]]
+    # A replica's handshake on private servers, and a key named like a refused command, stay allowed.
+    spec = _spec(
+        **_PARENT,
+        commands=[{"raw": "REPLCONF listening-port 1\r\n"}, {"raw": "PSYNC ? -1\r\n"}, {"raw": "SET shutdown x\r\n"}],
+    )
+    assert [item["raw"] for item in spec.config["commands"]][2] == "SET shutdown x\r\n"

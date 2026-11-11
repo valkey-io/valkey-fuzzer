@@ -309,6 +309,29 @@ def _refusal(words: list[str], timeout_s: float, on_instances: bool) -> Optional
     return None
 
 
+def _raw_requests(raw: Any) -> list[list[str]]:
+    """The whole requests in raw bytes, inline or RESP, each as its upper-cased words; what follows the last
+    whole one (a request cut short on purpose, bytes that are no request) is left out."""
+
+    text = (_argument(raw) if _is_binary(raw) else raw.encode("utf-8", "surrogateescape")).decode("latin-1")
+    lines, requests = text.split("\r\n")[:-1], []
+    while lines:
+        line = lines.pop(0)
+        if not line.startswith("*"):
+            words = line.split()
+        else:
+            try:
+                count = int(line[1:])
+            except ValueError:
+                break
+            if len(lines) < 2 * count or not all(lines[2 * index].startswith("$") for index in range(count)):
+                break
+            words, lines = lines[1 : 2 * count : 2], lines[2 * count :]
+        if words:
+            requests.append([word.upper() for word in words])
+    return requests
+
+
 def _validate_placeholders(arguments: Sequence[Any], where: str, config: Mapping[str, Any], compared: bool) -> None:
     for argument in arguments:
         for match in _PLACEHOLDER.finditer(argument if isinstance(argument, str) else ""):
@@ -387,6 +410,13 @@ def _validate_commands(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -
         if item["raw"] is not None:
             if not item["raw"] or not (isinstance(item["raw"], str) or _is_binary(item["raw"])):
                 raise ConfigError(f"{where}.raw must be a non-empty string or a !!binary value")
+            # Raw bytes are refused what a command is: the walk's test of valkey#1948 sent SHUTDOWN raw, and the
+            # server's clean exit was filed as a crash (fuzzer#122).
+            for words in _raw_requests(item["raw"]):
+                refused = _refusal(words, config["timeout_s"], not compared)
+                if refused is not None:
+                    named = " ".join(words[:2]) if words[0] in _CONTAINER_COMMANDS and len(words) > 1 else words[0]
+                    raise ConfigError(f"{where}: raw {named} is refused: {refused}")
         elif item["command"] is not None:
             words = _validate_sequence_command(item["command"], f"{where}.command")
             refused = _refusal(words, config["timeout_s"], not compared)
