@@ -44,8 +44,7 @@ valkey-fuzzer spec check cluster-election --tla2tools tla2tools.jar --output ass
 states), and TLC on each negative control, which must report its property
 violated; on a 12-core laptop the whole check takes about three minutes.
 [`.github/workflows/tla-model-check.yml`](../../.github/workflows/tla-model-check.yml)
-runs it on every push and pull request to `main` that changes `formal/` or the
-spec bridge. In the safe config `BioWrite` and `FlushEarly` never fire:
+runs it on every push and pull request to `generic-fuzzer`. In the safe config `BioWrite` and `FlushEarly` never fire:
 `sync` (`PersistBeforeAck = TRUE`) disables the first, and
 `FlushBeforeSave = FALSE` the second.
 

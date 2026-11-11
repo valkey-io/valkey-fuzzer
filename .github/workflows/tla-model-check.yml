@@ -12,9 +12,9 @@ name: TLA+ Model Check
 
 on:
   push:
-    branches: [ main ]
+    branches: [ generic-fuzzer ]
   pull_request:
-    branches: [ main ]
+    branches: [ generic-fuzzer ]
   workflow_dispatch:
 
 permissions:
