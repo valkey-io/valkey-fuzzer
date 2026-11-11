@@ -1373,13 +1373,17 @@ class CommandsAction:
             at = candidate.replies[-1]["index"] if candidate.replies else None
             where = "before the first command" if at is None else f"on command {at} ({_step_text(commands[at])})"
             who = "the candidate" if config["nodes"] == 1 else f"the candidate's node {candidate.exited_node}"
+            # A crash report or a fatal-exit line it logged makes this a crash; a clean exit with status 0 and
+            # neither (a commanded SHUTDOWN) is still a FAIL but not a crash, so the walk does not file it as one
+            # (fuzzer#127: a SHUTDOWN-then-SET experiment exited every build with status 0).
+            clean_exit = candidate.exited == 0 and cause == f"exited with status {candidate.exited}"
             return make_result(
                 spec,
                 ComponentStatus.FAIL,
                 f"{who} exited {where}: {cause}",
                 evidence=evidence,
                 diagnostics={"crashes": {"candidate": cause}},
-                crash=True,
+                crash=not clean_exit,
             )
         # A reply the client cannot parse is a protocol bug, a FAIL even where the parent gives the same one.
         broken = _protocol_errors(commands, candidate.replies)

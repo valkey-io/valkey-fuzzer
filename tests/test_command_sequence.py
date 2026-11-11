@@ -27,7 +27,7 @@ from valkey_fuzzer.schema import ConfigError, load_yaml
 from valkey_fuzzer.testing import FakeContext
 
 # What a fake build does with a command (see Build).
-DIE, TIMEOUT, SILENT, CLOSE = "<die>", "<timeout>", "<silent>", "<close>"
+DIE, TIMEOUT, SILENT, CLOSE, EXIT = "<die>", "<timeout>", "<silent>", "<close>", "<exit>"
 
 
 class Error(str):
@@ -139,6 +139,12 @@ class FakeServer:
             log.write("1:M 03 Nov 2026 10:00:01.000 # Valkey 9.0.0 crashed by signal: 11, si_code: 0\n")
         self.process.returncode = -11
 
+    def exit_cleanly(self):
+        # A commanded SHUTDOWN: the server logs a normal goodbye and exits 0, no crash report.
+        with open(self.log_path, "a") as log:
+            log.write("1:M 03 Nov 2026 10:00:01.000 * Valkey is now ready to exit, bye bye...\n")
+        self.process.returncode = 0
+
 
 class FakeWire:
     """A valkey-py connection to one fake server: ``send_command``, ``send_packed_command``, ``can_read``,
@@ -193,6 +199,9 @@ class FakeWire:
             reply = reply[self.resp]
         if reply == DIE:
             self.server.die()
+            raise ValkeyConnectionError("Connection closed by server.")
+        if reply == EXIT:
+            self.server.exit_cleanly()
             raise ValkeyConnectionError("Connection closed by server.")
         if reply == TIMEOUT:
             raise ValkeyTimeoutError("Timeout reading from socket")
@@ -610,6 +619,17 @@ def test_a_parent_that_dies_on_an_unmarked_command_is_an_unexplained_difference(
     assert result.status.value == "ERROR"
     assert result.diagnostics["reason"] == "unexplained-difference"
     assert value["unexplained"] == [0]
+
+
+def test_a_candidate_that_exits_cleanly_is_a_fail_but_not_a_crash(builds):
+    # A commanded SHUTDOWN exits the server with status 0: a FAIL (the sequence cannot go on), but not a crash,
+    # so the walk does not file it as one (fuzzer#127: a SHUTDOWN-then-SET experiment on all three builds).
+    BUILDS[builds["candidate"]].replies = {("SHUTDOWN", "NOSAVE"): EXIT}
+    result, value = run(builds, [{"command": ["SET", "k", "v"]}, {"command": ["SHUTDOWN", "NOSAVE"]}])
+
+    assert result.status.value == "FAIL" and not result.crash
+    assert result.summary == "the candidate exited on command 1 (SHUTDOWN NOSAVE): exited with status 0"
+    assert value["candidate"]["exited"] == 0
 
 
 def test_a_candidate_that_dies_is_a_crash_whose_logs_survive_the_stop(builds):
