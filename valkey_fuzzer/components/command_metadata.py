@@ -49,6 +49,11 @@ from .snapshots import instance_modules
 
 EVIDENCE = "valkey.command.metadata"
 CHECKS = ("keys", "arity", "readonly", "replica", "routing")
+
+# Commands upstream knows are misrouted in cluster mode and is fixing: the soak is not failed on them every
+# run. Drop one when its fix lands. MSETEX's command JSON has no get_keys_function, so a node that owns no
+# slot runs it instead of replying MOVED/CROSSSLOT (valkey-io/valkey#4936, fix PR #4951).
+ROUTING_KNOWN_GAPS = {"MSETEX"}
 # What a command that broke its metadata did, by the finding's reason: a run's summary names each such command
 # once, in words that stay the same from run to run.
 _BROKEN = {
@@ -430,7 +435,9 @@ class _Run:
             kept = not error.startswith(("MOVED ", "CROSSSLOT "))
         else:
             kept = error.startswith(f"MOVED {slots[0]} " if len(slots) == 1 else "CROSSSLOT ")
-        if not kept:
+        # A command upstream already knows is misrouted and is fixing (ROUTING_KNOWN_GAPS) is still sent and
+        # counted, but does not fail the run; drop it from the set when its fix lands.
+        if not kept and name not in ROUTING_KNOWN_GAPS:
             self.find(
                 "misrouted",
                 index,

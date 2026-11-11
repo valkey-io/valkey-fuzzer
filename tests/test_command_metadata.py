@@ -73,6 +73,9 @@ PFCOUNT = _entry("pfcount", -2, ["readonly"], (1, -1, 1), [_key_spec(_index(1), 
 EVAL_RO = _entry("eval_ro", -3, ["readonly", "movablekeys"], specs=[_key_spec(_index(2), _keynum(), "RO", "access")])
 SPUBLISH = _entry("spublish", 3, ["pubsub", "fast"], (1, 1, 1), [_key_spec(_index(1), _range(), "not_key")])
 MSETEX = _entry("msetex", -4, ["write", "movablekeys"], specs=[_key_spec(_index(1), _keynum(0, 1, 2), "OW", "update")])
+# Like MSETEX in shape but not a command upstream is fixing, so the oracle still judges its routing: it is
+# how the misrouting check is proven now that MSETEX is a known gap (ROUTING_KNOWN_GAPS).
+NKSET = _entry("nkset", -4, ["write", "movablekeys"], specs=[_key_spec(_index(1), _keynum(0, 1, 2), "OW", "update")])
 XREAD = _entry(
     "xread", -4, ["readonly", "movablekeys"], specs=[_key_spec(_keyword("STREAMS", 1), _range(-1, 1, 2), "RO")]
 )
@@ -86,6 +89,7 @@ KEYS = {
     "PFCOUNT": lambda words: words[1:],
     "EVAL_RO": lambda words: words[3 : 3 + int(words[2])],
     "MSETEX": lambda words: words[2 : 2 + 2 * int(words[1]) : 2],
+    "NKSET": lambda words: words[2 : 2 + 2 * int(words[1]) : 2],
     "XREAD": lambda words: words[words.index("STREAMS") + 1 :][: (len(words) - words.index("STREAMS") - 1) // 2],
 }
 # Shard channels: routed like keys, named by no COMMAND GETKEYS.
@@ -478,15 +482,17 @@ def test_an_error_valkey_replies_before_it_reads_a_commands_flags_is_not_judged(
 
 _SLOT = key_slot(b"k")
 _MSETEX = ("MSETEX", "1", "k", "v")
+_NKSET = ("NKSET", "1", "k", "v")
 
 
 @pytest.mark.parametrize(
     ("words", "reply", "declared"),
     [
-        # valkey-io/valkey#4936: a node that does not own the slot ran MSETEX.
-        (_MSETEX, 1, {"keys": ["k"], "slots": [_SLOT]}),
-        (_MSETEX, Error(f"MOVED {_SLOT + 1} 127.0.0.1:7000"), {"keys": ["k"], "slots": [_SLOT]}),
-        (_MSETEX, Error("ERR no such key"), {"keys": ["k"], "slots": [_SLOT]}),
+        # A node that does not own the slot ran, misrouted, or errored on a keyed command (the shape of
+        # valkey-io/valkey#4936, judged here on NKSET since MSETEX itself is a known gap).
+        (_NKSET, 1, {"keys": ["k"], "slots": [_SLOT]}),
+        (_NKSET, Error(f"MOVED {_SLOT + 1} 127.0.0.1:7000"), {"keys": ["k"], "slots": [_SLOT]}),
+        (_NKSET, Error("ERR no such key"), {"keys": ["k"], "slots": [_SLOT]}),
         (("PING",), Error("MOVED 1 127.0.0.1:7000"), {"keys": [], "slots": []}),
         (("PING",), Error("CROSSSLOT Keys in request don't hash to the same slot"), {"keys": [], "slots": []}),
         (("SPUBLISH", "k", "message"), 0, {"keys": ["k"], "slots": [_SLOT]}),
@@ -498,7 +504,7 @@ _MSETEX = ("MSETEX", "1", "k", "v")
 def test_a_node_without_slots_that_does_not_route_a_command_by_what_it_declares_fails(
     builds, tmp_path, monkeypatch, words, reply, declared
 ):
-    model = Commands(MSETEX, MSET, PING, SPUBLISH, cluster=True)
+    model = Commands(NKSET, MSETEX, MSET, PING, SPUBLISH, cluster=True)
     model.answers[words[0]] = lambda node, words: reply if node else None
     result, value = run(builds, model, tmp_path, monkeypatch, _one(*words))
 
@@ -508,6 +514,20 @@ def test_a_node_without_slots_that_does_not_route_a_command_by_what_it_declares_
         {"error": str(reply)} if isinstance(reply, Error) else {"reply": reply}
     )
     assert result.summary == f"{words[0]} was not routed by the keys it declares on a node that owns no slot"
+
+
+def test_a_command_upstream_is_already_fixing_is_not_flagged_as_misrouted(builds, tmp_path, monkeypatch):
+    # MSETEX is misrouted on a node that owns no slot (valkey-io/valkey#4936, fix PR #4951): its command JSON has
+    # no get_keys_function. It is a known gap, so the oracle does not fail a run on it; remove it when the fix lands.
+    from valkey_fuzzer.components.command_metadata import ROUTING_KNOWN_GAPS
+
+    assert "MSETEX" in ROUTING_KNOWN_GAPS
+    model = Commands(MSETEX, MSET, PING, cluster=True)
+    # Node 1 owns no slot and runs MSETEX anyway, the #4936 behaviour: still not a finding.
+    model.answers["MSETEX"] = lambda node, words: 1 if node else None
+    result, _ = run(builds, model, tmp_path, monkeypatch, _one(*_MSETEX))
+
+    assert result.status.value == "PASS", result.summary
 
 
 def test_a_node_without_slots_moves_keys_and_shard_channels_and_serves_the_rest(builds, tmp_path, monkeypatch):
@@ -821,19 +841,19 @@ def test_servers_that_do_not_start_leave_the_commands_unjudged(builds, tmp_path,
 
 
 def test_a_finding_is_named_once_per_command_and_counted(builds, tmp_path, monkeypatch):
-    model = Commands(GET, SET, MSETEX, cluster=True, answers={"MSETEX": lambda node, words: 1})
+    model = Commands(GET, SET, NKSET, cluster=True, answers={"NKSET": lambda node, words: 1})
     _reading(model, digest=1, offset=1)
-    draws = [_one(*_MSETEX), _one("GET", "k"), _one("MSETEX", "1", "j", "v"), _one("GET", "j"), _one("SET", "k", "v")]
+    draws = [_one(*_NKSET), _one("GET", "k"), _one("NKSET", "1", "j", "v"), _one("GET", "j"), _one("SET", "k", "v")]
     result, value = run(builds, model, tmp_path, monkeypatch, *draws)
 
     assert result.status.value == "FAIL"
     # One clause per command and reason, in the same words whatever the arguments: a batch groups its runs by them.
     assert result.summary == (
         "GET has the readonly flag, yet changed data or propagated; "
-        "MSETEX was not routed by the keys it declares on a node that owns no slot"
+        "NKSET was not routed by the keys it declares on a node that owns no slot"
     )
     assert [(item["name"], item["index"], item["count"]) for item in value["findings"]] == [
-        ("MSETEX", 0, 2),
+        ("NKSET", 0, 2),
         ("GET", 1, 2),
     ]
     assert to_plain_data(result.diagnostics["findings"]) == value["findings"]
