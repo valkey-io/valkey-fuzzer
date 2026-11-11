@@ -440,9 +440,8 @@ class CommandTableWorkload:
             problem = mismatch(schema, reply, resp)
             if problem is None or (name in KNOWN_GAPS and mismatch(KNOWN_GAPS[name], reply, resp) is None):
                 continue
-            found = self._mismatches.setdefault(
-                (name, resp),
-                {
+            if (name, resp) not in self._mismatches:
+                self._mismatches[name, resp] = {
                     "name": name,
                     "resp": resp,
                     "count": 0,
@@ -450,9 +449,8 @@ class CommandTableWorkload:
                     "reply": canonical_json(reply)[:_REPLY_TEXT],
                     "problem": problem,
                     "schema": schema,
-                },
-            )
-            found["count"] += 1
+                }
+            self._mismatches[name, resp]["count"] += 1
 
     def _forget(self, instance_id: Optional[str], resp: int) -> None:
         connection = self._connections.pop((instance_id, resp), None)

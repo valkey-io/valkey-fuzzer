@@ -12,7 +12,8 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-_SERVER_OPTION_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
+# A server option, or a module's: <module>.<name>, which the server takes at start once it loaded the module.
+_SERVER_OPTION_RE = re.compile(r"[a-z0-9][a-z0-9-]*|[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
 
 # These options describe process and deployment metadata owned by the process manager.
 # Scenarios must not override them because doing so would invalidate
@@ -100,10 +101,12 @@ def normalize_server_option(raw_option: object) -> str:
     if not isinstance(raw_option, str):
         raise TypeError(f"Server configuration keys must be strings, got {type(raw_option).__name__}")
 
-    option = raw_option.strip().lower()
+    option = raw_option.strip()
     while option.startswith("--"):
         option = option[2:]
-    option = option.replace("_", "-")
+    # A module's option keeps the name the module registered, which may hold capitals and underscores.
+    if "." not in option:
+        option = option.lower().replace("_", "-")
 
     if not option or not _SERVER_OPTION_RE.fullmatch(option):
         raise ValueError(f"Invalid Valkey server configuration option: {raw_option!r}")

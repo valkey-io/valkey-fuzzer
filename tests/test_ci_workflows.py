@@ -8,6 +8,8 @@ import json
 import os
 import re
 import shlex
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,7 +17,9 @@ import pytest
 import yaml
 from _pytest.mark.expression import Expression
 
+from valkey_fuzzer._data import to_plain_data
 from valkey_fuzzer.cli import create_parser
+from valkey_fuzzer.generator import generate
 from valkey_fuzzer.reports import write_document
 from valkey_fuzzer.results import ComponentResult, ComponentStatus, OutcomeStatus, RunOutcome
 
@@ -779,3 +783,37 @@ def test_the_batch_summary_lists_every_run_with_its_report_and_the_signatures(tm
     assert f"| {folder.name} | FAIL | {plan.scenario_id} | 31 | deadbeef | x | chaos: wave 1 / lost keys |" in summary
     assert "| s7 | ERROR | - | 7 | - | WorkerExit: no run report | - |" in summary
     assert "- Signature (1 run(s)): FAIL | valkey.cluster-chaos | chaos:FAIL" in summary
+
+
+def test_the_search_chaos_workflow_starts_valkey_search_with_its_index_check_on(tmp_path):
+    script = ROOT / ".github" / "scripts" / "module_chaos.py"
+    subprocess.run([sys.executable, str(script), str(tmp_path)], check=True, capture_output=True)
+    runtime = valkey_service(experiment_directories=(str(tmp_path),))
+    # The base the workflow writes: the module, and the module's option beside it, which is how one is set.
+    (write_base,) = [item for item in _run_scripts(_workflow("search-chaos.yml")) if "printf" in item]
+    (printf,) = re.findall(
+        r"printf '%s\\n' (.*?) > /tmp/search-chaos/base\.yaml", write_base.replace("\\\n", " "), re.S
+    )
+    base = yaml.safe_load("\n".join(shlex.split(printf)))
+    module = "/tmp/valkey-search/.build-release/libsearch.so"
+    assert base == {"deployment": {"server_config": {"loadmodule": module, "search.rdb-validate-on-write": "yes"}}}
+
+    def plan(name):
+        experiment = f"proposed.{name}-chaos"
+        return generate(runtime.catalog, 3, compile_fn=runtime.compile, experiment=experiment, base=base).plan
+
+    search = plan("search")
+    configs = [instance["server_config"] for instance in to_plain_data(search.instances).values()]
+    assert len(configs) >= 2
+    for config in configs:
+        assert (config["loadmodule"], config["search.rdb-validate-on-write"]) == (module, "yes")
+    # A save that fails the check fails the run: the log observer forbids its line, from before the load.
+    [logs] = [item for item in search.components if item.use == "valkey.observer.log"]
+    assert [rule["pattern"] for rule in to_plain_data(logs.config)["forbidden"]] == [
+        "Index validation failed for index"
+    ]
+    started = [item.id for item in search.ordered_components]
+    assert started.index("logs") < started.index("load")
+    # The other modules' experiments forbid no line.
+    for other in ("json", "bloom"):
+        assert not any(item.use == "valkey.observer.log" for item in plan(other).components)

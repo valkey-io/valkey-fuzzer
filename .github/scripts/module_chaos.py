@@ -23,16 +23,28 @@ def cmd(*words, expect=None):
     return item
 
 
-def faults_and_oracles(module_command, load, during, verify, oracles):
+def faults_and_oracles(module_command, load, during, verify, oracles, forbidden_logs):
     """The shared shape: probe, load, a replica fault and an optional primary stall at load.completed, writes
     during the fault, a settle, reads on every instance, the digest of every replica, and the module's own
-    ``oracles`` once the replicas are linked."""
+    ``oracles`` once the replicas are linked. A line of ``forbidden_logs`` (patterns) in an instance's log fails
+    the run, through the liveness oracle."""
     return [
         {
             "use": "valkey.capability.build-probe",
             "id": "build",
             "config": {"commands": [module_command], "deployment_config": ["loadmodule"]},
         },
+        *(
+            [
+                {
+                    "use": "valkey.observer.log",
+                    "id": "logs",
+                    "config": {"forbidden": [{"pattern": pattern} for pattern in forbidden_logs]},
+                }
+            ]
+            if forbidden_logs
+            else []
+        ),
         {"use": "valkey.action.commands", "id": "load", "config": {"timeout_s": 60, "commands": load}},
         # The faults fire once the load is in: a sleep that follows the load publishes the event they wait for.
         {
@@ -101,7 +113,7 @@ def faults_and_oracles(module_command, load, during, verify, oracles):
     ]
 
 
-def experiment(name, module, module_command, load, during, verify, oracles=()):
+def experiment(name, module, module_command, load, during, verify, oracles=(), forbidden_logs=()):
     doc = {
         "extends": ["valkey.base"],
         "id": f"proposed.{name}-chaos",
@@ -131,7 +143,7 @@ def experiment(name, module, module_command, load, during, verify, oracles=()):
                 "primary_pause_s": {"type": "number", "minimum": 0, "maximum": 60, "default": 0},
             }
         },
-        "components": faults_and_oracles(module_command, load, during, verify, oracles),
+        "components": faults_and_oracles(module_command, load, during, verify, oracles, forbidden_logs),
         "required_events": ["loaded.completed"],
         "required_evidence": [{"evidence_id": "valkey.fault.injected", "source": "hit-replica"}],
     }
@@ -404,5 +416,19 @@ results = {
         "converge_timeout_s": 60,
     },
 }
-experiment("search", "valkey-search", "FT.CREATE", load, during, verify, [results])
+# valkey-search checks an index before it saves it when search.rdb-validate-on-write is on (a development option
+# its own save and restore tests turn on; the deployment sets it beside loadmodule, as search-chaos.yml does):
+# every field's index must hold the same keys, a vector field's at most those. A save that fails the check logs
+# it and writes no index, and the line fails the run. Its other check of an index, of a vector field's graph as
+# it is loaded (search.hnsw-validation-enable), is on unless turned off.
+experiment(
+    "search",
+    "valkey-search",
+    "FT.CREATE",
+    load,
+    during,
+    verify,
+    [results],
+    forbidden_logs=["Index validation failed for index"],
+)
 print("written", sorted(p.name for p in OUT.iterdir()))

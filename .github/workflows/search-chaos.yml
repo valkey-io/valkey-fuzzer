@@ -3,7 +3,9 @@ name: Valkey Search Chaos Every 6 Hours
 # valkey-search's data under faults: indexes and hashes written before and while a replica is killed, stopped or
 # restarted (and the primary stalled), then searched on every instance and digested against the primary, on
 # Valkey unstable with ASan and valkey-search main. The experiment is .github/scripts/module_chaos.py's
-# proposed.search-chaos; valkey-json and valkey-bloom run the same way on the soak hosts.
+# proposed.search-chaos; valkey-json and valkey-bloom run the same way on the soak hosts. Every server starts with
+# valkey-search's check of an index before it is saved on (search.rdb-validate-on-write, set beside loadmodule),
+# and a save that fails the check fails its run; a valkey-search without the option does not start.
 on:
   schedule:
     - cron: '15 */6 * * *'
@@ -60,7 +62,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e .
           python .github/scripts/module_chaos.py /tmp/search-chaos/experiments
-          printf 'deployment:\n  server_config:\n    loadmodule: /tmp/valkey-search/.build-release/libsearch.so\n' \
+          printf '%s\n' 'deployment:' '  server_config:' \
+            '    loadmodule: /tmp/valkey-search/.build-release/libsearch.so' \
+            '    search.rdb-validate-on-write: "yes"' \
             > /tmp/search-chaos/base.yaml
 
       - name: Run the chaos batch

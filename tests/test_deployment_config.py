@@ -18,7 +18,12 @@ from valkey_fuzzer.deployment.local.models import (
 from valkey_fuzzer.deployment.local.planner import apply_startup_overlays, plan_deployment
 from valkey_fuzzer.deployment.local.processes import ProcessManager
 from valkey_fuzzer.deployment.local.provider import LocalDeploymentProvider
-from valkey_fuzzer.deployment.local.server_config import DEFAULT_SERVER_CONFIG, build_server_config_arguments
+from valkey_fuzzer.deployment.local.server_config import (
+    DEFAULT_SERVER_CONFIG,
+    build_server_config_arguments,
+    canonicalize_server_config,
+    normalize_server_option,
+)
 from valkey_fuzzer.deployment.local.validation.check import adapt_validation_config
 from valkey_fuzzer.deployment.local.validation.config import validation_config_from_document
 from valkey_fuzzer.plan import InstanceSelector, StartupOverlay
@@ -136,6 +141,19 @@ def test_a_rejected_overlay_changes_no_instance(selector, config, policy, messag
         apply_startup_overlays(plans, overlays)
 
     assert [plan.server_config for plan in plans] == originals
+
+
+def test_a_modules_option_is_named_after_its_module_and_kept_as_the_module_registered_it():
+    assert normalize_server_option("--Repl_Compression") == "repl-compression"
+    assert normalize_server_option("--search.rdb-validate-on-write") == "search.rdb-validate-on-write"
+    assert normalize_server_option("moduleconfigs.Immutable_bool") == "moduleconfigs.Immutable_bool"
+    config = canonicalize_server_config({"loadmodule": "/opt/libsearch.so", "search.rdb-validate-on-write": True})
+    assert build_server_config_arguments(config) == [
+        "--loadmodule", "/opt/libsearch.so", "--search.rdb-validate-on-write", "yes"
+    ]  # fmt: skip
+    for option in ("search.", ".reader-threads", "search.a.b", "search.reader threads", "repl.compression!"):
+        with pytest.raises(ValueError, match="Invalid Valkey server configuration option"):
+            normalize_server_option(option)
 
 
 def _scenario(deployment, experiment="valkey.aof-durability", **inputs):

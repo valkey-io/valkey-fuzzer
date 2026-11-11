@@ -197,7 +197,10 @@ the experiment's startup overlays. The plan records the result for every
 instance (`instances` in `plan.json`), and compile-time checks read it, so
 relying on a default is checked like writing it out. Keys are normalized (lowercase, `_` becomes `-`, a leading `--` is
 dropped), and two keys that normalize to the same option are rejected. A list
-value repeats a directive; `true` and `false` become `yes` and `no`.
+value repeats a directive; `true` and `false` become `yes` and `no`. A
+module's option is `<module>.<name>` (`search.reader-threads`), kept as the
+module registered it; the server takes it at start once it loaded the module,
+and exits if no loaded module has it.
 
 The provider owns the options that define an instance's identity and address,
 and rejects them in any config: `bind`, `bind-source-addr`, `port`, `dir`,
@@ -240,8 +243,9 @@ deployment:
 ```
 
 A bare path only: Valkey reads a module's arguments from the words after its
-path on one directive, and a config value is one argument. What the fuzzer
-does with a module:
+path on one directive, and a config value is one argument. A module's options
+go beside it instead, as `server_config` keys (`search.reader-threads: 4`).
+What the fuzzer does with a module:
 
 - **Is it loaded?** A [build probe](components.md#valkeycapabilitybuild-probe)
   with `commands: [JSON.GET]` and `deployment_config: [loadmodule]` checks the
