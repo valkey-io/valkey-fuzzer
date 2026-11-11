@@ -188,7 +188,7 @@ def test_a_mixed_version_experiment_with_one_build_was_set_up_wrong(runtime):
     check(run_scenario(runtime, scenario("valkey.mixed-version-cluster", "cluster")), "ERROR")
 
 
-# Root only: CI runs these two as root, in a step of their own (.github/workflows/valkey-experiments-live.yml).
+# Root only: these two need root (a tmpfs mount and iptables partitions).
 @pytest.mark.skipif(not providers.tmpfs_supported()[0], reason=providers.tmpfs_supported()[1] or "no tmpfs")
 def test_disk_full_degrades_gracefully_and_recovers(runtime):
     check(run_scenario(runtime, _disk_full()))
