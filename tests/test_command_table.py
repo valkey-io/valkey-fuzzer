@@ -306,8 +306,12 @@ def test_the_chaos_experiments_send_no_commands_unless_a_base_turns_them_on(expe
 
     assert rate() == 0
     assert rate(base={"experiment": {"inputs": {"command_rate": 250}}}) == 250
-    # The oracle that judges the workload's replies comes with it.
     plan = generate(runtime.catalog, 3, compile_fn=runtime.compile, experiment=experiment).plan
+    # The workload starts before the experiment's faults and actions, so its commands run under them.
+    started = [item.id for item in plan.ordered_components]
+    under = [item.id for item in plan.components if item.role in (ComponentRole.ACTION, ComponentRole.FAULT)]
+    assert under and all(started.index("commands") < started.index(item) for item in under)
+    # The oracle that judges the workload's replies comes with it.
     [oracle] = [item for item in plan.components if item.use == "valkey.oracle.reply-schema"]
     assert oracle.id == "reply-schemas" and oracle.config["workload"] == "commands"
 

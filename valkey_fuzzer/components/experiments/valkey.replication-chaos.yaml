@@ -60,6 +60,9 @@ components:
       op_timeout_s: 1.0
       wait_replicas: {$ref: inputs.wait_replicas}
 
+  # Listed, so that it starts before the chaos: a fragment's other components start after the experiment's own.
+  - id: commands
+
   - use: valkey.action.replication-chaos
     id: chaos
     depends_on: [writes]

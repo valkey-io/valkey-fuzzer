@@ -1,5 +1,5 @@
 {
-"valkey": "unstable 431a8fc0f (2026-11-06)",
+"valkey": "unstable c77a4e8da (2026-11-06)",
 "schemas": {
 "ACL CAT": {"anyOf": [{"description": "In case `category` was not given, a list of existing ACL categories", "items": {"type": "string"}, "type": "array"}, {"description": "In case `category` was given, list of commands that fall under the provided ACL category.", "items": {"type": "string"}, "type": "array"}]},
 "ACL DELROLE": {"description": "The number of roles deleted.", "type": "integer"},

@@ -100,7 +100,8 @@ LEAVES = {
 }
 # Replies Valkey sends that the reply schema of their command leaves out, each by the schema of those replies.
 # They are findings already reported; they are taken as matching, so that they do not fail every run, until
-# Valkey's schema describes them and reply_schemas.json is written again.
+# Valkey's schema describes them and reply_schemas.json is written again. The four below are fixed by "Allow
+# null command replies in schemas" (branch fix/nullable-command-reply-schemas), not in unstable c77a4e8da.
 _NULL = {"type": "null"}
 KNOWN_GAPS = {
     # geohashCommand (geo.c) replies null for a member the key does not hold; the schema's items are strings.

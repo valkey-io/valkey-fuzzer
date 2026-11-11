@@ -61,6 +61,9 @@ components:
     config:
       op_timeout_s: 1.0
 
+  # Listed, so that it starts before the partition: a fragment's other components start after the experiment's own.
+  - id: commands
+
   - use: valkey.fault.network-partition
     id: partition
     config:

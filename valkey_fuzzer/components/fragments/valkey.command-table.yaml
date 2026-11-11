@@ -5,7 +5,10 @@
 # server is the liveness oracle's to judge, and the `reply-schemas` oracle
 # holds their replies to Valkey's reply schemas. 0, the default, sends none, and
 # random scenarios keep it: a batch turns it on for an experiment with a base,
-# `experiment: {inputs: {command_rate: 200}}`.
+# `experiment: {inputs: {command_rate: 200}}`. An experiment that extends this
+# lists `- id: commands` before its faults and actions: a fragment's other
+# components start after the experiment's own, so the workload would start
+# once they are done.
 metadata:
   generator:
     inputs:
