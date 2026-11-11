@@ -101,6 +101,11 @@ _VARIES = (
     "HEXPIRETIME",
     "HPEXPIRETIME",
     "LASTSAVE",
+    # ROLE reports the replication state of the moment: a replica's handshake/sync/connected state and its offset
+    # (-1 until it has synced), which two independently converging deployments reach at different instants
+    # (fuzzer#125: a replica still in "handshake" with offset -1 on one build, further along on another). The
+    # faults and replica-diverged checks judge replication at quiescent points instead.
+    "ROLE",
 )
 # A script's call of a command (redis.call, server.pcall) in its upper-cased words: the command's name and, when the
 # next argument is a literal word too, that (CLIENT, INFO).

@@ -1395,6 +1395,8 @@ def test_a_reply_that_changes_with_the_encoding_is_a_variant_mismatch(builds):
         ["SRANDMEMBER", "s"],
         ["HEXPIRETIME", "h", "FIELDS", "1", "f"],
         ["LASTSAVE"],
+        # A replica's transient replication state and offset, which two converging deployments reach apart (fuzzer#125).
+        ["ROLE"],
         ["COMMANDLOG", "GET", "-1", "slow"],
         # The first members in a set's internal order, which its encoding decides.
         ["SORT", "s", "BY", "nosort", "LIMIT", "0", "2"],
