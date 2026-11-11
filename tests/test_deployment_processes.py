@@ -109,6 +109,23 @@ exit 1
     assert arguments_for_build(str(binary), taken) == taken
 
 
+def test_a_build_older_than_the_debug_assertions_starts_without_them(tmp_path):
+    # Valkey 7.2 answers the config probe for enable-debug-assert (8.0's) with "Bad directive".
+    binary = tmp_path / "valkey-server"
+    binary.write_text(
+        r"""#!/bin/sh
+case "$1" in
+  --enable-debug-assert) echo ">>> 'enable-debug-assert \"$2\"'"; echo "Bad directive";;
+  *) echo ">>> 'port \"-1\"'";;
+esac
+exit 1
+"""
+    )
+    binary.chmod(0o755)
+    arguments = ["--crash-memcheck-enabled", "no", "--enable-debug-assert", "yes"]
+    assert arguments_for_build(str(binary), arguments) == ["--crash-memcheck-enabled", "no"]
+
+
 @pytest.mark.parametrize(
     ("failure", "error"),
     [

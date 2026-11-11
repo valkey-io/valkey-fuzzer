@@ -157,6 +157,8 @@ def test_instances_start_with_exactly_the_effective_config_the_plan_records(tmp_
     assert primary["maxmemory"] == DEFAULT_SERVER_CONFIG["maxmemory"]
     # A crash is reported as itself, not as what the crash-time memory test trips under a sanitizer.
     assert primary["crash-memcheck-enabled"] == "no"
+    # Valkey's debug-only assertions are on, as in its own test suite.
+    assert primary["enable-debug-assert"] == "yes"
 
     config, plans = LocalDeploymentProvider._prepare(plan)
     for item in plans:

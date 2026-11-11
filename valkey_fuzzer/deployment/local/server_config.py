@@ -74,6 +74,10 @@ DEFAULT_SERVER_CONFIG = {
     # nothing, and under AddressSanitizer the test itself is reported (it copies sanitizer-owned memory, and its
     # region table overflows past 128 mappings: valkey#4213), burying the crash that started it.
     "crash-memcheck-enabled": "no",
+    # The assertions Valkey's developers judged too costly for production (debugServerAssert: cached replies
+    # verified against fresh ones, expiry and key tables in step, entry counts) and that Valkey's own test suite
+    # runs with. Valkey 8.0 introduced the config; an older build starts without it (UNOBSERVABLE_CONFIGS).
+    "enable-debug-assert": "yes",
 }
 # Cluster mode adds fast failure detection and keeps serving with slots uncovered.
 CLUSTER_DEFAULT_SERVER_CONFIG = {"cluster-node-timeout": "1000", "cluster-require-full-coverage": "no"}
@@ -215,9 +219,11 @@ def _probe_output(path: str, mtime_ns: int, size: int, name: str, value: str) ->
 # hints, so a build without them (MALLOC=libc, as the sanitizer builds are) exits on activedefrag yes. The
 # IO-thread configs are hidden ones that only some releases know: io-threads-always-active and the copy-avoiding
 # replies are 9.1's, events-per-io-thread 8.0's to 9.0's (9.1 accepts and ignores it), prefetch-batch-max-size
-# 8.0's and later, and io-threads-do-reads 7.2's and 8.0's (8.1 and later accept and ignore it).
+# 8.0's and later, and io-threads-do-reads 7.2's and 8.0's (8.1 and later accept and ignore it). The debug
+# assertions (a provider default) are 8.0's and later.
 UNOBSERVABLE_CONFIGS = {
     "activedefrag": "no",
+    "enable-debug-assert": None,
     "events-per-io-thread": None,
     "io-threads-always-active": None,
     "io-threads-do-reads": None,
@@ -244,6 +250,8 @@ def arguments_for_build(binary: str, arguments: Sequence[str]) -> list[str]:
     """valkey-server ``arguments`` (``--option value`` pairs) with each renamed config as ``binary`` knows it, and
     each unobservable config it refuses (:data:`UNOBSERVABLE_CONFIGS`) replaced or left out."""
 
+    if not os.path.exists(shutil.which(binary) or binary):
+        return list(arguments)  # nothing to ask: the start itself reports the missing binary
     translated: list[str] = []
     for index in range(0, len(arguments) - 1, 2):
         option, value = arguments[index][2:], arguments[index + 1]

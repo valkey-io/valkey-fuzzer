@@ -178,6 +178,12 @@ Each instance starts with these settings, which `server_config`,
 - `--loglevel notice`;
 - `--maxmemory 500mb`, so a run cannot exhaust the host; with Valkey's default
   `noeviction` policy, hitting the cap shows up as write errors;
+- `--crash-memcheck-enabled no`: a crashing server does not test its memory
+  for hardware faults first, which under a sanitizer is reported in place of
+  the crash;
+- `--enable-debug-assert yes`: Valkey's assertions that are too costly for
+  production run, as in Valkey's own test suite (a build older than 8.0, which
+  lacks the config, starts without it);
 - in cluster mode, `--cluster-node-timeout 1000` and
   `--cluster-require-full-coverage no`.
 

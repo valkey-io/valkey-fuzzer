@@ -347,6 +347,7 @@ touches nothing else. `provision`:
    addresses, layered server config) and applies the startup overlays; each
    instance starts with `DEFAULT_SERVER_CONFIG` (`appendonly yes`,
    `appendfsync everysec`, `save ""`, `maxmemory 500mb`, `loglevel notice`,
+   `crash-memcheck-enabled no`, `enable-debug-assert yes`,
    and in cluster mode `cluster-node-timeout 1000` and
    `cluster-require-full-coverage no`) under that config, exactly the
    effective config the plan records;

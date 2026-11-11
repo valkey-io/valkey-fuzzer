@@ -1,0 +1,108 @@
+name: Valkey Sanitizer Builds Daily
+
+# Every experiment with a generator, once a day, on the builds the soak hosts do not run: UBSan, TSan, 32-bit, and
+# ASan with forced defragmentation (every allocation the defragmenter visits moves, on libc's allocator, so a
+# pointer kept across a move is a use-after-free ASan reports). The soak hosts run the plain, ASan and gcov builds.
+on:
+  schedule:
+    - cron: '45 1 * * *'
+  workflow_dispatch:
+    inputs:
+      seeds:
+        description: "Fresh seeds per experiment"
+        required: false
+        default: "3"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  builds:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        build: [ubsan, tsan, 32bit, defrag]
+    env:
+      BATCH_DIR: /tmp/valkey-builds/batch
+      # allocator_may_return_null is Valkey's own test harness's setting: a command that expects an allocation to
+      # fail must see NULL. The summaries name the function a report hit in, which the failure signature carries.
+      ASAN_OPTIONS: allocator_may_return_null=1:quarantine_size_mb=16
+      UBSAN_OPTIONS: print_stacktrace=1:print_summary=1
+      TSAN_OPTIONS: second_deadlock_stack=1
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.11'
+
+      - name: Build Valkey unstable
+        env:
+          BUILD: ${{ matrix.build }}
+        run: |
+          git clone --depth 1 https://github.com/valkey-io/valkey.git /tmp/valkey
+          sudo apt-get update -q
+          case "${BUILD}" in
+            ubsan)
+              sudo apt-get install -y -q clang libzstd-dev
+              make -C /tmp/valkey -j"$(nproc)" BUILD_ZSTD=yes CC=clang OPT=-O1 SANITIZER=undefined ;;
+            tsan)
+              sudo apt-get install -y -q clang libzstd-dev
+              make -C /tmp/valkey -j"$(nproc)" BUILD_ZSTD=yes CC=clang OPT=-O1 SANITIZER=thread ;;
+            32bit)
+              sudo apt-get install -y -q libc6-dev-i386 g++-multilib
+              make -C /tmp/valkey -j"$(nproc)" 32bit ;;
+            defrag)
+              sudo apt-get install -y -q clang libzstd-dev
+              make -C /tmp/valkey -j"$(nproc)" BUILD_ZSTD=yes CC=clang OPT=-O1 SANITIZER=address \
+                DEBUG_FORCE_DEFRAG=yes USE_JEMALLOC=no ;;
+          esac
+          /tmp/valkey/src/valkey-server --version
+
+      - name: Install the fuzzer
+        env:
+          BUILD: ${{ matrix.build }}
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          mkdir -p /tmp/valkey-builds
+          # The defrag build defragments in every run, from the first byte of fragmentation.
+          if [ "${BUILD}" = defrag ]; then
+            printf 'deployment:\n  server_config:\n    activedefrag: "yes"\n    active-defrag-ignore-bytes: "1"\n    active-defrag-threshold-lower: "0"\n' \
+              > /tmp/valkey-builds/base.yaml
+          else
+            printf 'deployment: {}\n' > /tmp/valkey-builds/base.yaml
+          fi
+
+      - name: Run the batch
+        env:
+          SEEDS: ${{ inputs.seeds || '3' }}
+        run: |
+          # At most one always-active IO thread a server: three (io-threads 4) take more than a runner's four cores.
+          # The experiments that need a second, older build report SKIP_UNSUPPORTED here.
+          valkey-fuzzer batch --random all --seeds "${SEEDS}" --workers 3 \
+            --exclude server_config.io-threads=4 --base /tmp/valkey-builds/base.yaml \
+            --profile nightly-soak --serial-reruns 2 --prune-pass --timeout 1800 --allow-unsupported \
+            --valkey-binary /tmp/valkey/src/valkey-server --artifact-dir /tmp/valkey-builds/artifacts --out "${BATCH_DIR}"
+
+      - name: Summarize the batch
+        if: always()
+        env:
+          SUMMARY_TITLE: Valkey ${{ matrix.build }} build
+        run: python .github/scripts/ci.py summary
+
+      - name: Upload the batch
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: valkey-builds-${{ matrix.build }}-${{ github.run_id }}
+          path: /tmp/valkey-builds
+          if-no-files-found: warn
+          retention-days: 30
