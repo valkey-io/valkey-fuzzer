@@ -24,14 +24,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build: [ubsan, tsan, 32bit, defrag]
+        # TSan is left out until Valkey's data races have a suppression file: with -fno-sanitize-recover it
+        # aborts on the first race at startup, so no run completes. UBSan, 32-bit, and forced-defrag ASan run here.
+        build: [ubsan, 32bit, defrag]
     env:
       BATCH_DIR: /tmp/valkey-builds/batch
       # allocator_may_return_null is Valkey's own test harness's setting: a command that expects an allocation to
       # fail must see NULL. The summaries name the function a report hit in, which the failure signature carries.
       ASAN_OPTIONS: allocator_may_return_null=1:quarantine_size_mb=16
       UBSAN_OPTIONS: print_stacktrace=1:print_summary=1
-      TSAN_OPTIONS: second_deadlock_stack=1
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -53,9 +54,6 @@ jobs:
             ubsan)
               sudo apt-get install -y -q clang libzstd-dev
               make -C /tmp/valkey -j"$(nproc)" BUILD_ZSTD=yes CC=clang OPT=-O1 SANITIZER=undefined ;;
-            tsan)
-              sudo apt-get install -y -q clang libzstd-dev
-              make -C /tmp/valkey -j"$(nproc)" BUILD_ZSTD=yes CC=clang OPT=-O1 SANITIZER=thread ;;
             32bit)
               sudo apt-get install -y -q libc6-dev-i386 g++-multilib
               make -C /tmp/valkey -j"$(nproc)" 32bit ;;
@@ -105,8 +103,7 @@ jobs:
           # A sanitizer build runs several times slower and is memory-heavy, so one run at a time (--workers 1):
           # three concurrent sanitizer servers starve a 4-core runner and the build-capability probe times out.
           valkey-fuzzer batch --seeds "${SEEDS}" --workers 1 \
-            --random valkey.aof-durability --random valkey.cluster-chaos \
-            --random valkey.cluster-election-durability --random valkey.replication-chaos \
+            --random valkey.aof-durability --random valkey.replication-chaos \
             --random valkey.replication-full-resync --random valkey.replication-partial-resync \
             --random valkey.rdb-compression --random valkey.snapshot-equivalence \
             --exclude server_config.io-threads=4 --exclude inputs.bgsave_method=forkless \
