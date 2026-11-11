@@ -100,6 +100,8 @@ jobs:
           # second, older build (mixed-version, rolling-upgrade, repl-compression-*) or root (cluster-partition,
           # bgsave-disk-full: a tmpfs mount, iptables) are left out, since this build is the point, not coverage of
           # every experiment. At most one always-active IO thread a server (io-threads 4 needs more than four cores).
+          # prefetch-batch-max-size=0 is excluded: it is a zero-length VLA in prefetchCommandQueueKeys, which
+          # UBSan aborts on (benign on other builds); a real Valkey bug, reported, excluded so UBSan finds more.
           # A sanitizer build runs several times slower and is memory-heavy, so one run at a time (--workers 1):
           # three concurrent sanitizer servers starve a 4-core runner and the build-capability probe times out.
           valkey-fuzzer batch --seeds "${SEEDS}" --workers 1 \
@@ -108,6 +110,7 @@ jobs:
             --random valkey.replication-full-resync --random valkey.replication-partial-resync \
             --random valkey.rdb-compression --random valkey.snapshot-equivalence \
             --exclude server_config.io-threads=4 --exclude inputs.bgsave_method=forkless \
+            --exclude server_config.prefetch-batch-max-size=0 \
             --base /tmp/valkey-builds/base.yaml \
             --profile nightly-soak --serial-reruns 2 --prune-pass --timeout 2700 --allow-unsupported \
             --valkey-binary /tmp/valkey/src/valkey-server --artifact-dir /tmp/valkey-builds/artifacts --out "${BATCH_DIR}"
