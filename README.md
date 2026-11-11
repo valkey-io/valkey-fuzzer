@@ -13,7 +13,7 @@ experiment, cluster chaos (failovers with process kills) included.
 
 ## Prerequisites
 
-- Python 3.9 or later.
+- Python 3.10 or later.
 - A `valkey-server` build, on `PATH` or passed with `--valkey-binary`. Most
   experiments probe the build before they start and report `ERROR` without
   one. Only cluster chaos, cluster partition, and the disk-full experiment
