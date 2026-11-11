@@ -656,8 +656,11 @@ with 4 and 7.3 with 8, and six idle cluster nodes 1.9 cores with 2 and 10.7
 with 8, since the cluster bus keeps waking them (0.15 with 8 without
 always-active). So the pool draws at most four, and `valkey.cluster-chaos`,
 whose clusters reach 96 nodes, lists `valkey.pool.cluster-io-threads`
-(`io-threads` 1 or 2), which wins over the default pool's key. A batch with
-the default pools needs fewer workers per core than one without them.
+(`io-threads` 1 or 2, never always-active), which wins over the default
+pool's keys. A batch with the default pools needs fewer workers per core than
+one without them; on a host with few cores per worker (a four-core runner, a
+soak host with as many workers as cores), `--exclude
+server_config.io-threads=4` keeps a server to one always-active IO thread.
 
 The `valkey.writes` fragment bounds the workload inputs of every experiment
 that opts in: `stable_keys` 0-2000, `mutable_keys` 1-1000, `mutation_rate`

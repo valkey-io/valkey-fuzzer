@@ -251,8 +251,10 @@ def test_every_shipped_experiment_draws_the_same_valid_bounded_scenario_from_one
         ]
         if experiment == CLUSTER_EXPERIMENT:
             assert 3 <= plan.deployment["primaries"] <= 16 and 7000 <= plan.deployment["base_port"] <= 8000
-            # Its clusters of up to 96 nodes keep at most two IO threads a node busy.
+            # Its clusters of up to 96 nodes have at most two IO threads a node, none of them always active.
             assert all(config.get("io-threads", "1") in ("1", "2") for config in configs)
+            assert all(config.get("io-threads-always-active", "no") == "no" for config in configs)
+            assert all(config.get("events-per-io-thread", "2") == "2" for config in configs)
         else:
             # One host runs every instance; cluster chaos draws clusters of up to 16 shards.
             shards = plan.deployment.get("primaries", 1) if plan.deployment_mode == "cluster" else 1

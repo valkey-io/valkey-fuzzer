@@ -20,13 +20,16 @@ metadata:
     inputs:
       waves: {hook: valkey.generator.waves}
       keys_per_slot: fixed
-    # At most one IO thread a node, not the default pool's three: always-active
-    # IO threads spin through every event, and the cluster bus of up to 96 nodes
-    # keeps them busy.
+    # At most one IO thread a node, and never an always-active one: those spin
+    # through every event, about 0.4 of a core a node, and a cluster here has up
+    # to 96 nodes (2 of 14 seeds timed out from the load on a 48-core host).
+    # The other cluster and replication experiments draw them.
     server_config: [valkey.pool.cluster-io-threads]
     pools:
       valkey.pool.cluster-io-threads:
         io-threads: ["1", "2"]
+        io-threads-always-active: ["no"]
+        events-per-io-thread: ["2"]
         scope: [deployment, role]
 inputs:
   type: object
