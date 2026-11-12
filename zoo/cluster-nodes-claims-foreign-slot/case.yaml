@@ -1,0 +1,8 @@
+description: >-
+  In CLUSTER NODES replies, every primary that does not own slot 0 lists slot 0 on its own line
+  (nodes.conf stays correct).
+catches: valkey.oracle.deployment-state (view consistency and split-brain detection)
+scenarios:
+  - {file: scenario.yaml, fail: [cluster]}
+runs: 5
+min_detection_rate: 1.0

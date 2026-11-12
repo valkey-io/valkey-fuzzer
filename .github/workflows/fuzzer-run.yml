@@ -1,10 +1,13 @@
-name: Daily Valkey Fuzzer
+name: Valkey Fuzzer Cluster Chaos Every 4 Hours
 
+# Three fresh valkey.cluster-chaos seeds through the batch runner, every four hours.
 on:
   schedule:
-    # Run every 4 hours
     - cron: '0 */4 * * *'
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   random-fuzzer:
@@ -12,132 +15,77 @@ jobs:
     timeout-minutes: 60
     env:
       FUZZER_ARTIFACT_DIR: /tmp/valkey-fuzzer/artifacts
-    
+      # The batch folder; valkey-ci-agent's fuzzer monitor reads batch/summary.json
+      # and, for each entry of its runs, the run report at batch/<runs[].report>.
+      FUZZER_BATCH_DIR: /tmp/valkey-fuzzer/artifacts/batch
+
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v6
-    
-    - name: Set up Python
-      uses: actions/setup-python@v6
-      with:
-        python-version: '3.11'
-    
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install pytest pytest-asyncio
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-        pip install -e .
-    
-    - name: Run random fuzzer test
-      run: |
-        mkdir -p "${FUZZER_ARTIFACT_DIR}"
-        echo "========================================"
-        echo "Random Fuzzer Test"
-        echo "Timestamp: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
-        echo "========================================"
-        valkey-fuzzer cluster --random --verbose \
-          --output "${FUZZER_ARTIFACT_DIR}/results.json" \
-          --format json \
-          --export-dsl "${FUZZER_ARTIFACT_DIR}/scenario.yaml"
-    
-    - name: Print Valkey node logs
-      if: always()
-      run: |
-        echo ""
-        echo "========================================"
-        echo "Valkey Node Logs"
-        echo "========================================"
-        if [ -d "/tmp/valkey-fuzzer/logs" ]; then
-          for logfile in /tmp/valkey-fuzzer/logs/*.log; do
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.11'
+
+      # Built here: without --valkey-binary the local deployment would build its
+      # fixed fallback release, and the soak would never see a new Valkey commit.
+      - name: Build Valkey unstable
+        run: |
+          git clone --depth 1 https://github.com/valkey-io/valkey.git /tmp/valkey-unstable
+          make -C /tmp/valkey-unstable -j"$(nproc)"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+
+      - name: Run the fuzzer batch
+        run: |
+          mkdir -p "${FUZZER_ARTIFACT_DIR}"
+          echo "========================================"
+          echo "Random Fuzzer Batch"
+          echo "Timestamp: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+          echo "========================================"
+          # Three fresh cluster chaos seeds, one at a time; the batch folder holds
+          # each run's own report (runs/<id>/report.json) and summary.json.
+          valkey-fuzzer batch --random valkey.cluster-chaos --seeds 3 --profile nightly-soak --timeout 900 \
+            --valkey-binary /tmp/valkey-unstable/src/valkey-server --out "${FUZZER_BATCH_DIR}"
+
+      - name: Print Valkey node logs
+        if: always()
+        run: |
+          echo ""
+          echo "========================================"
+          echo "Valkey Node Logs"
+          echo "========================================"
+          found=0
+          for logfile in "${FUZZER_BATCH_DIR}"/runs/*/logs/*.log; do
             if [ -f "$logfile" ]; then
+              found=1
               echo ""
-              echo "--- $(basename $logfile) ---"
+              echo "--- ${logfile#"${FUZZER_BATCH_DIR}"/} ---"
               cat "$logfile"
             fi
           done
-        else
-          echo "No Valkey logs found at /tmp/valkey-fuzzer/logs"
-        fi
+          if [ "$found" = 0 ]; then
+            echo "No Valkey logs found under ${FUZZER_BATCH_DIR}/runs"
+          fi
 
-    - name: Prepare analysis bundle
-      if: always()
-      shell: bash
-      run: |
-        set -euo pipefail
-        mkdir -p "${FUZZER_ARTIFACT_DIR}/logs"
-        if [ -d "/tmp/valkey-fuzzer/logs" ]; then
-          cp -R /tmp/valkey-fuzzer/logs/. "${FUZZER_ARTIFACT_DIR}/logs/"
-        fi
+      - name: Summarize the batch
+        if: always()
+        env:
+          SUMMARY_TITLE: Valkey Fuzzer Cluster Chaos
+          BATCH_DIR: ${{ env.FUZZER_BATCH_DIR }}
+        run: python .github/scripts/ci.py summary
 
-        python - <<'PY'
-        import json
-        import os
-        from pathlib import Path
-
-        artifact_dir = Path(os.environ["FUZZER_ARTIFACT_DIR"])
-        results_path = artifact_dir / "results.json"
-        scenario_path = artifact_dir / "scenario.yaml"
-        logs_dir = artifact_dir / "logs"
-
-        result = None
-        if results_path.exists():
-            payload = json.loads(results_path.read_text())
-            results = payload.get("results") or []
-            if results:
-                result = results[0]
-
-        manifest = {
-            "schema_version": 2,
-            "results_path": "results.json" if results_path.exists() else None,
-            "scenario_path": "scenario.yaml" if scenario_path.exists() else None,
-            "log_files": sorted(
-                str(path.relative_to(artifact_dir))
-                for path in logs_dir.rglob("*")
-                if path.is_file()
-            ),
-            "scenario_id": result.get("scenario_id") if isinstance(result, dict) else None,
-            "seed": result.get("seed") if isinstance(result, dict) else None,
-            "success": result.get("success") if isinstance(result, dict) else None,
-            "valkey_sha": result.get("valkey_sha") if isinstance(result, dict) else None,
-        }
-        (artifact_dir / "manifest.json").write_text(
-            json.dumps(manifest, indent=2),
-            encoding="utf-8",
-        )
-
-        lines = ["## Fuzzer Run Artifact Bundle", ""]
-        if isinstance(result, dict):
-            lines.append(f"- Scenario: `{result.get('scenario_id', 'unknown')}`")
-            lines.append(f"- Seed: `{result.get('seed', 'unknown')}`")
-            lines.append(
-                f"- Status: `{'PASSED' if result.get('success') else 'FAILED'}`"
-            )
-            validation = result.get("final_validation") or {}
-            failed_checks = validation.get("failed_checks") or []
-            if failed_checks:
-                lines.append(
-                    f"- Failed checks: {', '.join(str(item) for item in failed_checks)}"
-                )
-        else:
-            lines.append("- Structured results were not generated for this run.")
-
-        lines.append(
-            f"- Collected files: `{len(manifest['log_files']) + int(results_path.exists()) + int(scenario_path.exists()) + 1}`"
-        )
-        lines.append("")
-
-        summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
-        if summary_path:
-            with open(summary_path, "a", encoding="utf-8") as handle:
-                handle.write("\n".join(lines) + "\n")
-        PY
-
-    - name: Upload fuzzer run artifacts
-      if: always()
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-      with:
-        name: fuzzer-run-artifacts-${{ github.run_id }}
-        path: ${{ env.FUZZER_ARTIFACT_DIR }}
-        if-no-files-found: warn
-        retention-days: 60
+      - name: Upload fuzzer run artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzzer-run-artifacts-${{ github.run_id }}
+          path: ${{ env.FUZZER_ARTIFACT_DIR }}
+          if-no-files-found: warn
+          retention-days: 60

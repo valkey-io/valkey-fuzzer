@@ -1,0 +1,19 @@
+# Run examples/valkey/experiments/tools-compare.yaml: valkey-check-rdb of the
+# build under test and of its parent, exit status and output compared.
+#
+#   valkey-fuzzer run examples/valkey/tools_compare.yaml \
+#     --experiment-dir examples/valkey/experiments
+scenario_id: tools-compare
+seed: 1
+artifacts:
+  parent:
+    use: valkey.artifact.local-binary
+    with: {path: /opt/valkey-parent/src/valkey-server}
+experiment:
+  id: example.tools-compare
+  inputs:
+    parent: {$ref: artifacts.parent.binary}
+deployment:
+  mode: standalone
+  base_port: 7910
+  valkey_binary: /opt/valkey/src/valkey-server

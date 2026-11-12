@@ -1,0 +1,14 @@
+# Kill the primary under writes and require zero acknowledged-write loss with
+# appendfsync always.  For everysec, set loss_window_s to at least 2.5 (the
+# fsync interval plus its scheduling slack); the ledger oracle rejects less.
+scenario_id: aof-durability
+seed: 11
+experiment:
+  id: valkey.aof-durability
+  inputs:
+    appendfsync: always
+    loss_window_s: 0
+deployment:
+  mode: standalone
+  replicas_per_primary: 1
+  base_port: 7430

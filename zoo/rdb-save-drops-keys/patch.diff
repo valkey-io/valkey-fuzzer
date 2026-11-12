@@ -1,0 +1,14 @@
+diff --git a/src/rdb.c b/src/rdb.c
+index 36637312b..dde5fb72f 100644
+--- a/src/rdb.c
++++ b/src/rdb.c
+@@ -1541,6 +1541,9 @@ ssize_t rdbSaveDb(rio *rdb, int dbid, int rdbflags, int rdbver, long *key_counte
+ 
+         initStaticStringObject(key, keystr);
+         expire = objectGetExpire(o);
++        /* Bug zoo: a fork-based RDB save silently omits every 50th key. */
++        static unsigned long zoo_saved_keys = 0;
++        if (++zoo_saved_keys % 50 == 0) continue;
+         if ((res = rdbSaveKeyValuePair(rdb, &key, o, expire, dbid, rdbver)) < 0) goto werr;
+         written += res;
+ 

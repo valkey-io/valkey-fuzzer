@@ -1,0 +1,168 @@
+# Implementation evidence for model.tla: the one place the election's log
+# patterns live. The valkey.cluster-election-durability experiment publishes
+# each `log` line as its `event` (valkey.observer.log-trigger with
+# spec: cluster-election), the election-safety oracle reads those events, and
+# `valkey-fuzzer spec conform` rebuilds the model's state from a run's trace.
+evidence:
+  started:
+    event: cluster.election.started
+    log: 'Starting a failover election for epoch (?P<epoch>\d+)'
+    fields: {instance_id: node, epoch: int}
+    action: StartElection
+    step: {process: [electionEpoch]}
+    updates:
+      - {max: currentEpoch, key: $instance_id, value: $epoch}
+      - {set: electionEpoch, key: $instance_id@Candidates, value: $epoch}
+      - {set: granted, key: $instance_id@Candidates, value: {set: []}}
+      - {add: msgs, value: {type: request, from: $instance_id@Candidates, epoch: $epoch}}
+  granted:
+    event: cluster.vote.granted
+    log: 'Failover auth granted to (?P<candidate>[0-9a-f]{40}) \(.*\) for epoch (?P<epoch>\d+)'
+    fields: {instance_id: node, candidate: node_id, epoch: int}
+    action: HandleRequest
+    # Only a granting HandleRequest sets lastVote; its argument is the voter.
+    step: {changes: lastVote, process: [lastVote]}
+    updates:
+      - {max: currentEpoch, key: $instance_id, value: $epoch}
+      - {set: lastVote, key: $instance_id@Primaries, value: $epoch}
+      - add: held
+        key: $instance_id@Primaries
+        value: {type: vote, from: $instance_id@Primaries, to: $candidate@Candidates, epoch: $epoch}
+  denied:
+    event: cluster.vote.denied
+    log: 'Failover auth denied to (?P<candidate>[0-9a-f]{40})'
+    fields: {instance_id: node, candidate: node_id}
+    action: HandleRequest
+    step: {unchanged: lastVote}
+  acked:
+    # Logged by the candidate for every vote it counts (Valkey 9.2+). The vote
+    # has left the voter; the epoch is the candidate's election epoch.
+    event: cluster.vote.acked
+    log: 'Failover auth ACK from (?P<voter>[0-9a-f]{40}) \(.*\) for epoch (?P<epoch>\d+) \(ACKs (?P<acks>\d+), quorum (?P<quorum>\d+)\)'
+    fields:
+      instance_id: node
+      voter: node_id
+      epoch: int
+      acks: {type: int, default: null}
+      quorum: {type: int, default: null}
+    action: ReceiveVote
+    step: {process: [granted]}
+    # The ACK and the grant can carry the same millisecond and be read from
+    # their logs in either order; the vote left only after it was granted.
+    after: {evidence: granted, match: {instance_id: $voter, candidate: $instance_id, epoch: $epoch}}
+    updates:
+      - remove: held
+        key: $voter@Primaries
+        value: {type: vote, from: $voter@Primaries, to: $instance_id@Candidates, epoch: $epoch}
+      - add: msgs
+        value: {type: vote, from: $voter@Primaries, to: $instance_id@Candidates, epoch: $epoch}
+      - {add: granted, key: $instance_id@Candidates, value: $voter@Primaries}
+  won:
+    event: cluster.election.won
+    log: 'configEpoch set to (?P<epoch>\d+) after successful failover'
+    fields: {instance_id: node, epoch: int}
+    action: Win
+    updates:
+      - {add: winners, value: [$instance_id@Candidates, $epoch]}
+  crash:
+    # valkey.fault.process-signal with capture_cluster_vars: the nodes.conf
+    # vars the killed node restarts with, read at the kill (exact). A kill
+    # without them is a record conform cannot apply, never nodes.conf at 0.
+    # The kill_primary trigger of valkey.action.cluster-election publishes
+    # its kill the same way.
+    event: '*.injected'
+    where: {signal: SIGKILL, applied: true}
+    fields:
+      target: node
+      disk_epoch: {type: int, path: disk_vars_at_kill.currentEpoch}
+      disk_vote: {type: int, path: disk_vars_at_kill.lastVoteEpoch}
+    action: Crash
+    updates:
+      - {set: diskEpoch, key: $target@Primaries, value: $disk_epoch}
+      - {set: diskVote, key: $target@Primaries, value: $disk_vote}
+      - {set: currentEpoch, key: $target, value: $disk_epoch}
+      - {set: lastVote, key: $target@Primaries, value: $disk_vote}
+      - {clear: held, key: $target@Primaries}
+      - {incr: crashes}
+  sample:
+    # valkey.observer.cluster-trace: CLUSTER INFO cluster_current_epoch, the
+    # node's role and slots from CLUSTER NODES, and the vars line of nodes.conf.
+    # nodes.conf samples lag behind the file, so they only raise the disk vars.
+    sample: true
+    fields:
+      node: node
+      current_epoch: int
+      disk_epoch: {type: int, path: disk.currentEpoch, default: 0}
+      disk_vote: {type: int, path: disk.lastVoteEpoch, default: 0}
+    updates:
+      - {max: currentEpoch, key: $node, value: $current_epoch}
+      - {max: diskEpoch, key: $node@Primaries, value: $disk_epoch}
+      - {max: diskVote, key: $node@Primaries, value: $disk_vote}
+
+unobservable:
+  SaveConfig: Saves of nodes.conf are not logged; nodes.conf samples raise diskEpoch and diskVote.
+  BioWrite: The background writer's saves are not logged.
+  FlushEarly: Whether a queued ACK left before the save is not logged; an ACK only shows that the vote left.
+  LearnEpoch: A candidate learning a higher epoch shows only in CLUSTER INFO samples.
+
+processes:
+  Primaries:
+    prefix: prim
+    # Valkey's quorum counts the slot-owning primaries; a replica promoted
+    # later votes too.
+    members:
+      - {evidence: sample, field: node, where: {round: 1, role: primary}, require: [slots]}
+      - {evidence: granted, field: instance_id}
+  Candidates:
+    prefix: cand
+    members:
+      - {evidence: started, field: instance_id}
+
+state:
+  currentEpoch: {over: [Primaries, Candidates], init: 0}
+  lastVote: {over: [Primaries], init: 0}
+  diskEpoch: {over: [Primaries], init: 0}
+  diskVote: {over: [Primaries], init: 0}
+  held: {over: [Primaries], init: {set: []}}
+  bio: {hidden: '[p \in Primaries |-> <<>>]', why: Queued background saves are not observable.}
+  msgs: {init: {set: []}}
+  electionEpoch: {over: [Candidates], init: 0}
+  granted: {over: [Candidates], init: {set: []}}
+  winners: {init: {set: []}}
+  crashes: {init: 0}
+
+constants:
+  MaxEpoch: {max_of: [currentEpoch, lastVote, diskEpoch, electionEpoch], at_least: 1}
+  MaxCrashes: {max_of: [crashes], at_least: 1}
+  PersistBeforeAck: {config: cluster-config-save-behavior, equals: sync}
+  # Every conform property claims FlushBeforeSave = FALSE, so a sync run is
+  # checked as claimed: a double vote there fails the run, as it should,
+  # since Valkey without the save-before-send fix can produce one.
+  FlushBeforeSave: {value: "FALSE", why: Whether a vote left before its save is not logged.}
+
+scenario:
+  experiment: valkey.cluster-election-durability
+  deployment:
+    mode: cluster
+    primaries: {count: Primaries}
+    replicas_per_primary: {count: Candidates}
+    base_port: 7700
+  inputs:
+    save_behavior: {constant: PersistBeforeAck, map: {"TRUE": sync, "FALSE": best-effort}}
+    # Every replica of the shard starts an election in the same epoch, and the
+    # shard's own primary votes, as in the model's StartElection steps.
+    election: force_failover
+  faults:
+    # kill-voter (valkey.fault.process-signal) kills the primary whose
+    # "Failover auth granted" line is the vote_occurrence-th.
+    - action: Crash
+      after: granted
+      component: kill-voter
+      occurrence_input: vote_occurrence
+      target: same-process
+      process: [lastVote, currentEpoch, held, bio]
+  variants:
+    occurrence_shift: [1]
+    inputs:
+      restart_delay_s: [0, 1]
+      second_election_delay_s: [0.5, 2.5]

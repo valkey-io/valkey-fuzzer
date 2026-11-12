@@ -1,0 +1,3 @@
+# TLC run by hand inside a bundle; `valkey-fuzzer spec` runs it in a temporary directory.
+states/
+*.bin

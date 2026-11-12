@@ -1,0 +1,87 @@
+# The register bundle's experiment: a data-only composition of installed
+# components that runs the model's Write, Ack, and Crash on a real valkey-server.
+#
+#   writes      Write + Ack: the key-value workload writes `writes` keys and
+#               publishes writes.seeded once Valkey acknowledged every one
+#   crash       Crash: SIGKILL the primary the moment writes.seeded is
+#               published, then restart it from what it persisted
+#   reload      DEBUG RELOAD after the restart; its "Done loading RDB, keys
+#               loaded: N" line (published as register.loaded by reload-log,
+#               with the pattern from mapping.yaml) is the observed register
+#   data        the ledger oracle: every acknowledged write must survive
+#
+# appendonly yes with appendfsync always saves every write before Valkey
+# acknowledges it (SyncBeforeAck = TRUE); appendonly no saves nothing, so the
+# crash loses the acknowledged writes, which is the model's counterexample.
+# aof-use-rdb-preamble no keeps the restart from loading an RDB base file,
+# so the only "Done loading RDB" line is the reload's.
+id: toy.register
+extends: [valkey.liveness]
+deployment:
+  modes: [standalone]
+metadata:
+  description: Acknowledge writes, crash the primary, and check that every acknowledged write survives
+inputs:
+  type: object
+  additionalProperties: false
+  properties:
+    appendonly:
+      type: string
+      enum: ["yes", "no"]
+      default: "yes"
+      description: appendonly on the primary, with appendfsync always
+    writes: {type: integer, minimum: 1, maximum: 10000, default: 100}
+    crash_delay_s: {type: number, minimum: 0, maximum: 1, default: 0}
+startup_overlays:
+  - overlay_id: register-durability
+    server_config:
+      appendonly: {$ref: inputs.appendonly}
+      appendfsync: always
+      aof-use-rdb-preamble: "no"
+      enable-debug-command: "yes"
+components:
+  - use: valkey.observer.log-trigger
+    id: reload-log
+    config:
+      instances: primary
+      spec: register
+      rules:
+        - {publish: register.loaded, evidence_id: register.reload-logged, required: true}
+
+  - use: valkey.fault.process-signal
+    id: crash
+    config:
+      when_event: writes.seeded
+      delay_s: {$ref: inputs.crash_delay_s}
+      instance: primary
+      signal: SIGKILL
+      restart: true
+      restart_mode: immediate
+
+  - use: valkey.workload.key-value
+    id: writes
+    depends_on: [reload-log, crash]
+    config:
+      stable_keys: {$ref: inputs.writes}
+      mutable_keys: 0
+      rate: 0
+
+  - use: valkey.action.wait-event
+    id: restarted
+    depends_on: [writes]
+    config: {event: crash.recovered, timeout_s: 60}
+
+  - use: valkey.action.command
+    id: reload
+    depends_on: [restarted]
+    config:
+      instances: primary
+      command: [DEBUG, RELOAD]
+      expect: {equals: OK}
+
+  - use: valkey.oracle.ledger
+    id: data
+    config: {workload: writes, acknowledged: must_survive}
+required_events: [writes.seeded, crash.recovered, register.loaded]
+required_evidence:
+  - {evidence_id: valkey.fault.injected, source: crash}

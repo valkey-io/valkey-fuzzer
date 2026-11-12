@@ -1,0 +1,17 @@
+diff --git a/src/cluster_legacy.c b/src/cluster_legacy.c
+index d6a961c0b..86b3450e3 100644
+--- a/src/cluster_legacy.c
++++ b/src/cluster_legacy.c
+@@ -6269,6 +6269,12 @@ void clusterFailoverReplaceYourPrimary(void) {
+         while (bits) {
+             unsigned bit = __builtin_ctz(bits);
+             int slot = (byte << 3) | bit;
++            /* Bug zoo: the new primary leaves its old primary's first slot unclaimed. */
++            if (remaining == old_primary->numslots) {
++                bits &= bits - 1;
++                remaining--;
++                continue;
++            }
+             clusterDelSlot(slot);
+             clusterAddSlot(myself, slot);
+             bits &= bits - 1;

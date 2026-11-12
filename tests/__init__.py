@@ -1,3 +1,3 @@
 """
-Test package for Cluster Bus Fuzzer
+Tests for valkey-fuzzer
 """

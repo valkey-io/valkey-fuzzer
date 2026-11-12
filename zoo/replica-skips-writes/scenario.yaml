@@ -1,0 +1,9 @@
+scenario_id: zoo-replica-skips-writes
+seed: 1301
+experiment:
+  id: valkey.snapshot-equivalence
+  inputs: {operations: 2000, stable_keys: 1000}
+deployment:
+  mode: standalone
+  replicas_per_primary: 1
+  base_port: 21000

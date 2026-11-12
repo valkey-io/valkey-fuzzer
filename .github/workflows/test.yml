@@ -6,27 +6,126 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: read
+
+env:
+  # The tla2tools.jar that tla-model-check.yml pins: the server tests, the spec
+  # bridge's live test, and the conform half of the election test need it.
+  TLA_TOOLS_VERSION: v1.7.4
+  TLA_TOOLS_SHA256: 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
+
 jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ['3.9', '3.10', '3.11', '3.12']
+        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
 
     steps:
-    - uses: actions/checkout@v6
-    
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        persist-credentials: false
+
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v6
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
       with:
         python-version: ${{ matrix.python-version }}
-    
-    - name: Install dependencies
+
+    - name: Install project
       run: |
         python -m pip install --upgrade pip
-        pip install pytest pytest-asyncio
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-    
-    - name: Run tests
+        python -m pip install -e '.[dev]'
+
+    # tests/test_history.py builds the porcupine checker with it.
+    - name: Set up Go
+      uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+      with:
+        go-version-file: porcupine/go.mod
+        cache: false
+
+    - name: Run unit tests
+      run: python -m pytest -m "not slow"
+
+    # The tests run from the checkout, where formal/ is on disk; an installed
+    # wheel finds the spec bundles only if packaging mapped them in.
+    - name: Check the wheel ships every spec bundle file
+      if: matrix.python-version == '3.12'
       run: |
-        pytest -v
+        python -m pip wheel --no-deps --wheel-dir dist .
+        python -m zipfile -l dist/valkey_fuzzer-*.whl > wheel-files.txt
+        missing=0
+        for path in $(cd formal && find . -type f ! -name '.*' | sed 's|^\./||'); do
+          grep -qF "valkey_fuzzer/formal/$path " wheel-files.txt || { echo "the wheel lacks formal/$path"; missing=1; }
+        done
+        exit "$missing"
+
+  server-tests:
+    # Tests that start real valkey-server processes, plus a live subset of the
+    # Valkey experiments that needs neither root nor a second build, on the
+    # Valkey commit the bug zoo pins: a Valkey regression cannot turn an
+    # unrelated fuzzer PR red, and two runs of one commit agree. The full live
+    # suite runs daily on unstable in valkey-experiments-live.yml.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        persist-credentials: false
+
+    - name: Set up Python
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      with:
+        python-version: '3.12'
+
+    - name: Build Valkey at the pinned commit
+      run: |
+        git init --quiet /tmp/valkey
+        git -C /tmp/valkey fetch --quiet --depth 1 https://github.com/valkey-io/valkey.git "$(tr -d '[:space:]' < zoo/valkey-commit)"
+        git -C /tmp/valkey checkout --quiet FETCH_HEAD
+        make -C /tmp/valkey -j"$(nproc)"
+        echo "/tmp/valkey/src" >> "$GITHUB_PATH"
+
+    - name: Install project
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install -e '.[dev]'
+
+    # valkey.oracle.history runs the porcupine linearizability checker from PATH.
+    - name: Set up Go
+      uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+      with:
+        go-version-file: porcupine/go.mod
+        cache: false
+
+    - name: Build the porcupine checker
+      run: |
+        go -C porcupine build -o "${RUNNER_TEMP}/bin/porcupine"
+        echo "${RUNNER_TEMP}/bin" >> "${GITHUB_PATH}"
+
+    - name: Set up Java
+      uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+      with:
+        distribution: temurin
+        java-version: '17'
+
+    - name: Download tla2tools.jar
+      shell: bash
+      run: |
+        curl -fsSL --retry 3 -o "${RUNNER_TEMP}/tla2tools.jar" \
+          "https://github.com/tlaplus/tlaplus/releases/download/${TLA_TOOLS_VERSION}/tla2tools.jar"
+        echo "${TLA_TOOLS_SHA256}  ${RUNNER_TEMP}/tla2tools.jar" | sha256sum -c -
+
+    - name: Run server tests
+      env:
+        TLA2TOOLS_JAR: ${{ runner.temp }}/tla2tools.jar
+      run: python -m pytest -m "slow and not live"
+
+    # With the spec bridge's register bundle end to end: translated, run on Valkey, conformed with TLC.
+    - name: Run the live experiment subset
+      env:
+        TLA2TOOLS_JAR: ${{ runner.temp }}/tla2tools.jar
+      run: |
+        python -m pytest -q -rs -m live tests/test_live_spec_register.py tests/test_live_valkey_experiments.py \
+          -k "aof-durability or replication- or cluster-chaos or data_only_experiment or register_counterexample"

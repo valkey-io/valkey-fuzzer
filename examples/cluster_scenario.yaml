@@ -1,0 +1,16 @@
+scenario_id: cluster-deployment-smoke
+seed: 303
+
+experiment:
+  id: example.deployment-smoke
+  inputs: {}
+
+deployment:
+  mode: cluster
+  primaries: 3
+  replicas_per_primary: 1
+  base_port: 7600
+  enable_cleanup: true
+
+# A real cluster-protocol experiment would add negotiation evidence, traffic,
+# cluster topology changes, transport faults, and independent safety oracles.

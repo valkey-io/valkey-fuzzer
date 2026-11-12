@@ -4,36 +4,39 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "valkey-fuzzer"
-version = "0.1.0"
-description = "Chaos engineering and fuzzing framework for Valkey cluster bus testing"
+dynamic = ["version"]
+description = "Seeded fault-injection tests for Valkey standalone and cluster deployments"
 readme = "README.md"
-requires-python = ">=3.9"
-license = {text = "MIT"}
+requires-python = ">=3.10"
+license = {text = "BSD-3-Clause"}
 authors = [
     {name = "valkey-io"}
 ]
-keywords = ["valkey", "cluster", "chaos-engineering", "fuzzing", "testing"]
+keywords = ["valkey", "fault-injection", "fuzzing", "chaos-engineering", "testing", "cluster", "failover", "durability"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Topic :: Software Development :: Testing",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 
 dependencies = [
     "pyyaml>=6.0",
-    "valkey>=5.0.0",
+    "valkey[libvalkey]>=6.0.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
-    "pytest-cov>=4.0.0",
-    "ruff>=0.4.0",
+    # lint.yml installs the same version.
+    "ruff==0.14.3",
+    # tests/test_packaging.py checks the package list with setuptools.
+    "setuptools>=64",
 ]
 
 [project.urls]
@@ -41,33 +44,50 @@ Repository = "https://github.com/valkey-io/valkey-fuzzer"
 Issues = "https://github.com/valkey-io/valkey-fuzzer/issues"
 
 [project.scripts]
-valkey-fuzzer = "src.cli:main"
+valkey-fuzzer = "valkey_fuzzer.cli:main"
 
+# The packages are listed (tests/test_packaging.py keeps the list complete)
+# because the spec bundles under formal/ ship as valkey_fuzzer/formal: a
+# shipped experiment that names a bundle (spec: cluster-election) must find
+# it in any install, not only in a checkout.
 [tool.setuptools]
-packages = ["src", "src.fuzzer_engine", "src.cluster_orchestrator", "src.chaos_engine"]
+packages = [
+    "valkey_fuzzer",
+    "valkey_fuzzer.commands",
+    "valkey_fuzzer.components",
+    "valkey_fuzzer.deployment",
+    "valkey_fuzzer.deployment.local",
+    "valkey_fuzzer.deployment.local.validation",
+    "valkey_fuzzer.environment",
+    "valkey_fuzzer.formal",
+    "valkey_fuzzer.spec",
+]
+
+[tool.setuptools.dynamic]
+version = {attr = "valkey_fuzzer.__version__"}
+
+[tool.setuptools.package-dir]
+"valkey_fuzzer.formal" = "formal"
+
+[tool.setuptools.package-data]
+valkey_fuzzer = ["py.typed"]
+"valkey_fuzzer.formal" = ["*/*", "*/*/*"]
+"valkey_fuzzer.components" = ["experiments/*.yaml", "fragments/*.yaml", "reply_schemas.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "-v --tb=short"
-
-[tool.coverage.run]
-source = ["src"]
-omit = ["tests/*", "examples/*"]
-
-[tool.coverage.report]
-exclude_lines = [
-    "pragma: no cover",
-    "def __repr__",
-    "raise AssertionError",
-    "raise NotImplementedError",
-    "if __name__ == .__main__.:",
-    "if TYPE_CHECKING:",
+addopts = "--strict-markers --tb=short -m \"not slow\""
+markers = [
+    "slow: starts real processes (valkey-server, batch workers); deselect with -m 'not slow'",
+    "live: runs the Valkey experiments against real servers (also marked slow)",
 ]
 
 [tool.ruff]
+# Still py39, though the package needs 3.10: at py310 pyupgrade rewrites every Optional[X] to X | None
+# (767 places), a sweep for when no branch is in flight.
 target-version = "py39"
 line-length = 120
 
@@ -93,7 +113,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["src"]
+known-first-party = ["valkey_fuzzer"]
 
 [tool.ruff.format]
 quote-style = "double"

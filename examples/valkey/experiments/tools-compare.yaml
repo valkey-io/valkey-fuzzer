@@ -1,0 +1,46 @@
+# Run one of Valkey's own tools from the build under test
+# (deployment.valkey_binary) and from its parent build, and compare their
+# exit status, stdout, and stderr: the tools of each build are the ones
+# beside its valkey-server. The build under test must meet every `expect`,
+# and each run marked `expect_difference` must differ on the parent, which
+# shows the run reached the change. An unmarked run that differs is
+# recorded as an unexplained difference, never filed as a finding by itself.
+#
+# These runs test valkey-io/valkey#5177 (valkey-check-rdb --stats crashed on
+# an RDB whose highest SELECTDB has no keys): the parent build is killed by
+# SIGSEGV, the fixed build prints a stats block for DB 2. `files` plants the
+# crafted RDB in each side's working directory, and `ignore` drops the pid
+# and time of the Valkey log line valkey-check-rdb prints. For valkey-cli or
+# valkey-benchmark, `server: true` gives each side a private server of its
+# own build, named `$port` and `$socket` in the arguments.
+#
+# The scenario declares the parent build as an artifact and passes it as the
+# `parent` input: {$ref: artifacts.parent.binary}.
+extends: [valkey.liveness]
+id: example.tools-compare
+deployment:
+  modes: [standalone, cluster]
+metadata:
+  description: valkey-check-rdb of the build under test and of its parent, exit status and output compared
+inputs:
+  required: [parent]
+  properties:
+    parent:
+      type: environment_reference
+      reference_kinds: [artifacts]
+      description: "The parent commit's build, {$ref: artifacts.parent.binary}"
+components:
+  - use: valkey.action.tools
+    id: check-rdb
+    config:
+      compare_with: {$ref: inputs.parent}
+      files:
+        # SELECTDB 2, EOF, and a zero checksum.
+        empty-db2.rdb: !!binary UkVESVMwMDA5/gL/AAAAAAAAAAA=
+      ignore: ['^\d+:[A-Z] .*\n']
+      runs:
+        - {tool: valkey-check-rdb, args: [empty-db2.rdb], expect: {stdout: {contains: RDB looks OK}}}
+        - {tool: valkey-check-rdb, args: [empty-db2.rdb, --stats, --format, info], expect_difference: true,
+           expect: {exit: {equals: 0}, stdout: {contains: "db.2.type.string.keys.total:0"}}}
+required_evidence:
+  - {evidence_id: valkey.tool.runs, source: check-rdb}

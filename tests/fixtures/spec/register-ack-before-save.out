@@ -1,0 +1,30 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Error: Invariant AckedDurable is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ mem = 0
+/\ crashes = 0
+/\ disk = 0
+/\ acked = 0
+
+State 2: <Write line 18, col 10 to line 18, col 79 of module model>
+/\ mem = 1
+/\ crashes = 0
+/\ disk = 0
+/\ acked = 0
+
+State 3: <Ack line 20, col 8 to line 23, col 42 of module model>
+/\ mem = 1
+/\ crashes = 0
+/\ disk = 0
+/\ acked = 1
+
+State 4: <Crash line 27, col 10 to line 30, col 37 of module model>
+/\ mem = 0
+/\ crashes = 1
+/\ disk = 0
+/\ acked = 1
+
+15 states generated, 13 distinct states found, 7 states left on queue.
+The depth of the complete state graph search is 4.
+The average outdegree of the complete state graph is 2 (minimum is 1, the maximum 3 and the 95th percentile is 3).

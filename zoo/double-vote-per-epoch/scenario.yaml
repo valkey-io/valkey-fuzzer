@@ -1,0 +1,10 @@
+scenario_id: zoo-double-vote-per-epoch
+seed: 1305
+experiment:
+  id: valkey.cluster-election-durability
+  inputs: {save_behavior: sync, election: force_failover, vote_occurrence: 1}
+deployment:
+  mode: cluster
+  primaries: 3
+  replicas_per_primary: 2
+  base_port: 21160

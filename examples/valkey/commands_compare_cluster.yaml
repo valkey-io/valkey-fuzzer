@@ -1,0 +1,19 @@
+# Run examples/valkey/experiments/commands-compare-cluster.yaml on the build
+# under test and on its parent, the replies compared.
+#
+#   valkey-fuzzer run examples/valkey/commands_compare_cluster.yaml \
+#     --experiment-dir examples/valkey/experiments
+scenario_id: commands-compare-cluster
+seed: 1
+artifacts:
+  parent:
+    use: valkey.artifact.local-binary
+    with: {path: /opt/valkey-parent/src/valkey-server}
+experiment:
+  id: example.commands-compare-cluster
+  inputs:
+    parent: {$ref: artifacts.parent.binary}
+deployment:
+  mode: standalone
+  base_port: 7900
+  valkey_binary: /opt/valkey/src/valkey-server

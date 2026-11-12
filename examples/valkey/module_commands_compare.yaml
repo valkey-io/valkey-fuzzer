@@ -1,0 +1,26 @@
+# Run examples/valkey/experiments/module-commands-compare.yaml: one command
+# sequence on one Valkey build loading two builds of a module (here Valkey's
+# tests/modules/datatype.so, built with `make -C tests/modules` at each
+# commit), the replies compared.
+#
+#   valkey-fuzzer run examples/valkey/module_commands_compare.yaml \
+#     --experiment-dir examples/valkey/experiments
+scenario_id: module-commands-compare
+seed: 1
+artifacts:
+  module:
+    use: valkey.artifact.local-module
+    with: {path: /opt/valkey/tests/modules/datatype.so}
+  module_parent:
+    use: valkey.artifact.local-module
+    with: {path: /opt/valkey-parent/tests/modules/datatype.so}
+experiment:
+  id: example.module-commands-compare
+  inputs:
+    module: {$ref: artifacts.module.path}
+    module_parent: {$ref: artifacts.module_parent.path}
+    resp: 2
+deployment:
+  mode: standalone
+  base_port: 7900
+  valkey_binary: /opt/valkey/src/valkey-server

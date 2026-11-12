@@ -1,0 +1,295 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Error: Invariant OneWinnerPerEpoch is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ msgs = {}
+/\ diskEpoch = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ crashes = 0
+/\ lastVote = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ held = (p1 :> {} @@ p2 :> {} @@ p3 :> {})
+/\ granted = (r1 :> {} @@ r2 :> {})
+/\ electionEpoch = (r1 :> 0 @@ r2 :> 0)
+/\ bio = (p1 :> <<>> @@ p2 :> <<>> @@ p3 :> <<>>)
+/\ diskVote = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ currentEpoch = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0 @@ r1 :> 0 @@ r2 :> 0)
+/\ winners = {}
+
+State 2: <StartElection line 99, col 5 to line 104, col 79 of module ClusterElection>
+/\ msgs = {[type |-> "request", from |-> r1, epoch |-> 1]}
+/\ diskEpoch = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ crashes = 0
+/\ lastVote = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ held = (p1 :> {} @@ p2 :> {} @@ p3 :> {})
+/\ granted = (r1 :> {} @@ r2 :> {})
+/\ electionEpoch = (r1 :> 1 @@ r2 :> 0)
+/\ bio = (p1 :> <<>> @@ p2 :> <<>> @@ p3 :> <<>>)
+/\ diskVote = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ currentEpoch = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0 @@ r1 :> 1 @@ r2 :> 0)
+/\ winners = {}
+
+State 3: <StartElection line 99, col 5 to line 104, col 79 of module ClusterElection>
+/\ msgs = { [type |-> "request", from |-> r1, epoch |-> 1],
+  [type |-> "request", from |-> r2, epoch |-> 1] }
+/\ diskEpoch = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ crashes = 0
+/\ lastVote = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ held = (p1 :> {} @@ p2 :> {} @@ p3 :> {})
+/\ granted = (r1 :> {} @@ r2 :> {})
+/\ electionEpoch = (r1 :> 1 @@ r2 :> 1)
+/\ bio = (p1 :> <<>> @@ p2 :> <<>> @@ p3 :> <<>>)
+/\ diskVote = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ currentEpoch = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0 @@ r1 :> 1 @@ r2 :> 1)
+/\ winners = {}
+
+State 4: <HandleRequest line 144, col 5 to line 155, col 97 of module ClusterElection>
+/\ msgs = { [type |-> "request", from |-> r1, epoch |-> 1],
+  [type |-> "request", from |-> r2, epoch |-> 1] }
+/\ diskEpoch = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ crashes = 0
+/\ lastVote = (p1 :> 1 @@ p2 :> 0 @@ p3 :> 0)
+/\ held = ( p1 :> {[type |-> "vote", from |-> p1, epoch |-> 1, to |-> r1]} @@
+  p2 :> {} @@
+  p3 :> {} )
+/\ granted = (r1 :> {} @@ r2 :> {})
+/\ electionEpoch = (r1 :> 1 @@ r2 :> 1)
+/\ bio = (p1 :> <<>> @@ p2 :> <<>> @@ p3 :> <<>>)
+/\ diskVote = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ currentEpoch = (p1 :> 1 @@ p2 :> 0 @@ p3 :> 0 @@ r1 :> 1 @@ r2 :> 1)
+/\ winners = {}
+
+State 5: <SaveConfig line 165, col 5 to line 174, col 85 of module ClusterElection>
+/\ msgs = { [type |-> "request", from |-> r1, epoch |-> 1],
+  [type |-> "request", from |-> r2, epoch |-> 1],
+  [type |-> "vote", from |-> p1, epoch |-> 1, to |-> r1] }
+/\ diskEpoch = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ crashes = 0
+/\ lastVote = (p1 :> 1 @@ p2 :> 0 @@ p3 :> 0)
+/\ held = (p1 :> {} @@ p2 :> {} @@ p3 :> {})
+/\ granted = (r1 :> {} @@ r2 :> {})
+/\ electionEpoch = (r1 :> 1 @@ r2 :> 1)
+/\ bio = (p1 :> <<<<1, 1>>>> @@ p2 :> <<>> @@ p3 :> <<>>)
+/\ diskVote = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ currentEpoch = (p1 :> 1 @@ p2 :> 0 @@ p3 :> 0 @@ r1 :> 1 @@ r2 :> 1)
+/\ winners = {}
+
+State 6: <ReceiveVote line 117, col 5 to line 125, col 56 of module ClusterElection>
+/\ msgs = { [type |-> "request", from |-> r1, epoch |-> 1],
+  [type |-> "request", from |-> r2, epoch |-> 1],
+  [type |-> "vote", from |-> p1, epoch |-> 1, to |-> r1] }
+/\ diskEpoch = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ crashes = 0
+/\ lastVote = (p1 :> 1 @@ p2 :> 0 @@ p3 :> 0)
+/\ held = (p1 :> {} @@ p2 :> {} @@ p3 :> {})
+/\ granted = (r1 :> {p1} @@ r2 :> {})
+/\ electionEpoch = (r1 :> 1 @@ r2 :> 1)
+/\ bio = (p1 :> <<<<1, 1>>>> @@ p2 :> <<>> @@ p3 :> <<>>)
+/\ diskVote = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ currentEpoch = (p1 :> 1 @@ p2 :> 0 @@ p3 :> 0 @@ r1 :> 1 @@ r2 :> 1)
+/\ winners = {}
+
+State 7: <Crash line 196, col 5 to line 202, col 79 of module ClusterElection>
+/\ msgs = { [type |-> "request", from |-> r1, epoch |-> 1],
+  [type |-> "request", from |-> r2, epoch |-> 1],
+  [type |-> "vote", from |-> p1, epoch |-> 1, to |-> r1] }
+/\ diskEpoch = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ crashes = 1
+/\ lastVote = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ held = (p1 :> {} @@ p2 :> {} @@ p3 :> {})
+/\ granted = (r1 :> {p1} @@ r2 :> {})
+/\ electionEpoch = (r1 :> 1 @@ r2 :> 1)
+/\ bio = (p1 :> <<>> @@ p2 :> <<>> @@ p3 :> <<>>)
+/\ diskVote = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ currentEpoch = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0 @@ r1 :> 1 @@ r2 :> 1)
+/\ winners = {}
+
+State 8: <HandleRequest line 144, col 5 to line 155, col 97 of module ClusterElection>
+/\ msgs = { [type |-> "request", from |-> r1, epoch |-> 1],
+  [type |-> "request", from |-> r2, epoch |-> 1],
+  [type |-> "vote", from |-> p1, epoch |-> 1, to |-> r1] }
+/\ diskEpoch = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ crashes = 1
+/\ lastVote = (p1 :> 1 @@ p2 :> 0 @@ p3 :> 0)
+/\ held = ( p1 :> {[type |-> "vote", from |-> p1, epoch |-> 1, to |-> r2]} @@
+  p2 :> {} @@
+  p3 :> {} )
+/\ granted = (r1 :> {p1} @@ r2 :> {})
+/\ electionEpoch = (r1 :> 1 @@ r2 :> 1)
+/\ bio = (p1 :> <<>> @@ p2 :> <<>> @@ p3 :> <<>>)
+/\ diskVote = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ currentEpoch = (p1 :> 1 @@ p2 :> 0 @@ p3 :> 0 @@ r1 :> 1 @@ r2 :> 1)
+/\ winners = {}
+
+State 9: <SaveConfig line 165, col 5 to line 174, col 85 of module ClusterElection>
+/\ msgs = { [type |-> "request", from |-> r1, epoch |-> 1],
+  [type |-> "request", from |-> r2, epoch |-> 1],
+  [type |-> "vote", from |-> p1, epoch |-> 1, to |-> r1],
+  [type |-> "vote", from |-> p1, epoch |-> 1, to |-> r2] }
+/\ diskEpoch = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ crashes = 1
+/\ lastVote = (p1 :> 1 @@ p2 :> 0 @@ p3 :> 0)
+/\ held = (p1 :> {} @@ p2 :> {} @@ p3 :> {})
+/\ granted = (r1 :> {p1} @@ r2 :> {})
+/\ electionEpoch = (r1 :> 1 @@ r2 :> 1)
+/\ bio = (p1 :> <<<<1, 1>>>> @@ p2 :> <<>> @@ p3 :> <<>>)
+/\ diskVote = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ currentEpoch = (p1 :> 1 @@ p2 :> 0 @@ p3 :> 0 @@ r1 :> 1 @@ r2 :> 1)
+/\ winners = {}
+
+State 10: <ReceiveVote line 117, col 5 to line 125, col 56 of module ClusterElection>
+/\ msgs = { [type |-> "request", from |-> r1, epoch |-> 1],
+  [type |-> "request", from |-> r2, epoch |-> 1],
+  [type |-> "vote", from |-> p1, epoch |-> 1, to |-> r1],
+  [type |-> "vote", from |-> p1, epoch |-> 1, to |-> r2] }
+/\ diskEpoch = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ crashes = 1
+/\ lastVote = (p1 :> 1 @@ p2 :> 0 @@ p3 :> 0)
+/\ held = (p1 :> {} @@ p2 :> {} @@ p3 :> {})
+/\ granted = (r1 :> {p1} @@ r2 :> {p1})
+/\ electionEpoch = (r1 :> 1 @@ r2 :> 1)
+/\ bio = (p1 :> <<<<1, 1>>>> @@ p2 :> <<>> @@ p3 :> <<>>)
+/\ diskVote = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ currentEpoch = (p1 :> 1 @@ p2 :> 0 @@ p3 :> 0 @@ r1 :> 1 @@ r2 :> 1)
+/\ winners = {}
+
+State 11: <HandleRequest line 144, col 5 to line 155, col 97 of module ClusterElection>
+/\ msgs = { [type |-> "request", from |-> r1, epoch |-> 1],
+  [type |-> "request", from |-> r2, epoch |-> 1],
+  [type |-> "vote", from |-> p1, epoch |-> 1, to |-> r1],
+  [type |-> "vote", from |-> p1, epoch |-> 1, to |-> r2] }
+/\ diskEpoch = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ crashes = 1
+/\ lastVote = (p1 :> 1 @@ p2 :> 1 @@ p3 :> 0)
+/\ held = ( p1 :> {} @@
+  p2 :> {[type |-> "vote", from |-> p2, epoch |-> 1, to |-> r1]} @@
+  p3 :> {} )
+/\ granted = (r1 :> {p1} @@ r2 :> {p1})
+/\ electionEpoch = (r1 :> 1 @@ r2 :> 1)
+/\ bio = (p1 :> <<<<1, 1>>>> @@ p2 :> <<>> @@ p3 :> <<>>)
+/\ diskVote = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ currentEpoch = (p1 :> 1 @@ p2 :> 1 @@ p3 :> 0 @@ r1 :> 1 @@ r2 :> 1)
+/\ winners = {}
+
+State 12: <SaveConfig line 165, col 5 to line 174, col 85 of module ClusterElection>
+/\ msgs = { [type |-> "request", from |-> r1, epoch |-> 1],
+  [type |-> "request", from |-> r2, epoch |-> 1],
+  [type |-> "vote", from |-> p1, epoch |-> 1, to |-> r1],
+  [type |-> "vote", from |-> p1, epoch |-> 1, to |-> r2],
+  [type |-> "vote", from |-> p2, epoch |-> 1, to |-> r1] }
+/\ diskEpoch = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ crashes = 1
+/\ lastVote = (p1 :> 1 @@ p2 :> 1 @@ p3 :> 0)
+/\ held = (p1 :> {} @@ p2 :> {} @@ p3 :> {})
+/\ granted = (r1 :> {p1} @@ r2 :> {p1})
+/\ electionEpoch = (r1 :> 1 @@ r2 :> 1)
+/\ bio = (p1 :> <<<<1, 1>>>> @@ p2 :> <<<<1, 1>>>> @@ p3 :> <<>>)
+/\ diskVote = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ currentEpoch = (p1 :> 1 @@ p2 :> 1 @@ p3 :> 0 @@ r1 :> 1 @@ r2 :> 1)
+/\ winners = {}
+
+State 13: <ReceiveVote line 117, col 5 to line 125, col 56 of module ClusterElection>
+/\ msgs = { [type |-> "request", from |-> r1, epoch |-> 1],
+  [type |-> "request", from |-> r2, epoch |-> 1],
+  [type |-> "vote", from |-> p1, epoch |-> 1, to |-> r1],
+  [type |-> "vote", from |-> p1, epoch |-> 1, to |-> r2],
+  [type |-> "vote", from |-> p2, epoch |-> 1, to |-> r1] }
+/\ diskEpoch = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ crashes = 1
+/\ lastVote = (p1 :> 1 @@ p2 :> 1 @@ p3 :> 0)
+/\ held = (p1 :> {} @@ p2 :> {} @@ p3 :> {})
+/\ granted = (r1 :> {p1, p2} @@ r2 :> {p1})
+/\ electionEpoch = (r1 :> 1 @@ r2 :> 1)
+/\ bio = (p1 :> <<<<1, 1>>>> @@ p2 :> <<<<1, 1>>>> @@ p3 :> <<>>)
+/\ diskVote = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ currentEpoch = (p1 :> 1 @@ p2 :> 1 @@ p3 :> 0 @@ r1 :> 1 @@ r2 :> 1)
+/\ winners = {}
+
+State 14: <Win line 129, col 5 to line 134, col 52 of module ClusterElection>
+/\ msgs = { [type |-> "request", from |-> r1, epoch |-> 1],
+  [type |-> "request", from |-> r2, epoch |-> 1],
+  [type |-> "vote", from |-> p1, epoch |-> 1, to |-> r1],
+  [type |-> "vote", from |-> p1, epoch |-> 1, to |-> r2],
+  [type |-> "vote", from |-> p2, epoch |-> 1, to |-> r1] }
+/\ diskEpoch = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ crashes = 1
+/\ lastVote = (p1 :> 1 @@ p2 :> 1 @@ p3 :> 0)
+/\ held = (p1 :> {} @@ p2 :> {} @@ p3 :> {})
+/\ granted = (r1 :> {p1, p2} @@ r2 :> {p1})
+/\ electionEpoch = (r1 :> 1 @@ r2 :> 1)
+/\ bio = (p1 :> <<<<1, 1>>>> @@ p2 :> <<<<1, 1>>>> @@ p3 :> <<>>)
+/\ diskVote = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ currentEpoch = (p1 :> 1 @@ p2 :> 1 @@ p3 :> 0 @@ r1 :> 1 @@ r2 :> 1)
+/\ winners = {<<r1, 1>>}
+
+State 15: <HandleRequest line 144, col 5 to line 155, col 97 of module ClusterElection>
+/\ msgs = { [type |-> "request", from |-> r1, epoch |-> 1],
+  [type |-> "request", from |-> r2, epoch |-> 1],
+  [type |-> "vote", from |-> p1, epoch |-> 1, to |-> r1],
+  [type |-> "vote", from |-> p1, epoch |-> 1, to |-> r2],
+  [type |-> "vote", from |-> p2, epoch |-> 1, to |-> r1] }
+/\ diskEpoch = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ crashes = 1
+/\ lastVote = (p1 :> 1 @@ p2 :> 1 @@ p3 :> 1)
+/\ held = ( p1 :> {} @@
+  p2 :> {} @@
+  p3 :> {[type |-> "vote", from |-> p3, epoch |-> 1, to |-> r2]} )
+/\ granted = (r1 :> {p1, p2} @@ r2 :> {p1})
+/\ electionEpoch = (r1 :> 1 @@ r2 :> 1)
+/\ bio = (p1 :> <<<<1, 1>>>> @@ p2 :> <<<<1, 1>>>> @@ p3 :> <<>>)
+/\ diskVote = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ currentEpoch = (p1 :> 1 @@ p2 :> 1 @@ p3 :> 1 @@ r1 :> 1 @@ r2 :> 1)
+/\ winners = {<<r1, 1>>}
+
+State 16: <SaveConfig line 165, col 5 to line 174, col 85 of module ClusterElection>
+/\ msgs = { [type |-> "request", from |-> r1, epoch |-> 1],
+  [type |-> "request", from |-> r2, epoch |-> 1],
+  [type |-> "vote", from |-> p1, epoch |-> 1, to |-> r1],
+  [type |-> "vote", from |-> p1, epoch |-> 1, to |-> r2],
+  [type |-> "vote", from |-> p2, epoch |-> 1, to |-> r1],
+  [type |-> "vote", from |-> p3, epoch |-> 1, to |-> r2] }
+/\ diskEpoch = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ crashes = 1
+/\ lastVote = (p1 :> 1 @@ p2 :> 1 @@ p3 :> 1)
+/\ held = (p1 :> {} @@ p2 :> {} @@ p3 :> {})
+/\ granted = (r1 :> {p1, p2} @@ r2 :> {p1})
+/\ electionEpoch = (r1 :> 1 @@ r2 :> 1)
+/\ bio = (p1 :> <<<<1, 1>>>> @@ p2 :> <<<<1, 1>>>> @@ p3 :> <<<<1, 1>>>>)
+/\ diskVote = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ currentEpoch = (p1 :> 1 @@ p2 :> 1 @@ p3 :> 1 @@ r1 :> 1 @@ r2 :> 1)
+/\ winners = {<<r1, 1>>}
+
+State 17: <ReceiveVote line 117, col 5 to line 125, col 56 of module ClusterElection>
+/\ msgs = { [type |-> "request", from |-> r1, epoch |-> 1],
+  [type |-> "request", from |-> r2, epoch |-> 1],
+  [type |-> "vote", from |-> p1, epoch |-> 1, to |-> r1],
+  [type |-> "vote", from |-> p1, epoch |-> 1, to |-> r2],
+  [type |-> "vote", from |-> p2, epoch |-> 1, to |-> r1],
+  [type |-> "vote", from |-> p3, epoch |-> 1, to |-> r2] }
+/\ diskEpoch = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ crashes = 1
+/\ lastVote = (p1 :> 1 @@ p2 :> 1 @@ p3 :> 1)
+/\ held = (p1 :> {} @@ p2 :> {} @@ p3 :> {})
+/\ granted = (r1 :> {p1, p2} @@ r2 :> {p1, p3})
+/\ electionEpoch = (r1 :> 1 @@ r2 :> 1)
+/\ bio = (p1 :> <<<<1, 1>>>> @@ p2 :> <<<<1, 1>>>> @@ p3 :> <<<<1, 1>>>>)
+/\ diskVote = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ currentEpoch = (p1 :> 1 @@ p2 :> 1 @@ p3 :> 1 @@ r1 :> 1 @@ r2 :> 1)
+/\ winners = {<<r1, 1>>}
+
+State 18: <Win line 129, col 5 to line 134, col 52 of module ClusterElection>
+/\ msgs = { [type |-> "request", from |-> r1, epoch |-> 1],
+  [type |-> "request", from |-> r2, epoch |-> 1],
+  [type |-> "vote", from |-> p1, epoch |-> 1, to |-> r1],
+  [type |-> "vote", from |-> p1, epoch |-> 1, to |-> r2],
+  [type |-> "vote", from |-> p2, epoch |-> 1, to |-> r1],
+  [type |-> "vote", from |-> p3, epoch |-> 1, to |-> r2] }
+/\ diskEpoch = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ crashes = 1
+/\ lastVote = (p1 :> 1 @@ p2 :> 1 @@ p3 :> 1)
+/\ held = (p1 :> {} @@ p2 :> {} @@ p3 :> {})
+/\ granted = (r1 :> {p1, p2} @@ r2 :> {p1, p3})
+/\ electionEpoch = (r1 :> 1 @@ r2 :> 1)
+/\ bio = (p1 :> <<<<1, 1>>>> @@ p2 :> <<<<1, 1>>>> @@ p3 :> <<<<1, 1>>>>)
+/\ diskVote = (p1 :> 0 @@ p2 :> 0 @@ p3 :> 0)
+/\ currentEpoch = (p1 :> 1 @@ p2 :> 1 @@ p3 :> 1 @@ r1 :> 1 @@ r2 :> 1)
+/\ winners = {<<r1, 1>>, <<r2, 1>>}
+

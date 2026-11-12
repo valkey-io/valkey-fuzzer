@@ -1,0 +1,27 @@
+# Sweep valkey.cluster-election-durability over both nodes.conf save
+# behaviors, the three ways to start the election, which vote the crash
+# follows, and whether the second election starts inside the restarted
+# primary's 2 s safe_to_join window. Each combination runs seeds_per_case
+# times; the components draw nothing from the seed, so repeats differ only in
+# real timing.
+#   valkey-fuzzer batch examples/valkey/cluster_election_batch.yaml --workers 2 --out ./election-batch
+#   valkey-fuzzer spec conform cluster-election ./election-batch --group-by save_behavior,election
+batch_id: cluster-election-durability
+sources:
+  - matrix:
+      seed: 2027
+      seeds_per_case: 3
+      base:
+        scenario_id: cluster-election-durability
+        experiment:
+          id: valkey.cluster-election-durability
+          inputs: {}
+        deployment:
+          mode: cluster
+          primaries: 3
+          replicas_per_primary: 2
+      dimensions:
+        experiment.inputs.save_behavior: [sync, best-effort]
+        experiment.inputs.election: [force_failover, kill_primary, pause_primary]
+        experiment.inputs.vote_occurrence: [1, 2, 3]
+        experiment.inputs.second_election_delay_s: [0.5, 2.5]

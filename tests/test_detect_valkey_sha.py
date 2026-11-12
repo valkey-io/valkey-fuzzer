@@ -1,61 +1,39 @@
-"""Tests for detect_valkey_sha — parses git SHA from `valkey-server --version`."""
+"""detect_valkey_sha: the commit a build reports in ``valkey-server --version``, or None."""
 
+import os
 import subprocess
 from unittest.mock import patch
 
-from src.cluster_orchestrator.orchestrator import detect_valkey_sha
+import pytest
+
+from valkey_fuzzer.components import server
+from valkey_fuzzer.deployment.local.processes import detect_valkey_sha
 
 
-def _ok(stdout: str) -> subprocess.CompletedProcess:
-    return subprocess.CompletedProcess(args=["valkey-server", "--version"], returncode=0, stdout=stdout, stderr="")
+@pytest.mark.parametrize(
+    ("stdout", "sha"),
+    [("v=8.1.0 sha=ABC1234:1 malloc=libc", "abc1234"), ("v=8.1.0 sha=00000000:0", None), ("v=8.1.0 malloc=libc", None)],
+)  # fmt: skip
+def test_the_sha_comes_from_the_version_output_and_a_release_build_has_none(stdout, sha):
+    completed = subprocess.CompletedProcess(args=[], returncode=0, stdout=f"Valkey server {stdout}", stderr="")
+    with patch("subprocess.run", return_value=completed):
+        assert detect_valkey_sha("valkey-server") == sha
+    for error in (FileNotFoundError("nope"), subprocess.TimeoutExpired(cmd="x", timeout=5)):
+        with patch("subprocess.run", side_effect=error):
+            assert detect_valkey_sha("valkey-server") is None
 
 
-def test_parses_full_sha_from_version_output():
-    out = "Valkey server v=8.1.0 sha=abc1234567890def:0 malloc=jemalloc-5.3.0 bits=64 build=abcdef1234567890"
-    with patch("subprocess.run", return_value=_ok(out)):
-        assert detect_valkey_sha("/usr/bin/valkey-server") == "abc1234567890def"
-
-
-def test_parses_short_sha():
-    out = "Valkey server v=8.1.0 sha=abc1234:0 malloc=jemalloc-5.3.0 bits=64 build=abc"
-    with patch("subprocess.run", return_value=_ok(out)):
-        assert detect_valkey_sha("/usr/bin/valkey-server") == "abc1234"
-
-
-def test_handles_dirty_marker():
-    """`sha=<hex>:1` indicates a dirty tree — we still record the underlying commit."""
-    out = "Valkey server v=8.1.0 sha=deadbeefcafe:1 malloc=jemalloc-5.3.0 bits=64 build=x"
-    with patch("subprocess.run", return_value=_ok(out)):
-        assert detect_valkey_sha("/usr/bin/valkey-server") == "deadbeefcafe"
-
-
-def test_returns_none_for_release_build_with_no_git_context():
-    """Release tarballs emit `sha=00000000:0` — record None so callers don't
-    try to clone an all-zero commit."""
-    out = "Valkey server v=8.1.0 sha=00000000:0 malloc=libc bits=64 build=x"
-    with patch("subprocess.run", return_value=_ok(out)):
-        assert detect_valkey_sha("/usr/bin/valkey-server") is None
-
-
-def test_returns_none_when_version_string_missing_sha_field():
-    out = "Valkey server v=8.1.0 malloc=libc bits=64 build=x"
-    with patch("subprocess.run", return_value=_ok(out)):
-        assert detect_valkey_sha("/usr/bin/valkey-server") is None
-
-
-def test_returns_none_when_binary_invocation_fails():
-    """Permission/path errors should not bubble — return None and let the
-    fuzzer continue without an embedded SHA."""
-    with patch("subprocess.run", side_effect=FileNotFoundError("nope")):
-        assert detect_valkey_sha("/missing/binary") is None
-
-
-def test_returns_none_on_subprocess_timeout():
-    with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="x", timeout=5)):
-        assert detect_valkey_sha("/usr/bin/valkey-server") is None
-
-
-def test_case_insensitive_sha_lowercased():
-    out = "Valkey server v=8.1.0 sha=ABCDEF1234:0 malloc=libc bits=64"
-    with patch("subprocess.run", return_value=_ok(out)):
-        assert detect_valkey_sha("/usr/bin/valkey-server") == "abcdef1234"
+def test_a_sanitizer_builds_version_is_read_without_its_leak_report(tmp_path, monkeypatch):
+    # gcc's ASan on aarch64 reports the options sds main leaves behind when --version exits, and exits 1: every
+    # artifact and probe of that build failed. Its version is not a leak test.
+    binary = tmp_path / "valkey-server"
+    binary.write_text(
+        "#!/bin/sh\n"
+        'case "$ASAN_OPTIONS" in *detect_leaks=0*) ;; *) echo "ERROR: LeakSanitizer" >&2; exit 1;; esac\n'
+        'echo "Valkey server v=9.9.9 sha=0123abcd:0 malloc=libc bits=64 build=1"\n'
+    )
+    binary.chmod(0o755)
+    monkeypatch.setenv("ASAN_OPTIONS", "allocator_may_return_null=1")
+    assert server.parse_version_output(server.version_output(str(binary)))["version"] == "9.9.9"
+    assert detect_valkey_sha(str(binary)) == "0123abcd"
+    assert os.environ["ASAN_OPTIONS"] == "allocator_may_return_null=1"

@@ -1,37 +1,49 @@
-from src.cluster_orchestrator.orchestrator import ClusterManager, ConfigurationManager, PortManager
-from src.models import ClusterConfig
-from src.valkey_client.load_data import load_all_slots
+"""The cluster slot preload writes the same distinct keys into every slot for the same seed."""
+
+import random
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+from valkey.crc import key_slot
+
+from valkey_fuzzer.deployment.local.models import DeploymentMode
+from valkey_fuzzer.deployment.local.service import load_all_slots
 
 
-def test_load_data():
-    """Test loading data into all cluster slots"""
-    cluster_config = ClusterConfig(num_shards=3, replicas_per_shard=1, base_port=7000)
+class _Cluster:
+    """A cluster client whose pipelines acknowledge every SET but those of the keys in ``refused``."""
 
-    port_mgr = PortManager(base_port=7000)
-    config_mgr = ConfigurationManager(cluster_config, port_mgr)
-    cluster_mgr = ClusterManager()
+    def __init__(self, refused=()):
+        self.written, self.refused = [], set(refused)
+        self.close = Mock()
 
-    try:
-        valkey_binary = config_mgr.setup_valkey_from_source()
-        cluster_config.valkey_binary = valkey_binary
+    def pipeline(self):
+        queued = []
+        cluster = self
 
-        topology = config_mgr.plan_topology()
-        nodes = config_mgr.spawn_all_nodes(topology)
-        cluster_connection = cluster_mgr.form_cluster(nodes, config_mgr.cluster_id)
-        assert cluster_connection is not None
+        class Pipeline:
+            def set(self, key, value):
+                queued.append((key, value))
 
-        # Test live discovery
-        live_nodes = cluster_connection.get_current_nodes()
-        primary_nodes = cluster_connection.get_primary_nodes()
-        replica_nodes = cluster_connection.get_replica_nodes()
+            def execute(self, raise_on_error=True):
+                cluster.written.extend(queued)
+                return [ConnectionError("reset") if key in cluster.refused else True for key, _ in queued]
 
-        assert len(live_nodes) == 6
-        assert len(primary_nodes) == 3
-        assert len(replica_nodes) == 3
+        return Pipeline()
 
-        success = load_all_slots(cluster_connection, keys_per_slot=10)
-        assert success
 
-    finally:
-        cluster_mgr.close_connections()
-        config_mgr.cleanup_cluster(nodes)
+def test_the_same_seed_preloads_the_same_distinct_keys_into_every_slot():
+    cluster = SimpleNamespace(mode=DeploymentMode.CLUSTER, startup_nodes=[{"host": "127.0.0.1", "port": 7000}])
+    clients = [_Cluster(), _Cluster(), _Cluster(refused={"key:{0}:1"})]
+    with patch("valkey_fuzzer.deployment.local.service.ValkeyCluster", side_effect=clients):
+        assert load_all_slots(cluster, keys_per_slot=2, rng=random.Random(1234)) is True
+        assert load_all_slots(cluster, keys_per_slot=2, rng=random.Random(1234)) is True
+        assert load_all_slots(cluster, keys_per_slot=2, rng=random.Random(1234)) is False
+    first, second = (client.written for client in clients[:2])
+    assert first == second and all(client.close.called for client in clients)
+    # Two keys per slot are two keys: their suffixes never collide within a slot.
+    keys = [key for key, _ in first]
+    assert len(set(keys)) == len(keys) == 2 * 16384
+    assert sorted(key_slot(key.encode()) for key in keys) == sorted(list(range(16384)) * 2)
+    # Outside cluster mode there are no slots to fill.
+    assert load_all_slots(SimpleNamespace(mode=DeploymentMode.STANDALONE), keys_per_slot=1, rng=random.Random(0))

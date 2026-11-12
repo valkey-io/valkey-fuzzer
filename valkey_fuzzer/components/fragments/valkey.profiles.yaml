@@ -1,0 +1,35 @@
+# valkey.profiles: the search profiles for the Valkey experiments; no
+# experiment extends it. Each experiment's metadata.generator is its legal
+# space: what may vary and within which ranges. A profile only changes how
+# hard that space is sampled (edge share, narrower ranges, value weights) and
+# the batch budgets (a deadline per run, seeds per experiment). A range a
+# profile names is clamped into each experiment's own range, so it can only
+# shrink; a path an experiment does not draw is ignored. `batch --profile NAME`
+# and `run --seed N --profile NAME` apply one.
+metadata:
+  generator:
+    profiles:
+      pr-quick:
+        description: Small deployments, edge-heavy values, and short runs, for a pull request.
+        edge_probability: 0.6
+        ranges:
+          deployment.primaries: {maximum: 3}
+          deployment.replicas_per_primary: {maximum: 1}
+          inputs.operations: {maximum: 1000}
+          inputs.stable_keys: {maximum: 1000}
+          inputs.mutable_keys: {maximum: 200}
+          inputs.mutation_rate: {maximum: 1000}
+        weights:
+          deployment.mode: {standalone: 3}
+        budget: {seeds: 3, timeout_s: 600}
+      nightly-soak:
+        description: Every experiment's whole legal range, many seeds, and long deadlines.
+        budget: {seeds: 50, timeout_s: 1800}
+      # Draws biased to the edges of each range.
+      adversarial:
+        description: Range edges first (90% of range draws), for finding boundary bugs.
+        edge_probability: 0.9
+        budget: {seeds: 20, timeout_s: 1800}
+      candidate:
+        description: Given scenarios (AI or model proposals) run as written; nothing is drawn.
+        budget: {timeout_s: 1200}

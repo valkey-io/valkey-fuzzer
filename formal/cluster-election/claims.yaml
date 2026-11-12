@@ -1,0 +1,86 @@
+# What formal/cluster-election/model.tla claims about Valkey's failover election,
+# under which assumptions and bounds, and what it leaves out.
+protocol: cluster-election
+summary: >-
+  With cluster-config-save-behavior sync, and if no failover vote leaves its
+  primary before the nodes.conf save that follows the grant, every vote
+  reaches nodes.conf before it leaves, so a primary that crashes and restarts
+  never votes twice in one epoch, and one election epoch never promotes two
+  replicas. Valkey does not ensure the second condition, so without a fix
+  that saves the vote before sending it Valkey can vote twice under sync
+  (negative control flush-before-save).
+# Drafted from the hand-written model; a maintainer has not approved these claims yet.
+status: draft
+scope:
+  - file: src/cluster_legacy.c
+    functions:
+      - clusterHandleReplicaFailover
+      - clusterRequestFailoverAuth
+      - clusterSendFailoverAuthIfNeeded
+      - clusterProcessPacket
+      - clusterBeforeSleep
+      - clusterSaveConfigOrDie
+      - clusterSaveConfigBackground
+      - clusterLoadConfig
+properties:
+  - name: OneWinnerPerEpoch
+    kind: invariant
+    statement: One election epoch never promotes two replicas of the same primary.
+    holds_when: {PersistBeforeAck: true, FlushBeforeSave: false}
+    negative_controls: [vote-before-save, flush-before-save]
+    conform: true
+  - name: VoteOncePerEpoch
+    kind: invariant
+    statement: No primary sends votes for two candidates in the same epoch.
+    holds_when: {PersistBeforeAck: true, FlushBeforeSave: false}
+    negative_controls: [double-vote]
+    conform: true
+  - name: VotesSavedBeforeSent
+    kind: invariant
+    statement: Every vote that has left a primary is already in that primary's nodes.conf.
+    holds_when: {PersistBeforeAck: true, FlushBeforeSave: false}
+    negative_controls: [vote-sent-before-save]
+    conform:
+      excluded: >-
+        A live run sees nodes.conf only in samples, which lag behind the
+        file, so in an observed state diskVote is a lower bound and the check
+        would flag correct runs. The election-safety oracle checks it exactly,
+        from the nodes.conf vars read at each crash (require_durable_votes).
+  - name: NoVoteLostInCrash
+    kind: invariant
+    statement: >-
+      A vote that has left its voter is never lost by the voter's crash: the
+      voter restarts with that vote's epoch as lastVoteEpoch or later.
+    holds_when: {PersistBeforeAck: true, FlushBeforeSave: false}
+    negative_controls: [vote-lost-in-crash]
+    # Exact in a live run: votes seen leaving (ACK lines) and the nodes.conf
+    # vars read at the kill, which the killed node restarts with.
+    conform: true
+targets:
+  - name: VoteLostInCrash
+    meaning: >-
+      A vote that already left its voter was lost by the voter's crash, so the
+      restarted voter may vote again in that epoch (the counterexamples' crash step).
+assumptions:
+  - The failed primary is already marked FAIL; failure detection is not modeled.
+  - Every voting primary serves at least one hash slot, so the quorum is a majority of Primaries.
+  - The network may drop, delay, and reorder messages but not corrupt them; a candidate counts each primary's vote at most once.
+  - A crash loses memory, link queues, and queued background saves; nodes.conf survives.
+  - With cluster-config-save-behavior sync (src/config.c), the save in clusterBeforeSleep is on disk when it returns; best-effort only queues it for the background writer.
+  - >-
+    No granted vote leaves before the clusterBeforeSleep save that follows the
+    grant (FlushBeforeSave = FALSE). Valkey does not guarantee this:
+    clusterSendMessage arms a link's write handler only when its queue is
+    empty, so a link that already had output queued can write the
+    FAILOVER_AUTH_ACK in the same event-loop pass, before the save.
+bounds:
+  Primaries: "{p1, p2, p3}"
+  Candidates: "{r1, r2}"
+  MaxEpoch: 2
+  MaxCrashes: 1
+exclusions:
+  - The 2 s safe_to_join window after a restart, during which a primary refuses votes.
+  - The slot configEpoch check a primary makes before granting a vote.
+  - Replica ranking delays and the election timeout and retry.
+  - Epoch collisions handled by clusterHandleConfigEpochCollision.
+  - A restarted primary learning a higher currentEpoch by gossip before it votes again; the model lets a re-election reuse an epoch.

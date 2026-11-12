@@ -1,0 +1,15 @@
+diff --git a/src/aof.c b/src/aof.c
+index b01d52534..b25bdce03 100644
+--- a/src/aof.c
++++ b/src/aof.c
+@@ -1218,6 +1218,10 @@ void flushAppendOnlyFile(int force) {
+ 
+     if (server.aof_fsync == AOF_FSYNC_EVERYSEC) sync_in_progress = aofFsyncInProgress();
+ 
++    /* Bug zoo: appendfsync always keeps acknowledged writes in aof_buf until
++     * 1 MB accumulates instead of writing and fsyncing them before the reply. */
++    if (server.aof_fsync == AOF_FSYNC_ALWAYS && !force && sdslen(server.aof_buf) < 1024 * 1024) return;
++
+     if (server.aof_fsync == AOF_FSYNC_EVERYSEC && !force) {
+         /* With this append fsync policy we do background fsyncing.
+          * If the fsync is still in progress we can try to delay

@@ -1,0 +1,128 @@
+# Run on a size-limited filesystem, fill it, and require graceful degradation:
+# AOF writes and BGSAVE fail with errors (never crash or corrupt), rejected
+# writes are never applied, acknowledged writes survive, and once space is
+# freed AOF writes recover and the next BGSAVE succeeds and reloads.
+#
+# Path evidence: the fault filled the disk and the server logged ENOSPC. The
+# `degraded` oracle requires INFO to report the BGSAVE and AOF write errors,
+# and the AOF writes to recover.
+#
+# The scenario provisions the filesystem as a valkey.resource.tmpfs resource
+# (the only kind valkey.fault.disk-fill fills), places instance data on it with
+# deployment.instance_data_roots, and passes the same
+# {$ref: resources.<id>.path} as the `disk` input.
+extends: [valkey.writes]
+id: valkey.bgsave-disk-full
+deployment:
+  modes: [standalone]
+metadata:
+  description: Fill the data filesystem, verify graceful AOF/BGSAVE errors and recovery
+  generator:
+    hook: valkey.generator.tmpfs-data
+    inputs:
+      # The seeded keys must fit the smallest (16 MB) tmpfs before it is filled.
+      stable_keys: {minimum: 100, maximum: 2000}
+      mutable_keys: {minimum: 1, maximum: 500}
+      mutation_rate: {minimum: 50, maximum: 1000}
+      value_size: {values: [64, 256, 1024]}
+inputs:
+  required: [disk]
+  properties:
+    disk:
+      type: environment_reference
+      reference_kinds: [resources]
+      description: "Path of the filesystem that holds instance data, e.g. {$ref: resources.disk.path}"
+    stable_keys: {minimum: 1, maximum: 100000, default: 500}
+    mutable_keys: {default: 100}
+    mutation_rate: {minimum: 1, maximum: 10000, default: 200}
+startup_overlays:
+  - overlay_id: aof-on-small-disk
+    server_config:
+      appendonly: "yes"
+      appendfsync: everysec
+components:
+  - use: valkey.capability.host-probe
+    id: host
+    config: {requires: [linux, root, tmpfs]}
+
+  - use: valkey.observer.info
+    id: info
+    config:
+      instances: primary
+      sections: [persistence]
+      interval_s: 0.1
+      on_events: [bgsave-on-full-disk.save-completed, fill-disk.released]
+      expectations:
+        - {evidence_id: valkey.storage.bgsave-error-seen, field: rdb_last_bgsave_status, equals: err, when: during}
+        - {evidence_id: valkey.storage.aof-error-seen, field: aof_last_write_status, equals: err, when: during}
+        - {evidence_id: valkey.storage.aof-recovered, field: aof_last_write_status, equals: ok, when: final}
+        - {evidence_id: valkey.storage.bgsave-recovered, field: rdb_last_bgsave_status, equals: ok, when: final}
+
+  - use: valkey.observer.log
+    id: logs
+    config:
+      instances: primary
+      expect:
+        - {evidence_id: valkey.storage.enospc-logged, pattern: "No space left on device", required: true}
+        - {evidence_id: valkey.storage.aof-recovery-logged, pattern: "AOF write error looks solved"}
+
+  - use: valkey.fault.disk-fill
+    id: fill-disk
+    config:
+      when_event: writes.seeded
+      path: {$ref: inputs.disk}
+      release_event: bgsave-on-full-disk.save-completed
+
+  - use: valkey.workload.key-value
+    id: writes
+    depends_on: [fill-disk]
+    config:
+      op_timeout_s: 2.0
+
+  - use: valkey.action.poll
+    id: wait-aof-error
+    depends_on: [writes, info, logs]
+    config:
+      instances: primary
+      section: persistence
+      field: aof_last_write_status
+      predicate: {equals: err}
+      timeout_s: 30
+
+  - use: valkey.action.bgsave
+    id: bgsave-on-full-disk
+    depends_on: [wait-aof-error]
+    config: {instances: primary, expect: err, capture_rdb: false}
+
+  - use: valkey.action.poll
+    id: wait-aof-recovery
+    depends_on: [bgsave-on-full-disk]
+    config:
+      instances: primary
+      section: persistence
+      field: aof_last_write_status
+      predicate: {equals: ok}
+      timeout_s: 60
+
+  - use: valkey.action.bgsave
+    id: bgsave-after-recovery
+    depends_on: [wait-aof-recovery]
+    config: {instances: primary, expect: ok}
+
+  - use: valkey.oracle.rdb-snapshot
+    id: snapshot
+    depends_on: [bgsave-after-recovery]
+    config: {bgsave: bgsave-after-recovery, workload: writes}
+
+  - use: valkey.oracle.evidence
+    id: degraded
+    depends_on: [info]
+    config:
+      require:
+        - {evidence_id: valkey.storage.bgsave-error-seen, source: info}
+        - {evidence_id: valkey.storage.aof-error-seen, source: info}
+        - {evidence_id: valkey.storage.aof-recovered, source: info}
+required_events: [writes.seeded, bgsave-on-full-disk.save-completed, fill-disk.released]
+required_evidence:
+  - {evidence_id: valkey.fault.injected, source: fill-disk}
+  - {evidence_id: valkey.rdb.reload-verified, source: snapshot}

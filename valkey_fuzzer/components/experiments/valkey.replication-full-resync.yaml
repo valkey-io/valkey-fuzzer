@@ -1,0 +1,133 @@
+# Freeze a replica (SIGSTOP) while writes overflow a minimal backlog and the
+# replica output-buffer limit, then resume it. The primary must drop the
+# replica, refuse the partial resync for lack of backlog, and serve a full
+# resync; the replica must converge with no acknowledged write lost.
+#
+# Path evidence: the stall fired and overflowed the output limit (the primary
+# logs closing the replica's link). Only then must the primary refuse a
+# partial resync and serve a full one, which the `full-resync` oracle checks: a
+# stall that never overflowed the limit (the writes were few) did not reach
+# that state, and the run is an ERROR, not
+# a FAIL.
+extends: [valkey.base, valkey.history]
+id: valkey.replication-full-resync
+deployment:
+  modes: [standalone, cluster]
+  replicas_per_primary: {minimum: 1}
+metadata:
+  description: Overflow the replication backlog during a replica stall and verify full resync and convergence
+  generator:
+    deployment:
+      standalone: {replicas_per_primary: {minimum: 1, maximum: 3}}
+      cluster: {replicas_per_primary: {minimum: 1, maximum: 2}}
+    inputs:
+      # The defaults are the least that reliably overflows the 64 kB output
+      # limit during the stall; draws only go up from them. The pause runs
+      # inside the event's dispatch, so the limit is restored a second after
+      # the stall ends; with 8 kB values the stall's writes often fit in the
+      # kernel's socket buffers and never reach it, mostly in cluster mode,
+      # where the writes spread over the shards.
+      mutable_keys: {minimum: 100, maximum: 1000}
+      mutation_rate: {minimum: 1000, maximum: 3000}
+      value_size: {values: [16384, 65536]}
+      pause_s: {minimum: 3, maximum: 5}
+    server_config: [valkey.pool.replication]
+inputs:
+  properties:
+    stable_keys: {default: 500}
+    mutable_keys: {default: 300}
+    mutation_rate: {minimum: 1, default: 1000}
+    value_size:
+      minimum: 64
+      default: 16384
+      description: large enough that the stall overflows kernel socket buffers, not just the backlog
+    pause_s: {type: number, minimum: 0.5, maximum: 600, default: 3}
+startup_overlays:
+  - overlay_id: tiny-backlog
+    server_config:
+      repl-backlog-size: 16kb
+      client-output-buffer-limit: "replica 64kb 0 0"
+components:
+  - use: valkey.observer.info
+    id: info
+    config:
+      instances: primaries
+      sections: [stats]
+      interval_s: 0.1
+      expectations:
+        - {evidence_id: valkey.replication.full-resync-counted, field: sync_full, delta_min: 1}
+        - {evidence_id: valkey.replication.partial-refused-counted, field: sync_partial_err, delta_min: 1}
+
+  - use: valkey.observer.log
+    id: logs
+    config:
+      instances: all
+      expect:
+        - {evidence_id: valkey.replication.output-limit-logged, pattern: "scheduled to be closed ASAP for overcoming of output buffer limits", required: true}
+        - {evidence_id: valkey.replication.backlog-exhausted-logged, pattern: "Unable to partial resync with replica .* for lack of backlog"}
+        - {evidence_id: valkey.replication.full-sync-completed-logged, pattern: "sync: Finished with success"}
+
+  - use: valkey.workload.key-value
+    id: writes
+    config:
+      mix: {set: 0.9, get: 0.1}
+
+  - use: valkey.fault.process-signal
+    id: stall-replica
+    config:
+      when_event: run-then-stall.completed
+      instance: replica
+      signal: SIGSTOP
+      pause_s: {$ref: inputs.pause_s}
+
+  - use: valkey.action.sleep
+    id: run-then-stall
+    depends_on: [writes, info, logs, stall-replica]
+    config: {seconds: 1}
+
+  - use: valkey.action.sleep
+    id: settle
+    depends_on: [run-then-stall]
+    config: {seconds: 1}
+
+  # Once the overflow has forced a full resync, restore a production-sized
+  # limit so the resynchronized replica can keep up with the write stream.
+  - use: valkey.action.command
+    id: restore-output-limit
+    depends_on: [settle]
+    config:
+      instances: primaries
+      command: [CONFIG, SET, client-output-buffer-limit, "replica 256mb 64mb 60"]
+      expect: {equals: OK}
+
+  - use: valkey.action.poll
+    id: links-up
+    depends_on: [restore-output-limit]
+    config:
+      instances: replicas
+      section: replication
+      field: master_link_status
+      predicate: {equals: up}
+      timeout_s: 120
+
+  - use: valkey.oracle.ledger
+    id: data
+    config: {converge_timeout_s: 120}
+
+  - use: valkey.oracle.deployment-state
+    id: deployment-state
+    config: {validation: {stabilization_wait: 2, validation_timeout: 120}}
+
+  - use: valkey.oracle.evidence
+    id: full-resync
+    depends_on: [info, logs]
+    config:
+      preconditions:
+        - {evidence_id: valkey.replication.output-limit-logged, source: logs}
+      require:
+        - {evidence_id: valkey.replication.full-resync-counted, source: info}
+        - {evidence_id: valkey.replication.partial-refused-counted, source: info}
+        - {evidence_id: valkey.replication.backlog-exhausted-logged, source: logs}
+required_events: [run-then-stall.completed]
+required_evidence:
+  - {evidence_id: valkey.fault.injected, source: stall-replica}

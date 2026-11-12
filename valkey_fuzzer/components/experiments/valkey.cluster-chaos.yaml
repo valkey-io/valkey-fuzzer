@@ -1,0 +1,65 @@
+# Cluster chaos: waves of failovers and process kills. A kill never takes a
+# live shard's last live member or breaks primary quorum. Valkey heals the
+# cluster; after every wave, and once more at the end, the deployment's
+# validators check replication, cluster state, slot coverage, roles, views,
+# the data-consistency keys, and node logs, with the killed nodes counted as
+# stopped on purpose. `valkey-fuzzer run --random --experiment
+# valkey.cluster-chaos` generates scenarios for this experiment.
+extends: [valkey.command-table]
+id: valkey.cluster-chaos
+deployment:
+  modes: [cluster]
+  replicas_per_primary: {minimum: 1}
+metadata:
+  description: Failovers and shard- and quorum-safe process kills in waves, validated after every wave
+  generator:
+    deployment:
+      primaries: {minimum: 3, maximum: 16}
+      replicas_per_primary: {minimum: 1, maximum: 5}
+      base_port: {minimum: 7000, maximum: 8000}
+    inputs:
+      waves: {hook: valkey.generator.waves}
+      keys_per_slot: fixed
+    # At most one IO thread a node, and never an always-active one: those spin
+    # through every event, about 0.4 of a core a node, and a cluster here has up
+    # to 96 nodes (2 of 14 seeds timed out from the load on a 48-core host).
+    # The other cluster and replication experiments draw them.
+    server_config: [valkey.pool.cluster-io-threads]
+    pools:
+      valkey.pool.cluster-io-threads:
+        io-threads: ["1", "2"]
+        io-threads-always-active: ["no"]
+        events-per-io-thread: ["2"]
+        scope: [deployment, role]
+inputs:
+  type: object
+  additionalProperties: false
+  properties:
+    waves:
+      type: array
+      default: [[{op: failover, shard: 0}]]
+      description: "waves of operations that start together: failover {shard, force, timeout_s}, kill {target, signal}"
+    validation:
+      type: object
+      default: {}
+      description: state validation config (check_* flags, timeouts, retries, blocking_on_failure)
+    keys_per_slot: {type: integer, minimum: 0, maximum: 100, default: 5}
+components:
+  # Listed, so that it starts before the chaos: a fragment's other components start after the experiment's own.
+  - id: commands
+
+  - use: valkey.action.cluster-chaos
+    id: chaos
+    config:
+      waves: {$ref: inputs.waves}
+      validation: {$ref: inputs.validation}
+      keys_per_slot: {$ref: inputs.keys_per_slot}
+
+  - use: valkey.oracle.deployment-state
+    id: cluster
+    config:
+      validation: {$ref: inputs.validation}
+      chaos: chaos
+required_evidence:
+  - {evidence_id: valkey.chaos.schedule, source: chaos}
+  - {evidence_id: valkey.deployment.validated, source: cluster}

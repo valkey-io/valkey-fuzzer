@@ -1,0 +1,39 @@
+# An opt-in `commands` workload (valkey.workload.command-table): commands drawn
+# from the build's whole command table at `command_rate` per second while the
+# experiment's faults run. Its keys stay under their own prefix, apart from the
+# keys the other components write and check; what the commands do to the
+# server is the liveness oracle's to judge, and the `reply-schemas` oracle
+# holds their replies to Valkey's reply schemas. 0, the default, sends none, and
+# random scenarios keep it: a batch turns it on for an experiment with a base,
+# `experiment: {inputs: {command_rate: 200}}`. An experiment that extends this
+# lists `- id: commands` before its faults and actions: a fragment's other
+# components start after the experiment's own, so the workload would start
+# once they are done.
+#
+# The `command-metadata` oracle (valkey.oracle.command-metadata) then sends
+# the workload's first commands again to private servers of the build, and
+# holds each to what the build declares about it: its keys, arity, and
+# readonly and write flags.
+metadata:
+  generator:
+    inputs:
+      command_rate: fixed
+inputs:
+  properties:
+    command_rate:
+      type: number
+      minimum: 0
+      maximum: 20000
+      default: 0
+      description: commands per second drawn from the whole command table (0 sends none)
+components:
+  - use: valkey.workload.command-table
+    id: commands
+    config:
+      rate: {$ref: inputs.command_rate}
+  - use: valkey.oracle.reply-schema
+    id: reply-schemas
+    config: {workload: commands}
+  - use: valkey.oracle.command-metadata
+    id: command-metadata
+    config: {workload: commands}

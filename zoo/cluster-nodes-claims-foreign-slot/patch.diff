@@ -1,0 +1,17 @@
+diff --git a/src/cluster_legacy.c b/src/cluster_legacy.c
+index d6a961c0b..a56692581 100644
+--- a/src/cluster_legacy.c
++++ b/src/cluster_legacy.c
+@@ -7727,6 +7727,12 @@ sds clusterGenNodeDescription(client *c, clusterNode *node, int tls_primary) {
+         }
+     }
+ 
++    /* Bug zoo: in CLUSTER NODES replies, a primary that does not own slot 0
++     * reports slot 0 as its own. nodes.conf (c == NULL) stays correct. */
++    if (c && (node->flags & CLUSTER_NODE_MYSELF) && clusterNodeIsPrimary(node) && node->numslots > 0 &&
++        !clusterNodeCoversSlot(node, 0))
++        ci = sdscat(ci, " 0");
++
+     /* Just for MYSELF node we also dump info about slots that
+      * we are migrating to other instances or importing from other
+      * instances. */

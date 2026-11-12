@@ -1,0 +1,4 @@
+Dual channel replication: Provisional primary closed connection
+Replica bio thread: Main thread asked to abort the save while Bio thread is reading the sync payload
+# Unexpected EOF reading RDB file
+# Short read or OOM loading DB. Unrecoverable error, aborting now.

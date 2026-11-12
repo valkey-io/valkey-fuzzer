@@ -1,0 +1,22 @@
+protocol: register
+summary: A store that saves each write before acknowledging it never loses an acknowledged write to a crash.
+status: draft
+# The toy runs on Valkey: appendfsync always is the save before the ack.
+scope:
+  - file: src/aof.c
+    functions: [feedAppendOnlyFile, flushAppendOnlyFile, loadAppendOnlyFiles]
+properties:
+  - name: AckedDurable
+    kind: invariant
+    statement: An acknowledged write survives a crash.
+    holds_when: {SyncBeforeAck: true}
+    negative_controls: [ack-before-save]
+    conform: true
+assumptions:
+  - The disk keeps what was saved across a crash of the process.
+bounds:
+  MaxValue: 3
+  MaxCrashes: 1
+exclusions:
+  - Partial writes.
+  - A crash of the host; the experiment kills the process, so writes the kernel already holds survive it.

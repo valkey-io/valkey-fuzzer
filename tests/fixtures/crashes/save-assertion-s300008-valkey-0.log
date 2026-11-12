@@ -1,0 +1,6 @@
+
+=== VALKEY BUG REPORT START: Cut & paste starting from here ===
+892964:M 29 Oct 2026 06:07:59.786 # === ASSERTION FAILED ===
+892964:M 29 Oct 2026 06:07:59.786 # ==> bgiteration.c:2699 'wasAdded' is not true
+
+892964:M 29 Oct 2026 06:07:59.791 # valkey 9.2.0 crashed by signal: 11, si_code: 1

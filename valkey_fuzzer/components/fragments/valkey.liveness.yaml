@@ -1,0 +1,14 @@
+# The oracles that need no model of the feature under test:
+# - liveness: every instance is alive and responsive and logged no crash or sanitizer report,
+#   and no valkey.observer.log in the run matched one of its forbidden patterns;
+# - error-counters: no error counter in INFO rose without something in the scenario that explains it;
+# - quiet-end: with the workload and the faults over, every instance comes to rest (no blocked
+#   client or child process, links up, not spinning).
+# Every shipped Valkey experiment extends this; data-only experiments extend it themselves.
+components:
+  - use: valkey.oracle.liveness
+    id: liveness
+  - use: valkey.oracle.error-counters
+    id: error-counters
+  - use: valkey.oracle.quiet-end
+    id: quiet-end

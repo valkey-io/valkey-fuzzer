@@ -1,0 +1,34 @@
+# valkey.base plus a forced full sync of every replica: after
+# `run-before-sync` (writes for `run_before_sync_s`), the primaries change
+# their replication ID (DEBUG CHANGE-REPL-ID, which the `full-sync` startup
+# overlay enables), so every replica's PSYNC is refused, and
+# valkey.reconnect-replicas drops their replica links and waits until every
+# link is up again (`links-up`). Needs replicas; experiments name what
+# `run-before-sync` follows in its depends_on.
+extends: [valkey.base, valkey.reconnect-replicas]
+inputs:
+  properties:
+    run_before_sync_s: {type: number, minimum: 0, maximum: 600, default: 1}
+startup_overlays:
+  - overlay_id: full-sync
+    server_config:
+      repl-diskless-sync-delay: 0
+      enable-debug-command: "yes"
+components:
+  - use: valkey.action.sleep
+    id: run-before-sync
+    config: {seconds: {$ref: inputs.run_before_sync_s}}
+
+  # A new replication ID refuses every replica's PSYNC: the next sync is full.
+  - use: valkey.action.command
+    id: change-replid
+    depends_on: [run-before-sync]
+    config: {instances: primaries, command: [DEBUG, CHANGE-REPL-ID], expect: {equals: OK}}
+
+  - use: valkey.action.command
+    id: drop-replica-links
+    depends_on: [change-replid]
+
+  - use: valkey.oracle.ledger
+    id: data
+    config: {converge_timeout_s: 120}

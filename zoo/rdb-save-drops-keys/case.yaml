@@ -1,0 +1,6 @@
+description: An RDB save silently omits every 50th key it iterates.
+catches: valkey.oracle.rdb-snapshot (the reloaded RDB against the write ledger)
+scenarios:
+  - {file: scenario.yaml, fail: [snapshot]}
+runs: 5
+min_detection_rate: 1.0

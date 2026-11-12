@@ -1,0 +1,142 @@
+# Cut one primary off from every other cluster node (clients can still reach
+# both sides), wait for its replica to win the failover election, then heal.
+# Afterwards the cluster must converge on one primary per shard with full slot
+# coverage, the old primary must rejoin as a replica, and no acknowledged write
+# may be lost — except writes the isolated primary itself acknowledged inside
+# the partition window (Valkey Cluster is not linearizable under partitions).
+# Writes its successor acknowledged on the majority side must survive.
+# The `failover-logged` oracle requires the nodes to log the failure detection
+# and the successor's election.
+#
+# Needs Linux, root, iptables, and deployment.addressing: per_instance_loopback.
+extends: [valkey.base, valkey.history, valkey.command-table]
+id: valkey.cluster-partition
+deployment:
+  modes: [cluster]
+  replicas_per_primary: {minimum: 1}
+  # The partition cuts the links between instance addresses.
+  addressing: {type: string, enum: [per_instance_loopback]}
+metadata:
+  description: Partition a primary from the cluster bus, verify failover, healing, and bounded write loss
+  generator:
+    deployment:
+      addressing: per_instance_loopback
+      cluster:
+        primaries: {minimum: 3, maximum: 5}
+        # One replica, so the default successor (valkey-1) is the only candidate.
+        replicas_per_primary: 1
+    inputs:
+      isolate: fixed
+      successor: fixed
+      hold_after_failover_s: {minimum: 0, maximum: 3}
+      loss_window_after_s: fixed
+inputs:
+  properties:
+    isolate: {type: string, default: valkey-0, description: planned primary to isolate}
+    successor: {type: string, default: valkey-1, description: replica expected to take over}
+    mutable_keys: {default: 300}
+    mutation_rate: {minimum: 1, default: 300}
+    hold_after_failover_s: {type: number, minimum: 0, maximum: 600, default: 1}
+    loss_window_after_s:
+      type: number
+      minimum: 0
+      maximum: 600
+      default: 5
+      description: after healing, how long writes to the isolated shard may still be lost while the old primary learns it was replaced
+components:
+  - use: valkey.capability.host-probe
+    id: host
+    config: {requires: [linux, root, iptables, per_instance_loopback]}
+
+  - use: valkey.observer.log
+    id: logs
+    config:
+      instances: all
+      expect:
+        - {evidence_id: valkey.cluster.failure-detected-logged, pattern: "Marking node .* as failing \\(quorum reached\\)"}
+        - {evidence_id: valkey.cluster.election-won-logged, pattern: "Failover election won"}
+
+  - use: valkey.workload.key-value
+    id: writes
+    config:
+      op_timeout_s: 1.0
+
+  # Listed, so that it starts before the partition: a fragment's other components start after the experiment's own.
+  - id: commands
+
+  - use: valkey.fault.network-partition
+    id: partition
+    config:
+      when_event: run-then-partition.completed
+      isolate: {$ref: inputs.isolate}
+      heal_event: hold-then-heal.completed
+
+  - use: valkey.action.sleep
+    id: run-then-partition
+    depends_on: [writes, logs, partition]
+    config: {seconds: 1}
+
+  - use: valkey.action.poll
+    id: successor-promoted
+    depends_on: [run-then-partition]
+    config:
+      instances: {$ref: inputs.successor}
+      section: replication
+      field: role
+      predicate: {equals: master}
+      timeout_s: 60
+
+  - use: valkey.action.sleep
+    id: hold-then-heal
+    depends_on: [successor-promoted]
+    config: {seconds: {$ref: inputs.hold_after_failover_s}}
+
+  - use: valkey.action.poll
+    id: old-primary-demoted
+    depends_on: [hold-then-heal]
+    config:
+      instances: {$ref: inputs.isolate}
+      section: replication
+      field: role
+      predicate: {equals: slave}
+      timeout_s: 60
+
+  - use: valkey.action.poll
+    id: old-primary-synced
+    depends_on: [old-primary-demoted]
+    config:
+      instances: {$ref: inputs.isolate}
+      section: replication
+      field: master_link_status
+      predicate: {equals: up}
+      timeout_s: 120
+
+  - use: valkey.oracle.ledger
+    id: data
+    config:
+      loss_window_s: 1.0
+      loss_window_faults: [partition]
+      loss_window_after_s: {$ref: inputs.loss_window_after_s}
+      # The isolated primary may keep acknowledging writes until it is seen demoted, however late after the heal.
+      loss_window_until: [old-primary-demoted]
+      loss_window_scope: fault_targets
+      window_reads: written
+      converge_timeout_s: 60
+
+  - use: valkey.oracle.deployment-state
+    id: deployment-state
+    config: {validation: {stabilization_wait: 3, validation_timeout: 120}}
+
+  - use: valkey.oracle.evidence
+    id: failover-logged
+    depends_on: [logs]
+    config:
+      require:
+        - {evidence_id: valkey.cluster.failure-detected-logged, source: logs}
+        - {evidence_id: valkey.cluster.election-won-logged, source: logs}
+required_events: [run-then-partition.completed, partition.partitioned, hold-then-heal.completed, partition.healed]
+required_evidence:
+  - {evidence_id: valkey.fault.injected, source: partition}
+  - {evidence_id: valkey.poll.satisfied, source: successor-promoted}
+  - {evidence_id: valkey.poll.satisfied, source: old-primary-demoted}
+  - {evidence_id: valkey.deployment.validated, source: deployment-state}

@@ -1,0 +1,8 @@
+description: The primary refuses every partial resync and answers each PSYNC with a full sync.
+catches: >-
+  valkey.replication-partial-resync: the forbidden "Full resync from primary" log line (reported by liveness)
+  and the psync oracle (no sync_partial_ok, a new full sync, no PSYNC log lines)
+scenarios:
+  - {file: scenario.yaml, fail: [liveness, psync]}
+runs: 5
+min_detection_rate: 1.0

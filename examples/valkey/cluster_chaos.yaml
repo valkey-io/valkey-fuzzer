@@ -1,0 +1,23 @@
+# Failovers with process kills on a 4-shard cluster, in two waves. Wave 1
+# kills an instance, then fails shards 0 and 2 over; wave 2 fails shard 0 over
+# again and kills a replica once that failover finished. A kill never takes
+# the last live member of a shard or a primary the quorum needs. The cluster
+# state is validated after every wave and at the end.
+# `valkey-fuzzer run --seed N --experiment valkey.cluster-chaos` generates
+# scenarios like this one.
+scenario_id: cluster-chaos-example
+seed: 4242
+experiment:
+  id: valkey.cluster-chaos
+  inputs:
+    waves:
+      - - {op: kill, target: any, signal: SIGKILL}
+        - {op: failover, shard: 0, delay_s: 1.5}
+        - {op: failover, shard: 2, force: true, delay_s: 0.5}
+      - - {op: failover, shard: 0, force: true}
+        - {op: kill, target: replica, after: 0, delay_s: 1}
+deployment:
+  mode: cluster
+  primaries: 4
+  replicas_per_primary: 2
+  base_port: 7400

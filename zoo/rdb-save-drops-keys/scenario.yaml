@@ -1,0 +1,8 @@
+scenario_id: zoo-rdb-save-drops-keys
+seed: 1303
+experiment:
+  id: valkey.snapshot-equivalence
+  inputs: {operations: 2000, stable_keys: 1000}
+deployment:
+  mode: standalone
+  base_port: 21080

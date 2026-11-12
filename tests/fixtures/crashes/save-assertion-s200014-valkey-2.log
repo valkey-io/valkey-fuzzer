@@ -1,0 +1,12 @@
+
+
+=== VALKEY BUG REPORT START: Cut & paste starting from here ===
+838767:M 29 Oct 2026 05:57:06.447 # === ASSERTION FAILED ===
+838767:M 29 Oct 2026 05:57:06.447 # ==> bgiteration.c:2699 'wasAdded' is not true
+
+------ STACK TRACE ------
+argv[0]: "SET"
+argv[1]: 15 bytes
+838767:M 29 Oct 2026 05:57:06.452 # === RECURSIVE ASSERTION FAILED ===
+838767:M 29 Oct 2026 05:57:06.452 # ==> object.c:414 'objectGetEncoding(o) == OBJ_ENCODING_EMBSTR' is not true
+

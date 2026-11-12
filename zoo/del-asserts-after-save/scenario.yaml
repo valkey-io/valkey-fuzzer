@@ -1,0 +1,12 @@
+scenario_id: zoo-del-asserts-after-save
+seed: 1306
+# A replica's initial full sync over disk makes the primary BGSAVE, and the
+# workload keeps sending DELs (aof-durability's mix has them) after it.
+experiment:
+  id: valkey.aof-durability
+deployment:
+  mode: standalone
+  replicas_per_primary: 1
+  base_port: 21200
+  server_config:
+    repl-diskless-sync: "no"

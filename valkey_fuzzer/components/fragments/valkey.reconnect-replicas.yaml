@@ -1,0 +1,20 @@
+# Drop every replica link from the primary side (CLIENT KILL TYPE replica,
+# the `drop-replica-links` action), then wait until every replica's link is
+# up again (the `links-up` poll). Fragments and experiments name what
+# `drop-replica-links` follows in its depends_on, and what `links-up` follows
+# when they add a step between the two.
+components:
+  - use: valkey.action.command
+    id: drop-replica-links
+    config: {instances: primaries, command: [CLIENT, KILL, TYPE, replica]}
+
+  - use: valkey.action.poll
+    id: links-up
+    depends_on: [drop-replica-links]
+    config:
+      instances: replicas
+      section: replication
+      field: master_link_status
+      predicate: {equals: up}
+      timeout_s: 120
+required_events: [drop-replica-links.completed]

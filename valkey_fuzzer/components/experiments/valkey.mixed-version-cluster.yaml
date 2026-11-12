@@ -1,0 +1,61 @@
+# Run a cluster whose nodes use different valkey-server builds (assigned with
+# deployment.valkey_binary and deployment.instance_binaries), drive writes, and fail over
+# a shard so a node of one build promotes while peers run another. Requires
+# at least two distinct builds; with one, the scenario was set up wrong and is
+# ERROR.
+# A graceful failover must not lose an acknowledged write; with
+# force_failover (CLUSTER FAILOVER FORCE) the old primary's writes from
+# shortly before the failover until it completed may be lost.
+extends: [valkey.base, valkey.history]
+id: valkey.mixed-version-cluster
+deployment:
+  modes: [cluster]
+  replicas_per_primary: {minimum: 1}
+metadata:
+  description: Mixed-build cluster with workload and failover; verifies each node runs its assigned binary
+  generator:
+    # Runs only with two builds: give them with --base (deployment.valkey_binary
+    # and deployment.instance_binaries); with one build the run is ERROR.
+    deployment:
+      cluster: {replicas_per_primary: {minimum: 1, maximum: 2}}
+    inputs:
+      failover_shard: {values: [0, 1, 2]}
+inputs:
+  properties:
+    failover_shard: {type: integer, minimum: 0, maximum: 15, default: 0}
+    force_failover: {type: boolean, default: false}
+components:
+  - use: valkey.capability.build-probe
+    id: build
+    config:
+      min_distinct_builds: 2
+
+  - use: valkey.action.failover
+    id: failover
+    depends_on: [writes]
+    config:
+      shard: {$ref: inputs.failover_shard}
+      force: {$ref: inputs.force_failover}
+
+  - use: valkey.oracle.binary-check
+    id: provenance
+    config: {min_distinct_builds: 2}
+
+  - use: valkey.oracle.deployment-state
+    id: deployment-state
+    config: {validation: {stabilization_wait: 2, validation_timeout: 120}}
+
+  - use: valkey.oracle.ledger
+    id: data
+    config:
+      # Only a forced failover opens a loss window.
+      loss_window_s: 1.0
+      loss_window_faults: [failover]
+      loss_window_scope: fault_targets
+      converge_timeout_s: 60
+required_events: [failover.completed]
+required_evidence:
+  - {evidence_id: valkey.capability.supported, source: build}
+  - {evidence_id: valkey.failover.result, source: failover}
+  - {evidence_id: valkey.binary.verified, source: provenance}
+  - {evidence_id: valkey.deployment.validated, source: deployment-state}

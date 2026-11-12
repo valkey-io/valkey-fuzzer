@@ -1,0 +1,8 @@
+scenario_id: zoo-psync-always-full-sync
+seed: 1307
+experiment:
+  id: valkey.replication-partial-resync
+deployment:
+  mode: standalone
+  replicas_per_primary: 1
+  base_port: 21240

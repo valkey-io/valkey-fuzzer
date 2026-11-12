@@ -1,0 +1,9 @@
+# Seeded workload plus BGSAVE whose evidence the `diff` command compares.
+scenario_id: snapshot-equivalence
+seed: 41
+experiment:
+  id: valkey.snapshot-equivalence
+  inputs: {operations: 3000, stable_keys: 1000}
+deployment:
+  mode: standalone
+  base_port: 7500

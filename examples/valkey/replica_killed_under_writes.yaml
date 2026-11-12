@@ -1,0 +1,14 @@
+# Run examples/valkey/experiments/replica-killed-under-writes.yaml: a replica
+# SIGKILLed while writes run, restarted at once.
+#
+#   valkey-fuzzer run examples/valkey/replica_killed_under_writes.yaml \
+#     --experiment-dir examples/valkey/experiments
+scenario_id: replica-killed-under-writes
+seed: 7
+experiment:
+  id: example.replica-killed-under-writes
+  inputs: {signal: SIGKILL, mutation_rate: 500}
+deployment:
+  mode: standalone
+  replicas_per_primary: 1
+  base_port: 7000

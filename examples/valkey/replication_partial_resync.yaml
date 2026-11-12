@@ -1,0 +1,9 @@
+# Drop the replica links and require a partial resync (no full sync).
+scenario_id: replication-partial-resync
+seed: 51
+experiment:
+  id: valkey.replication-partial-resync
+deployment:
+  mode: standalone
+  replicas_per_primary: 1
+  base_port: 7440

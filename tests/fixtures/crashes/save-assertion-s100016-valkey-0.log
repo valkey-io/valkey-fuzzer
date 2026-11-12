@@ -1,0 +1,13 @@
+562928:M 29 Oct 2026 05:12:09.891 * forkless-save: background processor started
+
+
+=== VALKEY BUG REPORT START: Cut & paste starting from here ===
+562928:M 29 Oct 2026 05:12:11.090 # === ASSERTION FAILED ===
+562928:M 29 Oct 2026 05:12:11.090 # ==> bgiteration.c:2699 'wasAdded' is not true
+
+------ STACK TRACE ------
+
+argv[0]: "SET"
+argv[1]: 15 bytes
+562928:M 29 Oct 2026 05:12:11.095 # valkey 255.255.255 crashed by signal: 11, si_code: 1
+562928:M 29 Oct 2026 05:12:11.095 # Accessing address: 0x6c6c610103ff

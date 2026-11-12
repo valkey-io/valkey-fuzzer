@@ -1,0 +1,6 @@
+description: A primary no longer refuses a second failover vote in an epoch it already voted in.
+catches: valkey.oracle.cluster-election-safety (one vote per primary per epoch, one winner per epoch)
+scenarios:
+  - {file: scenario.yaml, fail: [election-safety]}
+runs: 5
+min_detection_rate: 0.8

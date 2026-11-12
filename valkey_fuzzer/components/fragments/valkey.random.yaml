@@ -1,0 +1,83 @@
+# valkey.random: server config pools for random scenarios; no experiment
+# extends it. An experiment's metadata.generator lists the pools it draws from
+# (server_config: [valkey.pool.replication]); the generator draws each key's value uniformly, skipping keys a startup overlay of
+# the experiment sets. With scope: [deployment, role] it also draws whether every
+# instance shares one value or the primary and the replicas each draw their own.
+# A pool with default: true is drawn by every experiment without being listed
+# (after the pools it lists, which win a key both name): the default pools below
+# change how the server runs, never what it stores or replies, so every oracle
+# stays valid under them. A build that lacks or refuses one of their hidden or
+# build-dependent settings starts without it (UNOBSERVABLE_CONFIGS in
+# deployment/local/server_config.py).
+# `save` is left out: a background save it schedules would collide with an
+# experiment's own BGSAVE. repl-backlog-size is left out: a small backlog turns
+# the partial resyncs the replication experiments expect into full ones.
+metadata:
+  generator:
+    pools:
+      valkey.pool.persistence:
+        appendonly: ["yes", "no"]
+        appendfsync: [always, everysec, "no"]
+        aof-use-rdb-preamble: ["yes", "no"]
+      valkey.pool.replication:
+        repl-diskless-sync: ["yes", "no"]
+        repl-diskless-load: [disabled, on-empty-db, swapdb]
+        dual-channel-replication-enabled: ["no", "yes"]
+        repl-diskless-sync-delay: ["0", "1", "5"]
+      # At fuzzing load the IO threads of 9.1 and later never start (they start
+      # once the main thread is busy 30% of the time); io-threads-always-active,
+      # as upstream's --io-threads test mode sets, starts them on every event,
+      # and events-per-io-thread 0 does on 8.0 to 9.0. The copy-avoiding
+      # replies and the key prefetch batch are their paths. Each always-active
+      # IO thread spins through every event, about 0.4 of a core while a
+      # node serves a light load, so a node has at most three.
+      valkey.pool.io-threads:
+        default: true
+        scope: [deployment, role]
+        io-threads: ["1", "2", "4"]
+        io-threads-always-active: ["no", "yes"]
+        events-per-io-thread: ["2", "0"]
+        io-threads-do-reads: ["no", "yes"]
+        min-io-threads-avoid-copy-reply: ["2", "7"]
+        min-string-size-avoid-copy-reply: ["64", "16384"]
+        min-string-size-avoid-copy-reply-threaded: ["64", "65536"]
+        prefetch-batch-max-size: ["0", "16", "128"]
+      # Each eviction policy under the deployment's maxmemory (the local
+      # provider's 500mb), which no experiment's dataset reaches: the policy
+      # changes what every access records (LRU clock or LFU counter) and what an
+      # RDB holds per key (its idle time or frequency), not the data. Eviction
+      # itself deletes keys the ledger, the snapshot oracles, and the cluster
+      # data-consistency keys expect, so no experiment draws a maxmemory it
+      # reaches. Active defragmentation runs on a small dataset only with the
+      # lowered thresholds.
+      valkey.pool.memory:
+        default: true
+        scope: [deployment, role]
+        maxmemory-policy:
+          [noeviction, allkeys-lru, allkeys-lfu, allkeys-random, volatile-lru, volatile-lfu, volatile-random, volatile-ttl]
+        lazyfree-lazy-eviction: ["no", "yes"]
+        lazyfree-lazy-expire: ["no", "yes"]
+        lazyfree-lazy-server-del: ["no", "yes"]
+        lazyfree-lazy-user-del: ["no", "yes"]
+        lazyfree-lazy-user-flush: ["no", "yes"]
+        replica-lazy-flush: ["no", "yes"]
+        activedefrag: ["no", "yes"]
+        active-defrag-ignore-bytes: ["1", "100mb"]
+        active-defrag-threshold-lower: ["0", "10"]
+      # Encoding thresholds: a value that never or soon leaves the compact
+      # encoding (0 never uses it), so values convert as the workload writes,
+      # and Valkey's default.
+      valkey.pool.encodings:
+        default: true
+        scope: [deployment, role]
+        hash-max-listpack-entries: ["0", "2", "512"]
+        hash-max-listpack-value: ["0", "8", "64"]
+        set-max-intset-entries: ["0", "2", "512"]
+        set-max-listpack-entries: ["0", "2", "128"]
+        set-max-listpack-value: ["0", "8", "64"]
+        zset-max-listpack-entries: ["0", "2", "128"]
+        zset-max-listpack-value: ["0", "8", "64"]
+        list-max-listpack-size: ["-5", "1", "4", "-2"]
+        list-compress-depth: ["0", "1", "3"]
+        stream-node-max-entries: ["1", "2", "100"]
+        stream-node-max-bytes: ["64", "4096"]

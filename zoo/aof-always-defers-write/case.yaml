@@ -1,0 +1,8 @@
+description: >-
+  With appendfsync always, the primary keeps acknowledged writes in its AOF buffer until 1 MB accumulates
+  instead of writing and fsyncing them before replying, so a SIGKILL loses them.
+catches: valkey.oracle.ledger with loss_window_s 0 (aof-durability)
+scenarios:
+  - {file: scenario.yaml, fail: [data]}
+runs: 5
+min_detection_rate: 1.0

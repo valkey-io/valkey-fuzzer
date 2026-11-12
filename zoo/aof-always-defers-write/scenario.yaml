@@ -1,0 +1,8 @@
+scenario_id: zoo-aof-always-defers-write
+seed: 1302
+experiment:
+  id: valkey.aof-durability
+  inputs: {appendfsync: always, loss_window_s: 0}
+deployment:
+  mode: standalone
+  base_port: 21040

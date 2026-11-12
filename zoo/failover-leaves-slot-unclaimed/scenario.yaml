@@ -1,0 +1,17 @@
+scenario_id: zoo-failover-leaves-slot-unclaimed
+seed: 1304
+experiment:
+  id: valkey.cluster-chaos
+  inputs:
+    waves:
+      - [{op: failover, shard: 0, timeout_s: 30}]
+    validation:
+      stabilization_wait: 5.0
+      validation_timeout: 30.0
+      cluster_status_config: {acceptable_states: [ok, unknown]}
+      replication_config: {max_acceptable_lag: 15.0}
+deployment:
+  mode: cluster
+  primaries: 3
+  replicas_per_primary: 1
+  base_port: 21120

@@ -1,0 +1,17 @@
+# Put the node's data on a 32 MB tmpfs, fill it, and require graceful errors
+# and recovery (Linux, root).
+scenario_id: bgsave-disk-full
+seed: 71
+resources:
+  disk:
+    use: valkey.resource.tmpfs
+    with: {size_mb: 32}
+experiment:
+  id: valkey.bgsave-disk-full
+  inputs:
+    disk: {$ref: resources.disk.path}
+deployment:
+  mode: standalone
+  base_port: 7480
+  instance_data_roots:
+    primary: {$ref: resources.disk.path}
