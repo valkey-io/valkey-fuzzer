@@ -112,6 +112,28 @@ _VARIES = (
 _SCRIPT_CALL = re.compile(r"""CALL\s*\(\s*(['"])([\w-]+)\1(?:\s*,\s*(['"])([\w-]+)\3)?""")
 # Why the compat check leaves the parent's data uncompared: see changed_write.
 _CHANGED = "the merge changes what {} writes, so the parent's data may hold what the candidate never makes"
+# Valkey reads RDB versions 12 to 79 as Redis's ("foreign") and refuses them. Development builds of 8.0 wrote 12
+# before 8.0 shipped with 11, so a parent from then writes what a later candidate refuses by design (fuzzer#129).
+_FOREIGN_RDB_VERSIONS = range(12, 80)
+_RDB_VERSION_REFUSED = re.compile(r"Can't handle RDB format version (\d+)")
+_FOREIGN_RDB = (
+    "the parent wrote RDB version {}, which the candidate reads as a Redis RDB and refuses "
+    "(8.0's development builds wrote 12 before 8.0 shipped with 11)"
+)
+
+
+def _foreign_rdb_refusal(side: Any) -> Optional[int]:
+    """The RDB version node 0 of ``side`` logged it refused as a foreign (Redis) one, or None."""
+
+    try:
+        with open(side.nodes[0].server.log_path, encoding="utf-8", errors="replace") as handle:
+            versions = [int(found) for found in _RDB_VERSION_REFUSED.findall(handle.read())]
+    except OSError:
+        return None
+    foreign = [version for version in versions if version in _FOREIGN_RDB_VERSIONS]
+    return foreign[-1] if foreign else None
+
+
 # Commands that reply with the NOPERM of the commands they run: the ACL check does not judge them.
 _RUNS_OTHERS = ("EVAL", "EVALSHA", "EVAL_RO", "EVALSHA_RO", "FCALL", "FCALL_RO")
 # A NOPERM error, as the connection records it: valkey-py drops the NOPERM (and ERR) code, so it is known by its
@@ -1298,6 +1320,7 @@ class _Checks:
         # The RDB is what it loads, whatever server_config says of the AOF.
         side, failed = self.start("candidate.compat-load", files=files, options={"appendonly": "no"})
         mine: dict[str, Any] = {}
+        refused = _foreign_rdb_refusal(side) if failed else None
         try:
             if not failed and not self.loaded(side, 0):
                 # A key-load-delay the sequence sets slows the load at startup (the walk's test of valkey#1317).
@@ -1315,6 +1338,8 @@ class _Checks:
         diagnostics = {"reason": "compat-load", "rdb": rdb}
         if failed and side.exited is not None:
             cause = side.crash_cause()
+            if refused is not None and not side.crashed():
+                return _skipped(_FOREIGN_RDB.format(refused))
             # A controlled refusal to load the parent's data (a fatal log, not a crash) is expected when the
             # merge hardens a loader to reject what the parent wrote: the parent's RDB holds what the candidate
             # never makes, as on the digest path below.
@@ -1343,13 +1368,18 @@ class _Checks:
             return _skipped("the sequence sets its node's replication itself")
         side, failed = self.start("candidate.compat-sync")
         synced, state = False, {}
+        refused = None
         try:
             if not failed:
                 synced, state = self.replicate((parent, 0), (side, 0))
+            if not synced:
+                refused = _foreign_rdb_refusal(side)
         finally:
             self.finish(side)
         if not synced and state.get("link") == "up" and state["primary"]["offset"] == state["replica"]["offset"]:
             synced = state["replica"]["digest"] == self.own_digest()
+        if refused is not None and not side.crashed():
+            return _skipped(_FOREIGN_RDB.format(refused))
         # Refusing to load what only the parent writes, as on the load path (fuzzer#84).
         if changed and side.exited is not None and not side.crashed():
             return _skipped(_CHANGED.format(changed))

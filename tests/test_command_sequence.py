@@ -112,6 +112,8 @@ class FakeServer:
             return f"*** FATAL CONFIG FILE ERROR *** Bad directive or wrong number of arguments: {rejected[0]}"
         if self.build.rdb_load_exits and self.files.get("dump.rdb"):
             with open(self.log_path, "a") as log:
+                if isinstance(self.build.rdb_load_exits, str):
+                    log.write(self.build.rdb_load_exits)
                 log.write("1:M 03 Nov 2026 10:00:03.000 # Terminating server after rdb file reading failure.\n")
             self.process.returncode = 1
             return "Terminating server after rdb file reading failure."
@@ -2733,6 +2735,24 @@ def test_a_sync_the_merge_hardens_to_refuse_is_skipped_not_a_crash(builds, monke
     sync = _check(value, "compat")["sync"]
     assert sync["outcome"] == outcome, sync
     assert result.crash is crash
+
+
+@pytest.mark.parametrize(("version", "outcome"), [(12, "skipped"), (11, "fail")])
+def test_a_parent_rdb_version_the_candidate_reads_as_redis_is_skipped(builds, monkeypatch, version, outcome):
+    # The walk's tests of valkey-io/valkey#660 and #662 on unstable (fuzzer#129): their parent, a development build
+    # of 8.0, wrote RDB version 12, which later Valkey reads as Redis's and refuses. Refusing a version Valkey
+    # released (11) is still a finding.
+    monkeypatch.setattr(checks, "_SYNC_TIMEOUT_S", 0.2)
+    candidate = BUILDS[builds["candidate"]]
+    candidate.rdb_load_exits = f"1:M 12 Nov 2026 05:25:25.460 # Can't handle RDB format version {version}\n"
+    _replicating(lambda server: b"d0" if ("SET", "k0", "v") in server.sent else b"empty")
+    _saving(BUILDS[builds["parent"]])
+    _, value = run(builds, [{"command": ["SET", "k0", "v"]}], checks={"compat": True})
+
+    load = _check(value, "compat")["load"]
+    assert load["outcome"] == outcome, load
+    if outcome == "skipped":
+        assert load["reason"].startswith("the parent wrote RDB version 12, which the candidate reads as a Redis RDB")
 
 
 def test_a_parent_that_crashes_making_the_replicas_rdb_fails_no_candidate(builds, monkeypatch):
