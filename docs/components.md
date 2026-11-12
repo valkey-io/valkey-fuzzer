@@ -1006,7 +1006,7 @@ stalls, and partitions, and avoid the replicas those disrupt.
 Ownership: every change the action makes and will undo is an
 [undo obligation](contracts.md#fault-ownership) from the moment it
 applies it: a stall (`process.paused`), a partition (`network.partition`),
-each instance a `backlog_pressure` or `compression` changes
+each instance a `backlog_pressure` changes
 (`server.config`), a kill, which the heal or a `restart` undoes
 (`process.stopped`), and the validation's `CLIENT PAUSE`
 (`server.client-pause`). An undo that fails leaves its obligation open for

@@ -477,7 +477,7 @@ def check_inputs(env):
             "valkey.artifact.local-module",
             os.path.join(env["MODULE_PARENT_DIR"], module_file),
         )
-    # 4 seeds of the 17 one-build experiments is 68 runs: what two workers finish inside the job's timeout.
+    # 4 seeds of each one-build experiment is what two workers finish inside the job's timeout.
     if not re.fullmatch(r"[0-4]", env["INPUT_RANDOM_SEEDS"]):
         raise SystemExit("random_seeds must be 0 to 4")
     if not re.fullmatch(r"[A-Za-z0-9_.-]{0,100}", env["INPUT_REQUEST_ID"]):

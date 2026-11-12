@@ -703,11 +703,11 @@ Inputs not listed use the `valkey.writes` ranges.
 | `valkey.cluster-election-durability` | 3-5 primaries, 1-2 replicas | `save_behavior`, `election`, `second_election`, `shard` 0-2, `vote_occurrence` 1-2, restart and second-election delays | |
 | `valkey.cluster-partition` | 3-5 primaries, 1 replica, per-instance loopback | `hold_after_failover_s` 0-3 | |
 | `valkey.mixed-version-cluster` | 3 primaries, 1-2 replicas | `failover_shard` 0-2, `force_failover` | |
-| `valkey.replication-chaos` | standalone, 1-4 replicas | `waves`, `wait_replicas`, stable keys up to 5000, rate 50-1000, value size 16 B-16 kB | compression |
-| `valkey.replication-full-resync` | standalone 1-3 or cluster 1-2 replicas | rate 1000-3000, mutable keys 100-1000, value size 16 or 64 kB, `pause_s` 3-5 | replication, compression |
-| `valkey.replication-partial-resync` | standalone 1-3 or cluster 1-2 replicas | rate up to 2000, value size up to 1 kB, `disconnect_after_s` 0.5-3 | replication, compression |
+| `valkey.replication-chaos` | standalone, 1-4 replicas | `waves`, `wait_replicas`, stable keys up to 5000, rate 50-1000, value size 16 B-16 kB | |
+| `valkey.replication-full-resync` | standalone 1-3 or cluster 1-2 replicas | rate 1000-3000, mutable keys 100-1000, value size 16 or 64 kB, `pause_s` 3-5 | replication |
+| `valkey.replication-partial-resync` | standalone 1-3 or cluster 1-2 replicas | rate up to 2000, value size up to 1 kB, `disconnect_after_s` 0.5-3 | replication |
 | `valkey.rolling-upgrade` | standalone or cluster, 1-2 replicas | | |
-| `valkey.snapshot-equivalence` | standalone or cluster, 0-2 replicas | `operations` 1-3000, rate 500-5000, value size up to 8 kB | persistence, replication, compression |
+| `valkey.snapshot-equivalence` | standalone or cluster, 0-2 replicas | `operations` 1-3000, rate 500-5000, value size up to 8 kB | persistence, replication |
 
 Durability windows (`loss_window_s`, `loss_window_after_s`) are never drawn
 wider than the configuration needs: a wider window would only loosen what

@@ -505,8 +505,8 @@ of the drawn deployment mode.
   by `op` with every kind's timing and fields and their bounds, so the
   compiler rejects a malformed operation with the path to its field. The implementation
   is a `_<name>` method: `kill` is the engine's; `failover` is the
-  cluster's; `restart`, `promote`, `repoint`, `partition`, `stall`,
-  `backlog_pressure`, and `compression` are standalone's.
+  cluster's; `restart`, `promote`, `repoint`, `partition`, `stall`, and
+  `backlog_pressure` are standalone's.
 - **Ownership**: `WaveRun.own` opens an
   [undo obligation](contracts.md#fault-ownership) for every change the
   engine applies and will undo, recorded with the operation that owns it: a
