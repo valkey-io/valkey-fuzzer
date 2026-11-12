@@ -1434,6 +1434,17 @@ def test_variants_leave_internals_and_configuration_alone(builds, command):
     assert result.status.value == "PASS", result.summary
 
 
+def test_variants_compare_a_number_over_pythons_digit_limit_as_its_text(builds):
+    # The walk's test of valkey#4690: HGET of a long double near 1e4932 replies 4933 digits, over int()'s
+    # default 4300-digit limit, and the ValueError erred the whole run (action.run: Exceeds the limit).
+    big = "1" + "0" * 4932
+    for build in BUILDS.values():
+        build.replies = {("HGET", "h", "big"): big.encode()}
+    result, _ = run(builds, [{"command": ["HGET", "h", "big"]}], checks={"variants": True})
+
+    assert result.status.value == "PASS", result.summary
+
+
 @pytest.mark.parametrize(
     ("loads", "command", "status"),
     [

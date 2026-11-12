@@ -488,7 +488,12 @@ def _scalar(value: Any) -> Any:
     if isinstance(value, bool):
         return 1 if value else None
     if isinstance(value, str) and _NUMBER.fullmatch(value):
-        value = int(value) if _INTEGER.fullmatch(value) else float(value)
+        try:
+            value = int(value) if _INTEGER.fullmatch(value) else float(value)
+        except ValueError:
+            # Over Python's integer-string digit limit (a long double near 1e4932 printed in full, the walk's
+            # test of valkey#4690): it compares as its text.
+            return value
     if isinstance(value, float):
         return int(value) if value.is_integer() else value if math.isfinite(value) else str(value)
     return value
