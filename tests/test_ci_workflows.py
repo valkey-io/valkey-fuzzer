@@ -14,6 +14,7 @@ import pytest
 import yaml
 
 from valkey_fuzzer.cli import create_parser
+from valkey_fuzzer.generator import GeneratorBlock, installed_pools, opted_in
 from valkey_fuzzer.reports import write_document
 from valkey_fuzzer.results import ComponentResult, ComponentStatus, OutcomeStatus, RunOutcome
 
@@ -56,21 +57,20 @@ def test_pr_fuzzer_keeps_its_reusable_workflow_inputs_and_jobs():
 WORKFLOW_NAMES = sorted(path.name for path in WORKFLOWS.glob("*.yml"))
 
 
-@pytest.mark.parametrize("name", WORKFLOW_NAMES)
-def test_every_valkey_fuzzer_command_in_a_workflow_parses_with_the_cli(name):
+def _fuzzer_commands(name):
+    """Every valkey-fuzzer command of workflow ``name``, parsed by the CLI."""
+
     scripts = "\n".join(_run_scripts(_workflow(name)))
     # A command run as root keeps the runner's PATH: read it as the command it runs.
     commands = [
         re.sub(r'^sudo -E env "PATH=\$\{?PATH\}?" ', "", line.strip())
         for line in re.sub(r"\\\n\s*", " ", scripts).splitlines()
     ]
-    # The workflows that only run pytest or ruff name no valkey-fuzzer command.
-    no_cli = ("lint.yml", "test.yml")
-    assert any(line.startswith("valkey-fuzzer ") for line in commands) or name in no_cli
     # A bash array ("${name[@]}") stands for the arguments its literal lists; one assigned in a loop stands
     # for none.
     # An array literal ends with ")" at the end of a line; a ")" inside, as in "$((16#...))", does not end it.
     arrays = {name: shlex.split(body) for name, body in re.findall(r"^\s*(\w+)=\((.*?)\)[ \t]*$", scripts, re.M | re.S)}
+    parsed = []
     for line in commands:
         if line.startswith("valkey-fuzzer "):
             tokens = shlex.split(re.split(r"\s(?:2>&1|\|\||\||>)\s", line)[0])
@@ -79,7 +79,44 @@ def test_every_valkey_fuzzer_command_in_a_workflow_parses_with_the_cli(name):
                 array = re.fullmatch(r"\$\{(\w+)\[@\]\}", token)
                 arguments += arrays.get(array.group(1), []) if array else [token]
             # A shell variable stands in as "1", which every option type (a path, a count, a seed) accepts.
-            create_parser().parse_args(["1" if "$" in token else token for token in arguments])
+            parsed.append(create_parser().parse_args(["1" if "$" in token else token for token in arguments]))
+    return parsed
+
+
+@pytest.mark.parametrize("name", WORKFLOW_NAMES)
+def test_every_valkey_fuzzer_command_in_a_workflow_parses_with_the_cli(name):
+    # The workflows that only run pytest or ruff name no valkey-fuzzer command.
+    no_cli = ("lint.yml", "test.yml")
+    assert _fuzzer_commands(name) or name in no_cli
+
+
+def _drawn():
+    """The shipped experiments the generator draws, their inputs, and the server config keys of the pools."""
+
+    catalog = valkey_service().catalog
+    pools = installed_pools(catalog)
+    experiments = opted_in(catalog)
+    inputs = {
+        f"inputs.{item}"
+        for experiment in experiments
+        for item in GeneratorBlock.parse(catalog.experiments.resolve(experiment), pools).inputs
+    }
+    keys = {f"server_config.{key}" for pool in pools.values() for key in pool if key not in ("scope", "default")}
+    return set(experiments), inputs | keys
+
+
+@pytest.mark.parametrize("name", WORKFLOW_NAMES)
+def test_every_experiment_and_exclusion_a_workflow_names_is_drawn(name):
+    experiments, paths = _drawn()
+    for args in _fuzzer_commands(name):
+        # A proposed.* experiment is one the workflow writes itself.
+        for experiment in getattr(args, "experiments", None) or []:
+            assert experiment in experiments or experiment == "all" or experiment.startswith("proposed."), experiment
+        for item in getattr(args, "excludes", None) or []:
+            if item.path == "experiment":
+                assert item.value in experiments, f"{name} excludes {item}, which is not a shipped experiment"
+            else:
+                assert item.path in paths, f"{name} excludes {item}, which no shipped experiment or pool draws"
 
 
 @pytest.mark.parametrize("name", WORKFLOW_NAMES)
